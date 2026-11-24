@@ -122,6 +122,10 @@ struct App {
     show_on_start: bool,
     system_dark: bool,
     mods: ModifiersState,
+    /// When this process started, to tell an updated program file from ours
+    started: std::time::SystemTime,
+    /// Shown the new-release notice this run
+    notice_pending: bool,
 }
 
 impl App {
@@ -259,6 +263,9 @@ impl App {
                 self.ui.menu = None;
                 self.ui.gear = false;
             }
+            Action::Update => {
+                let _ = self.commands.send(Command::InstallUpdate);
+            }
             Action::SetExit(key) => {
                 self.ui.menu = None;
                 let req = retail_proto::api::PrefsRequest { exit_node: Some(key), ..Default::default() };
@@ -370,8 +377,11 @@ impl App {
         self.dashboard.cursor = None;
         self.dashboard.confirm_stop = None;
         self.dashboard.confirm_remove = None;
-        // Don't keep the invite (a secret) on screen after the window closes
-        self.dashboard.invite = None;
+        // Don't keep an invite (a secret) on screen after the window closes
+        self.dashboard.shown = None;
+        self.dashboard.draft = None;
+        self.dashboard.invite_menu = None;
+        self.dashboard.invite_note = None;
         self.update_poll_rate();
     }
 
@@ -388,6 +398,12 @@ impl App {
 
     fn run_dashboard_action(&mut self, action: DashAction) {
         let d = &mut self.dashboard;
+        let menu = d.invite_menu.take();
+        if !matches!(action, DashAction::FocusName)
+            && let Some(draft) = d.draft.as_mut()
+        {
+            draft.focused = false;
+        }
         match action {
             DashAction::Start => {
                 d.busy = Some(Instant::now());
@@ -398,28 +414,14 @@ impl App {
                 if d.stop_armed() {
                     d.confirm_stop = None;
                     d.busy = Some(Instant::now());
-                    d.invite = None;
+                    d.shown = None;
                     let _ = self.commands.send(Command::Server(ServerCommand::Stop));
                 } else {
                     d.confirm_stop = Some(Instant::now());
                 }
             }
-            DashAction::Invite => {
-                d.busy = Some(Instant::now());
-                let _ = self.commands.send(Command::Server(ServerCommand::Invite));
-            }
             DashAction::OpenWeb => {
                 let _ = self.commands.send(Command::Server(ServerCommand::OpenWeb));
-            }
-            DashAction::CopyInvite => {
-                if let Some(inv) = &d.invite {
-                    let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(inv.code.clone())).is_ok();
-                    d.message = Some(if ok {
-                        (tr("Invite code copied.").into(), false)
-                    } else {
-                        (tr("Can't use the clipboard").into(), true)
-                    });
-                }
             }
             DashAction::Remove(id) => {
                 if d.remove_armed(id) {
@@ -429,7 +431,120 @@ impl App {
                     d.confirm_remove = Some((id, Instant::now()));
                 }
             }
+            DashAction::NewInvite => {
+                d.shown = None;
+                d.invite_note = None;
+                d.draft = Some(crate::dashboard::Draft {
+                    multi: true,
+                    ttl: None,
+                    name: crate::input::TextInput::new("", false),
+                    focused: true,
+                });
+            }
+            DashAction::DraftMulti(multi) => {
+                if let Some(draft) = d.draft.as_mut() {
+                    draft.multi = multi;
+                    draft.focused = multi;
+                }
+            }
+            DashAction::DraftTtl(ttl) => {
+                if let Some(draft) = d.draft.as_mut() {
+                    draft.ttl = ttl;
+                }
+            }
+            DashAction::FocusName => {
+                if let Some(draft) = d.draft.as_mut() {
+                    draft.focused = true;
+                }
+            }
+            DashAction::CancelDraft => d.draft = None,
+            DashAction::CreateInvite => self.create_invite(),
+            DashAction::InviteMenu(id) => d.invite_menu = (menu != Some(id)).then_some(id),
+            DashAction::ShowCode(id) => {
+                let _ = self.commands.send(Command::Server(ServerCommand::Code { id, copy: false }));
+            }
+            DashAction::CopyCode(id) => {
+                let _ = self.commands.send(Command::Server(ServerCommand::Code { id, copy: true }));
+            }
+            DashAction::NewCode(id) => {
+                if let Some(name) = d.invite_name(id) {
+                    d.busy = Some(Instant::now());
+                    d.creating = Some((trf("Invite '{name}'", &[("name", &name)]), false));
+                    d.invite_note = Some((tr("New code made. The old code and the installers that contain it no longer work.").into(), false));
+                    d.saved = None;
+                    let req = retail_proto::api::InviteRequest { name: Some(name), ..Default::default() };
+                    let _ = self.commands.send(Command::Server(ServerCommand::CreateInvite(req)));
+                }
+            }
+            DashAction::Revoke(id) => {
+                if d.revoke_armed(id) {
+                    d.confirm_revoke = None;
+                    d.shown = None;
+                    let _ = self.commands.send(Command::Server(ServerCommand::Revoke(id)));
+                } else {
+                    // Keep the menu open to show the armed item
+                    d.confirm_revoke = Some((id, Instant::now()));
+                    d.invite_menu = Some(id);
+                }
+            }
+            DashAction::Download(id, variant) => {
+                d.saved = None;
+                d.invite_note = Some((tr("Preparing the installer… The first one for another system is fetched from GitHub and takes a while.").into(), false));
+                let dir = crate::api::downloads_dir();
+                let _ = self.commands.send(Command::Server(ServerCommand::Package { id, variant: variant.to_string(), dir }));
+            }
+            DashAction::CopyShown => {
+                if let Some(shown) = &d.shown {
+                    let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(shown.code.clone())).is_ok();
+                    d.invite_note = Some(if ok { (tr("Invite code copied.").into(), false) } else { (tr("Can't use the clipboard").into(), true) });
+                }
+            }
+            DashAction::CloseShown => d.shown = None,
+            DashAction::Reveal => {
+                if let Some(path) = &d.saved {
+                    crate::api::reveal(path);
+                }
+            }
         }
+    }
+
+    fn create_invite(&mut self) {
+        let d = &mut self.dashboard;
+        let Some(draft) = &d.draft else { return };
+        let name = draft.name.trimmed().to_string();
+        let req = if draft.multi {
+            if name.is_empty() {
+                return;
+            }
+            let exists = matches!(&d.status, Some(Ok(s)) if s.invites.iter().any(|i| i.name.as_deref() == Some(name.as_str())));
+            if exists {
+                d.invite_note = Some((tr("An invite with this name exists: its code was replaced, and the old one no longer works.").into(), false));
+            }
+            d.creating = Some((trf("Invite '{name}'", &[("name", &name)]), false));
+            retail_proto::api::InviteRequest { name: Some(name), ttl_hours: draft.ttl, ..Default::default() }
+        } else {
+            d.creating = Some((tr("One-time invite").into(), true));
+            retail_proto::api::InviteRequest::default()
+        };
+        d.busy = Some(Instant::now());
+        let _ = self.commands.send(Command::Server(ServerCommand::CreateInvite(req)));
+    }
+
+    fn dashboard_key(&mut self, event: &KeyEvent) {
+        let shortcut = if cfg!(target_os = "macos") { self.mods.super_key() } else { self.mods.control_key() };
+        let d = &mut self.dashboard;
+        if event.logical_key == Key::Named(NamedKey::Escape) {
+            if d.invite_menu.take().is_none() && d.draft.take().is_none() {
+                d.shown = None;
+            }
+            return;
+        }
+        let Some(draft) = d.draft.as_mut().filter(|dr| dr.focused) else { return };
+        if event.logical_key == Key::Named(NamedKey::Enter) {
+            self.create_invite();
+            return;
+        }
+        edit_input(&mut draft.name, event, shortcut);
     }
 
     /// Host of the server this device uses, unless it is the network hosted here
@@ -504,6 +619,19 @@ impl App {
                 self.settings.lang = pref;
                 self.redraw_all();
             }
+            SettingsAction::CheckUpdate => {
+                st.busy = Some(Instant::now());
+                st.message = None;
+                let _ = self.commands.send(Command::CheckUpdate);
+            }
+            SettingsAction::InstallUpdate => {
+                st.message = None;
+                let _ = self.commands.send(Command::InstallUpdate);
+            }
+            SettingsAction::AutoUpdate(on) => {
+                let req = retail_proto::api::PrefsRequest { auto_update: Some(on), ..Default::default() };
+                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+            }
             SettingsAction::AdvertiseExit(on) => {
                 let req = retail_proto::api::PrefsRequest { advertise_exit_node: Some(on), ..Default::default() };
                 let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
@@ -577,32 +705,7 @@ impl App {
             _ => {}
         }
         let Some(i) = st.focus else { return };
-        let input = &mut st.inputs[i];
-        match &event.logical_key {
-            Key::Named(NamedKey::Backspace) => input.backspace(),
-            Key::Named(NamedKey::Delete) => input.delete(),
-            Key::Named(NamedKey::ArrowLeft) => input.left(),
-            Key::Named(NamedKey::ArrowRight) => input.right(),
-            Key::Named(NamedKey::Home) => input.home(),
-            Key::Named(NamedKey::End) => input.end(),
-            Key::Character(c) if shortcut => match c.to_lowercase().as_str() {
-                "a" => input.select_all(),
-                "v" => {
-                    if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-                        input.insert(text.trim());
-                    }
-                }
-                "c" if !input.secret => {
-                    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(input.value.clone()));
-                }
-                _ => {}
-            },
-            _ => {
-                if !shortcut && let Some(text) = &event.text {
-                    input.insert(text);
-                }
-            }
-        }
+        edit_input(&mut st.inputs[i], event, shortcut);
         st.message = None;
     }
 
@@ -612,6 +715,20 @@ impl App {
             Err(_) => View::Offline,
         };
         self.settings.view = self.ui.view.clone();
+        if let View::Status(s) = &self.ui.view {
+            let update = s.update.clone();
+            let auto = s.prefs.auto_update;
+            self.after_update(&update.current);
+            // Tell the user about each new release once, unless it installs itself
+            if update.available && !auto && !update.installing && update.latest.is_some() && update.latest != self.config.notified_update {
+                self.config.notified_update = update.latest.clone();
+                self.config.save();
+                self.notice_pending = true;
+            }
+        }
+        if std::mem::take(&mut self.notice_pending) && self.popup.is_some() && !self.popup_visible() {
+            self.show_popup(self.last_anchor);
+        }
         if self.ui.pending.is_some_and(|(target, _)| target == self.ui.is_running()) {
             self.ui.pending = None;
         }
@@ -629,8 +746,26 @@ impl App {
         }
     }
 
+    /// The daemon updated itself and replaced this program's file: start the
+    /// new one in its place
+    fn after_update(&self, daemon_version: &str) {
+        if !newer_version(daemon_version, env!("CARGO_PKG_VERSION")) {
+            return;
+        }
+        let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) else { return };
+        let me = dir.join(if cfg!(windows) { "retail-tray.exe" } else { "retail-tray" });
+        let replaced = std::fs::metadata(&me).and_then(|m| m.modified()).is_ok_and(|t| t > self.started);
+        if replaced && std::process::Command::new(&me).spawn().is_ok() {
+            std::process::exit(0);
+        }
+    }
+
     fn on_action(&mut self, origin: Origin, kind: ActionKind, result: Result<StatusResponse, String>) {
         match (origin, result) {
+            (Origin::Settings, Ok(s)) if kind == ActionKind::Update => {
+                self.settings.busy = None;
+                self.on_status(Ok(s));
+            }
             (Origin::Settings, Ok(s)) => {
                 let st = &mut self.settings;
                 st.busy = None;
@@ -638,6 +773,8 @@ impl App {
                     ActionKind::Logout => (tr("Logged out. This device's keys were deleted.").into(), false),
                     ActionKind::Prefs => (tr("Saved.").into(), false),
                     ActionKind::Forget => (tr("Removed from the list.").into(), false),
+                    // The update row says how it went
+                    ActionKind::Update => (String::new(), false),
                     _ => (trf("Connected to {server}", &[("server", &s.server.as_deref().map_or(tr("the server").to_string(), settings::server_label))]), false),
                 });
                 if kind != ActionKind::Forget {
@@ -714,7 +851,8 @@ impl ApplicationHandler<UserEvent> for App {
                 match result {
                     Ok(s) => {
                         if !s.running {
-                            d.invite = None;
+                            d.shown = None;
+                            d.draft = None;
                         }
                         d.status = Some(Ok(s));
                     }
@@ -730,10 +868,47 @@ impl ApplicationHandler<UserEvent> for App {
                 d.busy = None;
                 match result {
                     Ok(inv) => {
-                        d.invite = Some(inv);
+                        let (title, one_time) = d.creating.take().unwrap_or_else(|| (tr("One-time invite").into(), true));
+                        d.shown = Some(dashboard::Shown { title, code: inv.code, expires_at: one_time.then_some(inv.expires_at) });
+                        d.draft = None;
                         d.message = None;
                     }
-                    Err(e) => d.message = Some((e, true)),
+                    Err(e) => {
+                        d.creating = None;
+                        d.invite_note = Some((e, true));
+                    }
+                }
+                self.redraw_dashboard();
+            }
+            UserEvent::Api(ApiEvent::Code { id, copy, result }) => {
+                let d = &mut self.dashboard;
+                match result {
+                    Ok(code) if copy => {
+                        let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(code)).is_ok();
+                        d.invite_note = Some(if ok { (tr("Invite code copied.").into(), false) } else { (tr("Can't use the clipboard").into(), true) });
+                    }
+                    Ok(code) => {
+                        let name = d.invite_name(id).unwrap_or_default();
+                        d.shown = Some(dashboard::Shown { title: trf("Invite '{name}'", &[("name", &name)]), code, expires_at: None });
+                        d.draft = None;
+                    }
+                    Err(e) => d.invite_note = Some((e, true)),
+                }
+                self.redraw_dashboard();
+            }
+            UserEvent::Api(ApiEvent::Saved(result)) => {
+                let d = &mut self.dashboard;
+                match result {
+                    Ok(path) => {
+                        let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                        let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                        d.invite_note = Some((trf("Saved {file} in {dir}. Send it to the person joining; running it is all they do.", &[("file", &file), ("dir", &dir)]), false));
+                        d.saved = Some(path);
+                    }
+                    Err(e) => {
+                        d.saved = None;
+                        d.invite_note = Some((e, true));
+                    }
                 }
                 self.redraw_dashboard();
             }
@@ -769,8 +944,15 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.redraw_dashboard();
                 }
-                WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Escape) => {
-                    self.close_dashboard();
+                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                    // Escape closes a menu, the form or the code first, then the window
+                    let open = self.dashboard.invite_menu.is_some() || self.dashboard.draft.is_some() || self.dashboard.shown.is_some();
+                    if event.logical_key == Key::Named(NamedKey::Escape) && !open {
+                        self.close_dashboard();
+                    } else {
+                        self.dashboard_key(&event);
+                        self.redraw_dashboard();
+                    }
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
                     let rows = match delta {
@@ -779,7 +961,7 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     if let Some((x, y)) = self.dashboard.cursor
                         && rows != 0
-                        && self.dashboard.scroll_nodes(x, y, rows)
+                        && (self.dashboard.scroll_nodes(x, y, rows) || self.dashboard.scroll_invites(x, y, rows))
                     {
                         self.redraw_dashboard();
                     }
@@ -948,6 +1130,44 @@ fn round_corners(window: &Window) {
     }
 }
 
+/// Whether version `a` is newer than `b` (`major.minor.patch`)
+fn newer_version(a: &str, b: &str) -> bool {
+    let parse = |v: &str| -> Option<(u64, u64, u64)> {
+        let mut it = v.split('.').map(|p| p.parse().ok());
+        Some((it.next()??, it.next()??, it.next()??))
+    };
+    matches!((parse(a), parse(b)), (Some(x), Some(y)) if x > y)
+}
+
+/// Typing into a text field: editing keys, clipboard shortcuts, text
+fn edit_input(input: &mut crate::input::TextInput, event: &KeyEvent, shortcut: bool) {
+    match &event.logical_key {
+        Key::Named(NamedKey::Backspace) => input.backspace(),
+        Key::Named(NamedKey::Delete) => input.delete(),
+        Key::Named(NamedKey::ArrowLeft) => input.left(),
+        Key::Named(NamedKey::ArrowRight) => input.right(),
+        Key::Named(NamedKey::Home) => input.home(),
+        Key::Named(NamedKey::End) => input.end(),
+        Key::Character(c) if shortcut => match c.to_lowercase().as_str() {
+            "a" => input.select_all(),
+            "v" => {
+                if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                    input.insert(text.trim());
+                }
+            }
+            "c" if !input.secret => {
+                let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(input.value.clone()));
+            }
+            _ => {}
+        },
+        _ => {
+            if !shortcut && let Some(text) = &event.text {
+                input.insert(text);
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // A client package installs itself instead of starting
@@ -1024,6 +1244,8 @@ fn main() {
         show_on_start: args.iter().any(|a| a == "--show"),
         system_dark: false,
         mods: ModifiersState::empty(),
+        started: std::time::SystemTime::now(),
+        notice_pending: false,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("retail-tray: {e}");
@@ -1096,6 +1318,14 @@ mod preview {
             },
             memory_peak: Some(9_437_184),
             control_via: None,
+            update: retail_proto::api::UpdateStatus {
+                current: env!("CARGO_PKG_VERSION").into(),
+                latest: matches!(state, "update" | "updating").then(|| "0.2.0".into()),
+                available: matches!(state, "update" | "updating"),
+                installing: state == "updating",
+                error: None,
+                supported: true,
+            },
             servers: if backend == BackendState::NeedsLogin {
                 vec![]
             } else {
@@ -1165,7 +1395,7 @@ mod preview {
 
     /// `--state idle` (not hosting) or `running` (with devices and an invite)
     pub fn render_dashboard(out: &str, state: &str, dark: bool) -> Result<(), String> {
-        use retail_proto::api::{InviteResponse, ServerNode, ServerStatus};
+        use retail_proto::api::{ServerNode, ServerStatus};
         let fonts = Fonts::load()?;
         let mut d = crate::dashboard::Dashboard::new(dark);
         let node = |id: i64, name: &str, last: u8, online: bool, exit: bool| ServerNode {
@@ -1205,12 +1435,34 @@ mod preview {
             }
             d.node_scroll = 2;
         }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        if let Some(Ok(st)) = &mut d.status
+            && st.running
+        {
+            let invite = |id: i64, name: Option<&str>, uses: u64, expires_at: i64| retail_proto::api::ServerInvite {
+                id,
+                reusable: name.is_some(),
+                used: uses > 0,
+                expires_at,
+                created_at: now,
+                name: name.map(str::to_string),
+                uses,
+            };
+            st.invites = vec![invite(4, Some("Family"), 3, i64::MAX), invite(6, Some("Office"), 1, now + 20 * 24 * 3600), invite(9, None, 0, now + 20 * 3600)];
+        }
         if state == "idle" {
             d.other_network = Some("vpn.example.com".into());
+        } else if state == "create" {
+            let mut name = crate::input::TextInput::new("", false);
+            name.set("Friends");
+            d.draft = Some(crate::dashboard::Draft { multi: true, ttl: Some(168), name, focused: true });
+        } else if state == "invite-menu" {
+            d.invite_menu = Some(4);
         } else {
-            d.invite = Some(InviteResponse {
+            d.shown = Some(crate::dashboard::Shown {
+                title: crate::i18n::trf("Invite '{name}'", &[("name", &"Family")]),
                 code: "retail1.eyJhIjpbIjIwMy4wLjExMy4yNDo0NDMiLCIxOTIuMTY4LjEuMjA6NDQzIl0sInAiOiJxN2dmZDBhQmJ4MUxuT2hfR2RxVkt0Ym1zRmZ3cUkiLCJrIjoicnRsLWF1dGgtUWhLMndPbiJ9".into(),
-                expires_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 24 * 3600,
+                expires_at: None,
             });
         }
         // Lay out once to learn the height, then draw at that size

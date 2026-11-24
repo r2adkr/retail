@@ -27,6 +27,8 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
         .route("/up", post(up))
         .route("/down", post(down))
         .route("/logout", post(logout))
+        .route("/update/check", post(update_check))
+        .route("/update/install", post(update_install))
         .route("/servers/switch", post(switch_server))
         .route("/servers/forget", post(forget_server))
         .route("/prefs", post(prefs))
@@ -38,6 +40,8 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
         .route("/server/invites/{id}/revoke", post(server_revoke_invite))
         // POST so the guard asks for the token: the answer is a reusable invite
         .route("/server/invites/{id}/code", post(server_named_code))
+        // The installer of a named invite, for the tray's server window
+        .route("/server/invites/{id}/package/{variant}", post(server_package))
         .route("/helper", get(helper_status))
         .route("/helper/start", post(helper_start))
         .route("/helper/stop", post(helper_stop))
@@ -103,6 +107,20 @@ async fn logout(State(b): State<Arc<Backend>>) -> Response {
     }
 }
 
+async fn update_check(State(b): State<Arc<Backend>>) -> Response {
+    match b.updater.check().await {
+        Ok(()) => Json(b.status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn update_install(State(b): State<Arc<Backend>>) -> Response {
+    match b.updater.start_install() {
+        Ok(()) => Json(b.status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
 async fn switch_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSelect>) -> Response {
     match b.switch_server(&req.server).await {
         Ok(()) => Json(b.status().await).into_response(),
@@ -146,6 +164,13 @@ async fn server_named_code(State(b): State<Arc<Backend>>, Path(id): Path<i64>) -
     match b.host.named_code(id).await {
         Ok(code) => Json(retail_proto::api::InviteResponse { code, expires_at: 0 }).into_response(),
         Err(e) => failed(e),
+    }
+}
+
+async fn server_package(State(b): State<Arc<Backend>>, Path((id, variant)): Path<(i64, String)>) -> Response {
+    match b.web.get() {
+        Some(web) => web.package(id, &variant).await,
+        None => failed(anyhow::anyhow!("the web admin page is off, which also makes installers")),
     }
 }
 

@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "retail-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "retail-control"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3218,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "retail-daemon"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3253,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "retail-proto"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3262,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "retail-tray"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ab_glyph",
  "arboard",
@@ -3280,7 +3280,7 @@ dependencies = [
 
 [[package]]
 name = "retail-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

@@ -3,6 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -28,6 +29,9 @@ pub enum Command {
     Switch(String),
     /// Remove a saved server
     Forget(String),
+    /// Look for a newer release now
+    CheckUpdate,
+    InstallUpdate,
     Refresh,
     Prefs { req: PrefsRequest, origin: Origin },
     /// Hosting a network on this device
@@ -38,7 +42,13 @@ pub enum ServerCommand {
     Refresh,
     Start,
     Stop,
-    Invite,
+    /// A new invite, or a new code for a named one
+    CreateInvite(InviteRequest),
+    /// The current code of a named invite: shown, or copied when `copy`
+    Code { id: i64, copy: bool },
+    Revoke(i64),
+    /// The installer of a named invite for `variant`, saved to `dir`
+    Package { id: i64, variant: String, dir: PathBuf },
     Remove(i64),
     /// Opens the web admin page with a one-time sign-in link
     OpenWeb,
@@ -50,6 +60,10 @@ pub enum ApiEvent {
     /// Server status after a refresh or a server command (`Err` for a failed command)
     Server(Result<ServerStatus, String>),
     Invite(Result<InviteResponse, String>),
+    /// A named invite's code, for showing or copying
+    Code { id: i64, copy: bool, result: Result<String, String> },
+    /// Where an installer was saved
+    Saved(Result<PathBuf, String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +74,7 @@ pub enum ActionKind {
     Prefs,
     Switch,
     Forget,
+    Update,
 }
 
 /// Starts the poller. It refreshes every second while `fast` is set (a window
@@ -104,6 +119,12 @@ pub fn spawn(
                         let body = serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
                         (Origin::Settings, ActionKind::Forget, call(addr, "POST", "/servers/forget", Some(&body), Duration::from_secs(10)))
                     }
+                    Ok(Command::CheckUpdate) => {
+                        (Origin::Settings, ActionKind::Update, call(addr, "POST", "/update/check", None, Duration::from_secs(70)))
+                    }
+                    Ok(Command::InstallUpdate) => {
+                        (Origin::Settings, ActionKind::Update, call(addr, "POST", "/update/install", None, Duration::from_secs(10)))
+                    }
                     Ok(Command::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
                         on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));
                         if dashboard.load(Ordering::Relaxed) {
@@ -131,9 +152,28 @@ pub fn spawn(
                                 }
                                 continue;
                             }
-                            ServerCommand::Invite => {
-                                let body = serde_json::to_string(&InviteRequest::default()).unwrap_or_default();
+                            ServerCommand::CreateInvite(req) => {
+                                let body = serde_json::to_string(&req).unwrap_or_default();
                                 on_event(ApiEvent::Invite(call(addr, "POST", "/server/invite", Some(&body), t)));
+                                on_event(ApiEvent::Server(call(addr, "GET", "/server", None, t)));
+                            }
+                            ServerCommand::Code { id, copy } => {
+                                let result = call::<InviteResponse>(addr, "POST", &format!("/server/invites/{id}/code"), Some("{}"), t);
+                                on_event(ApiEvent::Code { id, copy, result: result.map(|r| r.code) });
+                                continue;
+                            }
+                            ServerCommand::Revoke(id) => {
+                                let path = format!("/server/invites/{id}/revoke");
+                                if let Err(e) = call::<serde_json::Value>(addr, "POST", &path, Some("{}"), t) {
+                                    on_event(ApiEvent::Server(Err(e)));
+                                }
+                                on_event(ApiEvent::Server(call(addr, "GET", "/server", None, t)));
+                            }
+                            ServerCommand::Package { id, variant, dir } => {
+                                // Fetching an official client first can take minutes
+                                let path = format!("/server/invites/{id}/package/{variant}");
+                                on_event(ApiEvent::Saved(download(addr, &path, &dir, Duration::from_secs(600))));
+                                continue;
                             }
                         }
                         on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));
@@ -150,6 +190,93 @@ pub fn spawn(
         })
         .expect("spawning the API thread");
     tx
+}
+
+/// POSTs `path` and saves the answer in `dir` under the name the daemon
+/// gives it, streaming (installers are tens of MiB)
+fn download(addr: SocketAddr, path: &str, dir: &Path, timeout: Duration) -> Result<PathBuf, String> {
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
+        .map_err(|_| tr("retaild is not running").to_string())?;
+    s.set_read_timeout(Some(timeout)).ok();
+    let token = retail_proto::local::read_token().map(|t| format!("X-Retail-Token: {t}\r\n")).unwrap_or_default();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Retail-Local: 1\r\n{token}Connection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    // The head, byte by byte up to the blank line
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if s.read(&mut byte).map_err(|e| e.to_string())? == 0 || head.len() > 16 * 1024 {
+            return Err("malformed response".into());
+        }
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).to_string();
+    let code: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("malformed status line")?;
+    if !(200..300).contains(&code) {
+        let mut body = Vec::new();
+        s.take(1 << 16).read_to_end(&mut body).ok();
+        return Err(friendly(serde_json::from_slice::<ApiError>(&body).map(|e| e.error).unwrap_or_else(|_| format!("HTTP {code}"))));
+    }
+    let name = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-disposition:"))
+        .and_then(|l| l.split("filename=\"").nth(1))
+        .and_then(|r| r.split('"').next())
+        .filter(|n| retail_proto::package::safe_name(n))
+        .unwrap_or("retail-installer")
+        .to_string();
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let dest = free_name(dir, &name);
+    let tmp = dest.with_extension("part");
+    let mut out = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::io::copy(&mut s, &mut out).map_err(|e| e.to_string())?;
+    drop(out);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
+/// `name` in `dir`, or `name (2)` and so on if taken
+fn free_name(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{e}")),
+        None => (name.to_string(), String::new()),
+    };
+    (1..)
+        .map(|i| if i == 1 { dir.join(name) } else { dir.join(format!("{stem} ({i}){ext}")) })
+        .find(|p| !p.exists())
+        .unwrap_or_else(|| dir.join(name))
+}
+
+/// The user's downloads folder, or the home folder
+pub fn downloads_dir() -> PathBuf {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let d = home.join("Downloads");
+    if d.is_dir() { d } else { home }
+}
+
+/// Shows `file` selected in the system's file manager
+pub fn reveal(file: &Path) {
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", file.display()));
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(file);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(file.parent().unwrap_or(file));
+        c
+    };
+    let _ = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
 /// For threads other than the poller

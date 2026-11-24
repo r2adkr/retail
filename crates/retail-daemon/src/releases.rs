@@ -31,13 +31,46 @@ fn asset(file: &str, variant: &str) -> String {
     }
 }
 
-/// Fetches `files` of `variant` into `dir`
+/// Fetches `files` of `variant` for this daemon's own version into `dir`
 pub async fn fetch(variant: &str, files: &[String], dir: &Path) -> Result<()> {
+    fetch_version(env!("CARGO_PKG_VERSION"), variant, files, dir).await
+}
+
+/// The newest published version. Releases carry a `VERSION` file, and
+/// GitHub redirects `releases/latest/download/<file>` to the newest release's.
+pub async fn latest_version() -> Result<String> {
+    let base = base().context("update checks are turned off (RETAIL_RELEASES)")?;
+    let url = match base.strip_suffix("/releases/download") {
+        Some(repo) => format!("{repo}/releases/latest/download/VERSION"),
+        None => format!("{base}/latest/VERSION"),
+    };
+    let body = tokio::time::timeout(Duration::from_secs(60), get(&url, None)).await.context("checking took too long")??.1;
+    let v = String::from_utf8_lossy(&body).trim().trim_start_matches('v').to_string();
+    if parse_version(&v).is_none() {
+        bail!("the release's VERSION is not a version: {v:?}");
+    }
+    Ok(v)
+}
+
+/// `1.2.3` as numbers, for comparing
+pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+    let out = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(out)
+}
+
+/// Whether `latest` is newer than `current`
+pub fn newer(latest: &str, current: &str) -> bool {
+    matches!((parse_version(latest), parse_version(current)), (Some(l), Some(c)) if l > c)
+}
+
+/// Fetches `files` of `variant` from release `version` into `dir`
+pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: &Path) -> Result<()> {
     // One fetch at a time: two clicks must not race on the same files
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = LOCK.lock().await;
     let base = base().context("fetching official clients is turned off (RETAIL_RELEASES)")?;
-    let release = format!("{base}/v{}", env!("CARGO_PKG_VERSION"));
+    let release = format!("{base}/v{version}");
     tokio::time::timeout(TIMEOUT, async {
         let sums = get(&format!("{release}/SHA256SUMS"), None).await.context("reading the release's checksums")?;
         let sums = String::from_utf8_lossy(&sums.1);
@@ -53,7 +86,7 @@ pub async fn fetch(variant: &str, files: &[String], dir: &Path) -> Result<()> {
                     let (hash, n) = l.split_once(char::is_whitespace)?;
                     (n.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
                 })
-                .with_context(|| format!("release v{} has no {name}", env!("CARGO_PKG_VERSION")))?;
+                .with_context(|| format!("release v{version} has no {name}"))?;
             let tmp = dir.join(format!("{file}.download"));
             let got = get(&format!("{release}/{name}"), Some(&tmp)).await.with_context(|| format!("downloading {name}"))?.0;
             if got != want {
@@ -199,5 +232,15 @@ mod tests {
         assert_eq!(asset("retaild", "linux-x86_64"), "retaild-linux-x86_64");
         assert_eq!(asset("retail-tray.exe", "windows-x86_64"), "retail-tray-windows-x86_64.exe");
         assert_eq!(asset("wintun.dll", "windows-x86_64"), "wintun-windows-x86_64.dll");
+    }
+
+    #[test]
+    fn versions_compare_as_numbers() {
+        assert!(newer("0.10.0", "0.9.3"));
+        assert!(newer("1.0.0", "0.99.99"));
+        assert!(!newer("0.2.0", "0.2.0"));
+        assert!(!newer("0.1.9", "0.2.0"));
+        assert!(!newer("0.2", "0.1.0"));
+        assert!(!newer("v0.3.0", "0.1.0"));
     }
 }

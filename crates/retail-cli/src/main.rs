@@ -75,6 +75,15 @@ enum Cmd {
         /// socks5://…, `off`, or `auto` to follow the system settings
         #[arg(long, value_name = "URL|off|auto")]
         proxy: Option<String>,
+        /// Install new official releases on their own
+        #[arg(long, value_name = "true|false", num_args = 0..=1, default_missing_value = "true")]
+        auto_update: Option<bool>,
+    },
+    /// Check for a new release and install it
+    Update {
+        /// Only check, do not install
+        #[arg(long)]
+        check: bool,
     },
     /// List devices that offer themselves as exit nodes
     ExitNodes,
@@ -261,13 +270,27 @@ async fn main() -> Result<()> {
             Some(n) => println!("{}", n.ip),
             None => bail!("not logged in"),
         },
-        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy } => {
+        Cmd::Update { check } => {
+            let st: StatusResponse = client.post::<(), _>("/update/check", None).await?;
+            let u = &st.update;
+            match (&u.latest, u.available) {
+                (Some(latest), true) if !check => {
+                    let st: StatusResponse = client.post::<(), _>("/update/install", None).await?;
+                    if st.update.installing {
+                        println!("installing retail {latest}; retaild restarts when it is done");
+                    }
+                }
+                (Some(latest), true) => println!("retail {latest} is available (this is {}); `retail update` installs it", u.current),
+                _ => println!("retail {} is the newest version", u.current),
+            }
+        }
+        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update } => {
             let memory_limit_mb = match memory_limit.as_deref() {
                 None => None,
                 Some("auto") | Some("0") => Some(0),
                 Some(v) => Some(v.parse::<u32>().context("--memory-limit takes a number of MiB or `auto`")?),
             };
-            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy };
+            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update };
             print_status(&client.post::<_, StatusResponse>("/prefs", Some(&req)).await?);
         }
         Cmd::ExitNodes => {
@@ -476,6 +499,14 @@ fn print_status(st: &StatusResponse) {
             None => proxy.clone(),
         };
         println!("proxy:   {shown}");
+    }
+    match (&st.update.latest, st.update.available, st.update.installing) {
+        (Some(latest), _, true) => println!("update:  installing {latest}"),
+        (Some(latest), true, false) => println!("update:  {latest} is available (`retail update`)"),
+        _ => {}
+    }
+    if st.prefs.auto_update {
+        println!("updates: installed automatically");
     }
     let limit = st.prefs.memory_limit_mb.map_or_else(|| "automatic".to_string(), |mb| format!("{mb} MiB"));
     match st.memory_peak {

@@ -19,6 +19,9 @@ pub struct Config {
     pub theme: ThemePref,
     #[serde(default)]
     pub language: LangPref,
+    /// The newest release the user was told about, so each is told once
+    #[serde(default)]
+    pub notified_update: Option<String>,
 }
 
 fn path() -> Option<PathBuf> {

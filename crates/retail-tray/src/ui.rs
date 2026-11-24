@@ -23,6 +23,7 @@ const MESSAGE_H: f32 = 132.0;
 const NOTE_H: f32 = 84.0;
 const MENU_ITEM_H: f32 = 34.0;
 const MENU_W: f32 = 200.0;
+const BANNER_H: f32 = 66.0;
 
 /// Windows 11 rounds the window itself (8 px, see `round_corners`). Elsewhere
 /// the window is a plain rectangle.
@@ -52,6 +53,8 @@ pub enum Action {
     Dismiss,
     /// Open (or close) the menu behind the gear at the bottom right
     Gear,
+    /// Install the new release
+    Update,
 }
 
 struct MenuItem {
@@ -122,7 +125,12 @@ impl Ui {
             Some(_) => MESSAGE_H,
             None => NOTE_H + 12.0,
         };
-        HEADER_H + body + FOOTER_H
+        HEADER_H + self.banner_h() + body + FOOTER_H
+    }
+
+    /// The new-release banner under the header
+    fn banner_h(&self) -> f32 {
+        if self.status().is_some_and(|s| s.update.available) { BANNER_H } else { 0.0 }
     }
 
     pub fn needs_timer(&self) -> Option<Instant> {
@@ -172,6 +180,12 @@ impl Ui {
 
         self.header(&mut c, &t);
         let mut y = HEADER_H;
+        if self.banner_h() > 0.0
+            && let View::Status(s) = self.view.clone()
+        {
+            self.banner(&mut c, &t, &s, y);
+            y += BANNER_H;
+        }
         match self.view.clone() {
             View::Loading => self.message(&mut c, &t, y, tr("Connecting to retaild…"), "", None),
             View::Offline => self.message(
@@ -213,6 +227,26 @@ impl Ui {
             }
         }
         self.footer(&mut c, &t, h);
+    }
+
+    fn banner(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, y: f32) {
+        let (x, w) = (PAD, WIDTH - 2.0 * PAD);
+        c.fill_rrect(x, y + 14.0, w, 40.0, 10.0, with_alpha(t.accent, if self.dark { 0.22 } else { 0.1 }));
+        let latest = s.update.latest.clone().unwrap_or_default();
+        if s.update.installing {
+            let text = trf("Installing retail {version}…", &[("version", &latest)]);
+            c.text(&text, x + 12.0, y + 39.0, 12.5, Weight::Semibold, t.text, Some(w - 24.0));
+            return;
+        }
+        let label = tr("Update");
+        let bw = c.measure(label, 12.5, Weight::Semibold) + 24.0;
+        let text = trf("retail {version} is available", &[("version", &latest)]);
+        c.text(&text, x + 12.0, y + 39.0, 12.5, Weight::Semibold, t.text, Some(w - 36.0 - bw));
+        let r = Rect::from_xywh(x + w - 8.0 - bw, y + 20.0, bw, 28.0).unwrap();
+        let bg = if self.hovered(&r) { shade(t.accent, 1.1) } else { t.accent };
+        c.fill_rrect(r.x(), r.y(), r.width(), r.height(), 7.0, bg);
+        c.text(label, r.x() + 12.0, r.y() + 18.5, 12.5, Weight::Semibold, Color::WHITE, None);
+        self.regions.push((r, Action::Update));
     }
 
     fn header(&mut self, c: &mut Canvas, t: &Theme) {

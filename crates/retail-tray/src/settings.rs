@@ -4,7 +4,7 @@ use retail_proto::api::{BackendState, SavedServer, StatusResponse};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::config::ThemePref;
-use crate::i18n::{LangPref, tr};
+use crate::i18n::{LangPref, tr, trf};
 use crate::draw::{Canvas, Theme, contains, shade, with_alpha};
 use crate::input::TextInput;
 use crate::text::{Fonts, Weight};
@@ -39,9 +39,14 @@ pub enum SettingsAction {
     /// Opens or closes the language list
     LangMenu,
     AdvertiseExit(bool),
+    CheckUpdate,
+    InstallUpdate,
+    AutoUpdate(bool),
 }
 
 const NETWORK_H: f32 = 76.0;
+/// The About card: version, then the update row and the automatic-update toggle
+const ABOUT_H: f32 = 60.0 + 64.0 + 60.0;
 const ROW_H: f32 = 50.0;
 /// Saved servers shown at once; more scroll
 const MAX_ROWS: usize = 4;
@@ -186,7 +191,7 @@ impl Settings {
         // 40 between sections, 24 bottom padding
         let message = if self.message.is_some() { 30.0 } else { 0.0 };
         let network = if self.show_network() { 40.0 + 14.0 + NETWORK_H } else { 0.0 };
-        76.0 + (14.0 + self.card_h() + message) + network + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 60.0) + 24.0
+        76.0 + (14.0 + self.card_h() + message) + network + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + ABOUT_H) + 24.0
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<SettingsAction> {
@@ -266,7 +271,7 @@ impl Settings {
         y += 40.0;
         section(&mut c, &t, tr("About"), y);
         y += 14.0;
-        c.fill_rrect(PAD, y, WIDTH - 2.0 * PAD, 60.0, 12.0, t.surface);
+        c.fill_rrect(PAD, y, WIDTH - 2.0 * PAD, ABOUT_H, 12.0, t.surface);
         c.text(
             &format!("retail {}", env!("CARGO_PKG_VERSION")),
             inner_x,
@@ -286,6 +291,9 @@ impl Settings {
             View::Loading => tr("Checking retaild…"),
         };
         c.text(daemon, inner_x, y + 45.0, 12.0, Weight::Regular, t.dim, Some(inner_w));
+        if let View::Status(s) = self.view.clone() {
+            self.updates(&mut c, &t, &s, y + 60.0);
+        }
 
         if self.lang_open {
             self.lang_list(&mut c, &t, lang_y);
@@ -418,6 +426,58 @@ impl Settings {
                 c.line((cx - 1.5, cy + 3.5), (cx + 5.0, cy - 3.5), 1.8, t.accent);
             }
             self.regions.push((r, SettingsAction::Lang(pref)));
+        }
+    }
+
+    /// New releases: where things stand, a button, and the automatic toggle
+    fn updates(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, y: f32) {
+        let (x, w) = (PAD, WIDTH - 2.0 * PAD);
+        let ix = x + 16.0;
+        c.hline(ix, x + w - 16.0, y, t.border);
+        let u = &s.update;
+        let latest = u.latest.clone().unwrap_or_default();
+        let (line, sub, color) = if !u.supported {
+            (tr("Updates are not available here").to_string(), tr("There are no official builds for this system.").to_string(), t.dim)
+        } else if u.installing {
+            (trf("Installing retail {version}…", &[("version", &latest)]), tr("retail restarts when it is done.").to_string(), t.text)
+        } else if u.available {
+            (trf("retail {version} is available", &[("version", &latest)]), trf("You have {version}.", &[("version", &u.current)]), t.accent)
+        } else if let Some(e) = &u.error {
+            (tr("Could not check for updates").to_string(), e.clone(), t.red)
+        } else if u.latest.is_some() {
+            (tr("Up to date").to_string(), trf("You have the newest version, {version}.", &[("version", &u.current)]), t.text)
+        } else {
+            (tr("Not checked yet").to_string(), tr("retail looks for new versions every few hours.").to_string(), t.text)
+        };
+        let busy = self.is_busy() || u.installing;
+        let (label, style, action) = if u.available {
+            (tr("Update now"), Style::Primary, SettingsAction::InstallUpdate)
+        } else {
+            (tr("Check now"), Style::Secondary, SettingsAction::CheckUpdate)
+        };
+        let bw = c.measure(label, 13.0, Weight::Semibold) + 28.0;
+        c.text(&line, ix, y + 27.0, 13.5, Weight::Regular, color, Some(w - 48.0 - bw));
+        c.text(&sub, ix, y + 45.0, 11.5, Weight::Regular, t.dim, Some(w - 48.0 - bw));
+        if u.supported {
+            self.button(c, t, label, x + w - 16.0 - bw, y + 15.0, bw, style, !busy, action);
+        }
+
+        let y = y + 64.0;
+        c.hline(ix, x + w - 16.0, y, t.border);
+        c.text(tr("Install updates automatically"), ix, y + 26.0, 13.5, Weight::Regular, t.text, Some(w - 100.0));
+        c.text(tr("Otherwise retail lets you know when one is out."), ix, y + 44.0, 11.5, Weight::Regular, t.dim, Some(w - 100.0));
+        let on = s.prefs.auto_update;
+        let (tw, th) = (42.0, 24.0);
+        let (tx, ty) = (x + w - 16.0 - tw, y + 18.0);
+        let r = Rect::from_xywh(tx - 6.0, ty - 6.0, tw + 12.0, th + 12.0).unwrap();
+        let track = if on { t.accent } else { t.gray };
+        let track = if self.hovered(&r) { shade(track, if self.dark { 1.12 } else { 0.92 }) } else { track };
+        let track = if u.supported { track } else { with_alpha(track, 0.5) };
+        c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
+        let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
+        c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
+        if u.supported {
+            self.regions.push((r, SettingsAction::AutoUpdate(!on)));
         }
     }
 

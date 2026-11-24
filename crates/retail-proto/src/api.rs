@@ -249,6 +249,25 @@ pub struct StatusResponse {
     /// Servers this device has joined, the current one included
     #[serde(default)]
     pub servers: Vec<SavedServer>,
+    #[serde(default)]
+    pub update: UpdateStatus,
+}
+
+/// New official releases, as the daemon sees them
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UpdateStatus {
+    /// The daemon's version
+    pub current: String,
+    /// The newest release found, once checked
+    pub latest: Option<String>,
+    /// `latest` is newer than `current`
+    pub available: bool,
+    /// Downloading or replacing the programs right now
+    pub installing: bool,
+    /// The last check or installation failed
+    pub error: Option<String>,
+    /// Official builds exist for this system, so it can update itself
+    pub supported: bool,
 }
 
 /// A server this device has joined and can switch back to without an invite
@@ -283,6 +302,9 @@ pub struct Prefs {
     /// `user:password@`) or `off`. `None` follows the system settings.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Install new official releases on their own
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 /// `POST /prefs`. Fields left out stay as they are.
@@ -299,6 +321,8 @@ pub struct PrefsRequest {
     /// Empty follows the system settings
     #[serde(default)]
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub auto_update: Option<bool>,
 }
 
 /// `POST /proxy/system`: the proxies the signed-in user's settings choose for

@@ -181,6 +181,8 @@ Listens on `127.0.0.1:41112`.
 | POST | `/server/invite` | Make an invite code |
 | POST | `/server/nodes/{id}/delete`, `/server/invites/{id}/revoke` | Remove a device, revoke an invite |
 | POST | `/server/invites/{id}/code` | The current code of a named invite (a reusable invite, hence the token) |
+| POST | `/server/invites/{id}/package/{os}-{arch}` | The installer of a named invite, as the web page builds it (the tray's server window saves it) |
+| POST | `/update/check`, `/update/install` | Look for a newer release; install it and restart |
 | POST | `/web/login` | One-time sign-in link for the web admin page |
 
 ### 7.1 Web admin page (`retail-web`)
@@ -223,6 +225,7 @@ There is no separate server program. The `retail-control` library runs inside th
 - **CDN**: `--front https://name` goes into invite codes, and devices try a tunnel through the CDN. The CDN must forward to port 443 of the server (or of the helper).
 - **Windows firewall**: an inbound allow rule for the retaild program only, removed on stop.
 - **Stop**: closes all WebSocket (control and relay) connections and releases the ports. Connected devices notice within 0.1 seconds and reconnect within about 1 second when the server starts again.
+- **Updates** (`retail-daemon/src/update.rs`): every 6 hours the daemon reads `VERSION` from the newest release (`releases/latest/download/VERSION`). Installing fetches this system's programs from that release, checks them against `SHA256SUMS`, and replaces the running ones in their folder (Unix: rename over the old file; Windows: the running file is renamed to `.old` first, removed at the next start). The daemon then shuts down cleanly and exits with code 75, on which systemd (`Restart=on-failure`), launchd (`KeepAlive`) and the Windows task restart it (on Windows the task is also started again after a few seconds). The tray app sees the daemon's newer version and a newer file of its own, and starts that one in its place.
 - **Packaging**: `packaging/docker` (retaild in server mode, distroless), `packaging/systemd/retaild.service`, and the release workflow that publishes the official clients (`.github/workflows/release.yml`).
 
 ## 11. Tray app
@@ -234,7 +237,8 @@ There is no separate server program. The `retail-control` library runs inside th
 - The accent colour is blue. The theme follows the system by default (light or dark), or is fixed in settings.
 - Popup: the gear at the bottom right opens Manage server, Settings and Quit. Each device has a ⋯ menu (copy IP; use or stop using it as exit node when it offers one). An exit node in use shows in the header and on its device row, and in red if it goes offline and the internet is blocked.
 - Settings window: sign in with an invite code (or server URL and auth key); **Change server** lists the saved servers: a click switches, the ⋯ menu removes one, and **+ Add server** joins another with its code; log out (click twice to confirm), offer as exit node, theme (System / Light / Dark), language (a drop-down list). Theme and language are saved per user in `tray.json`.
-- Server window: gear → Manage server. Start or stop hosting (click twice to confirm), addresses, router state and warnings, invite code and QR code (wiped from the screen when the window closes), device list (last seen) and removal.
+- Server window: gear → Manage server. Start or stop hosting (click twice to confirm), addresses, router state and warnings; invites as in the web page: create (multi-device with a name and expiry, or one-time), and per invite a ⋯ menu to show the code and QR code, copy it, make a new code, save the installer for each system to the Downloads folder, or expire it (click twice). Codes on screen are wiped when the window closes. Device list (last seen, scrolls past six) and removal.
+- Updates: Settings shows the state (up to date, a new release, installing, an error) with **Check now** / **Update now**, and the **Install updates automatically** toggle. A new release opens the popup once with a banner and an **Update** button.
 - **Manage on the web** in the server window opens the web admin page with a one-time sign-in link.
 - Run on a device already in another network, an installer package asks whether to switch; on yes the daemon leaves the current network (kept in the list) and joins the package's.
 - `--preview out.png [--settings | --server] [--dark] [--lang <en|ko|ja|zh|es>] [--state ...]` renders a screen to PNG (`docs/img`).
@@ -280,7 +284,7 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 |---|---|
 | Policy | ACLs between devices (groups/tags), MagicDNS, key expiry and rotation, admin approval of exit nodes |
 | Convenience | Subnet routers, IPv6 inside the mesh, mobile |
-| Releases | Code signing and automatic updates |
+| Releases | Code signing, signed update metadata |
 | Performance | Measure the worker count (K) on real many-core hardware, the relay on lossy and high-latency lines (a UDP relay if needed), several relay servers, a faster first REALITY connection |
 | Verification | Exit node routing, NAT and firewall rules on real Windows and macOS machines. Proxy integrated authentication (Kerberos, NTLM) and PAC on a real corporate network |
 | Connectivity | Opening the IPv6 firewall with PCP, entering helper codes and CDN addresses in the tray |

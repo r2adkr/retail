@@ -1,7 +1,7 @@
 # Official clients, built when a version tag (v0.1.0, ...) is pushed. Servers
 # fetch these by name to make one-click client packages, so asset names are
-# `<program>-<os>-<arch>[.exe]`, plus `wintun-windows-x86_64.dll` and
-# `SHA256SUMS`.
+# `<program>-<os>-<arch>[.exe]`, plus `wintun-windows-x86_64.dll`,
+# `VERSION` and `SHA256SUMS`. Daemons update themselves from the same files.
 name: release
 
 on:
@@ -64,7 +64,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # VERSION lets daemons find the newest release through releases/latest/download/VERSION
+      - run: cd dist && echo "${GITHUB_REF_NAME#v}" > VERSION && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

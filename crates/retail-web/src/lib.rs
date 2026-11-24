@@ -418,13 +418,25 @@ async fn fetch_client(State(ctx): State<Ctx>, Path(variant): Path<String>) -> Re
 /// A client for one OS with the named invite's current code inside. Missing
 /// program files come from the official release first, when possible.
 async fn download(State(ctx): State<Ctx>, Path((invite, variant)): Path<(i64, String)>) -> Response {
-    let b = &ctx.web.backend;
+    ctx.web.package(invite, &variant).await
+}
+
+impl WebAdmin {
+    /// The client package of a named invite for one `<os>-<arch>`, fetching
+    /// the official client first if this server lacks it. Also served to the
+    /// tray app through the daemon's local API.
+    pub async fn package(&self, invite: i64, variant: &str) -> Response {
+        package_response(self.backend.as_ref(), invite, variant).await
+    }
+}
+
+async fn package_response(b: &dyn Backend, invite: i64, variant: &str) -> Response {
     let find = || b.clients().into_iter().find(|c| c.id == variant);
     let Some(mut source) = find() else {
         return deny(StatusCode::NOT_FOUND, "no such client");
     };
     if !source.missing.is_empty() && source.fetchable {
-        if let Err(e) = b.fetch_client(&variant).await {
+        if let Err(e) = b.fetch_client(variant).await {
             return deny(StatusCode::BAD_GATEWAY, &e);
         }
         match find() {

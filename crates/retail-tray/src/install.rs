@@ -337,7 +337,8 @@ fn register_daemon(daemon: &Path) -> Result<(), String> {
     if run_quiet("systemctl", &["--version"]).is_err() {
         return Err(format!("systemd was not found; start {} yourself (as root) and run this installer again", daemon.display()));
     }
-    let unit = include_str!("../../../packaging/systemd/retaild.service").replace("/usr/local/bin/retaild", &daemon.display().to_string());
+    let dir = daemon.parent().map(|d| d.display().to_string()).unwrap_or_else(|| "/usr/local/bin".into());
+    let unit = include_str!("../../../packaging/systemd/retaild.service").replace("/usr/local/bin", &dir);
     std::fs::write("/etc/systemd/system/retaild.service", unit).map_err(|e| format!("writing the systemd unit: {e}"))?;
     run_quiet("systemctl", &["daemon-reload"])?;
     run_quiet("systemctl", &["enable", "--now", "retaild"])?;

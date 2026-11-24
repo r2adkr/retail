@@ -21,6 +21,7 @@ mod releases;
 mod sspi;
 mod state;
 mod transport;
+mod update;
 mod web;
 
 use std::net::SocketAddr;
@@ -154,15 +155,25 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding local API on {}", args.api))?;
     tracing::info!("local API on http://{}", args.api);
 
+    update::clean_up(&state_dir);
+    update::spawn(backend.clone());
+
     let shutdown_backend = backend.clone();
+    let updater = backend.updater.clone();
     let token = Arc::new(local_token::write_new().context("writing the local API token")?);
     axum::serve(listener, local_api::router(backend, token))
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+            tokio::select! {
+                _ = shutdown_signal() => {}
+                _ = shutdown_backend.updater.restart.notified() => {}
+            }
             tracing::info!("shutting down");
             shutdown_backend.shutdown().await;
         })
         .await?;
+    if updater.restarting() {
+        update::restart_after_exit();
+    }
     Ok(())
 }
 

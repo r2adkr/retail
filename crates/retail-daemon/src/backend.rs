@@ -51,6 +51,7 @@ pub struct Backend {
     pub helper: crate::helper_host::HelperHost,
     /// Set once the web admin page listens
     pub web: std::sync::OnceLock<retail_web::WebAdmin>,
+    pub updater: Arc<crate::update::Updater>,
 }
 
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -68,6 +69,7 @@ impl Backend {
         crate::proxy::set_preference(persisted.prefs.proxy.as_deref());
         let host = crate::host::Host::new(&opts.state_dir);
         let helper = crate::helper_host::HelperHost::new(&opts.state_dir);
+        let updater = Arc::new(crate::update::Updater::new(&opts.state_dir));
         let (failures, failures_rx) = mpsc::unbounded_channel();
         Ok(Backend {
             opts,
@@ -80,6 +82,7 @@ impl Backend {
             host,
             helper,
             web: std::sync::OnceLock::new(),
+            updater,
         })
     }
 
@@ -329,6 +332,13 @@ impl Backend {
             };
             crate::proxy::set_preference(prefs.proxy.as_deref());
         }
+        if let Some(on) = req.auto_update {
+            prefs.auto_update = on;
+            // Turned on with a newer release already known: install it now
+            if on && !p.prefs.auto_update && self.updater.status().available {
+                let _ = self.updater.start_install();
+            }
+        }
         if prefs.exit_node.is_some() && prefs.advertise_exit_node {
             anyhow::bail!("a device cannot use an exit node and be one at the same time");
         }
@@ -349,6 +359,10 @@ impl Backend {
             self.start_locked(&p).await?;
         }
         Ok(())
+    }
+
+    pub async fn auto_update(&self) -> bool {
+        self.persisted.lock().await.prefs.auto_update
     }
 
     pub async fn server_status(&self) -> ServerStatus {
@@ -559,6 +573,7 @@ impl Backend {
             memory_peak: crate::memory::peak(),
             control_via: engine.and_then(|e| e.control_via()),
             servers: saved_servers(&p),
+            update: self.updater.status(),
         }
     }
 }

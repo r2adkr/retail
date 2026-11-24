@@ -7,8 +7,8 @@ retail has no separate server program. One device acts as the network's server, 
 1. Open the server window: the gear at the bottom right of the tray popup → **Manage server**.
 2. Click **Open server**. This device becomes the server and the first device of the new network.
    - If this device was in another network, it moves to the new one. The window says so beforehand.
-3. **Create invite** shows a one-time invite code and a QR code. Paste the code into the settings window on the other device and click **Connect**.
-   - The invite works once and expires after 24 hours. The code carries the server address, the fingerprint of the server certificate's key and an auth key, so there is no domain or certificate to set up.
+3. **Create invite** makes a **Multi-device** invite (named, reusable) or a **One-time** one, and shows its code and QR code. Paste the code into the other device's Settings (**Change server** → **+ Add server**), or send an installer: the ⋯ menu of a multi-device invite saves one for Windows, Linux or macOS to your Downloads folder.
+   - A one-time invite works once and expires after 24 hours. The code carries the server address, the fingerprint of the server certificate's key and an auth key, so there is no domain or certificate to set up.
 
 The CLI does the same:
 
@@ -126,6 +126,13 @@ Proxies that open up TLS are no obstacle either. Such proxies usually refuse sel
 ## Backups
 
 The server's data is one folder, `server` in the state directory (`retail.json`: devices and invites, `tls/`: the server certificate and key, `host.json`: settings). Copy that folder. If the certificate key is lost, devices no longer trust the server and need new invites.
+
+## Updates
+
+The daemon looks for a new official release every 6 hours (`retail update --check` or **Check now** in Settings asks at once). The tray tells you once per release, and **Update now** (or `retail update`) installs it: the files for this system are downloaded, checked against the release's `SHA256SUMS`, put in place of the running programs, and the daemon restarts through its service manager; the tray app restarts itself. With **Install updates automatically** (`retail set --auto-update`) this happens on its own.
+
+- On Linux the systemd unit lets the daemon write only its own program folder (`ReadWritePaths=`), to replace the programs.
+- `RETAIL_RELEASES` points at another release mirror (an empty value turns checks off).
 
 ## Tips
 

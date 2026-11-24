@@ -59,6 +59,9 @@
 #   install       a client package from the server's web admin page installs
 #                 under a temporary prefix and joins; after the invite gets a
 #                 new code the old package is refused and the member stays
+#   update        retaild updates itself from a release mirror: it finds the
+#                 newer version, checks the files against SHA256SUMS, replaces
+#                 the programs and exits for a restart; a tampered file is refused
 #   rekey         (not in `all`) a long transfer across WireGuard's rekey points
 #                 (new handshake after ~120 s, old keys dropped after ~180 s),
 #                 sampling throughput, handshake age and peak memory
@@ -556,6 +559,100 @@ install_test() {
     fi
     nodes=$(curl -s -m 3 -b "$jar" "$W/api/status" | jq '[.server.nodes[]] | length')
     [ "$nodes" = 1 ] && echo "  hC is still a member" || { echo "  members: $nodes"; ok=0; }
+
+    # The tray's way to the same installer: the daemon's local API, with its token.
+    # The new code gave the invite a new id
+    id=$(curl -s -m 3 -b "$jar" "$W/api/status" | jq -r '.server.invites[] | select(.name=="office") | .id')
+    local api_pkg web_pkg
+    api_pkg=$(curl -s -m 60 -o "$WORK/pkg-api" -w '%{http_code} %header{content-disposition}' -X POST \
+        -H 'X-Retail-Local: 1' -H "X-Retail-Token: $(cat "$WORK/server.token")" \
+        "http://$SERVER_API/server/invites/$id/package/linux-x86_64")
+    curl -s -m 60 -b "$jar" -o "$WORK/pkg-web" "$W/download/$id/linux-x86_64"
+    web_pkg=$(stat -c %s "$WORK/pkg-web")
+    if [[ $api_pkg == 200*retail-office-linux* ]] && [ "$(stat -c %s "$WORK/pkg-api")" = "$web_pkg" ]; then
+        echo "  the local API hands out the same installer ($api_pkg)"
+    else
+        echo "  local API installer: $api_pkg, $(stat -c %s "$WORK/pkg-api") bytes against $web_pkg"; ok=0
+    fi
+    local refused
+    refused=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'X-Retail-Local: 1' "http://$SERVER_API/server/invites/$id/package/linux-x86_64")
+    [ "$refused" = 403 ] && echo "  and refuses it without the token" || { echo "  without the token: HTTP $refused"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
+# Self-update from a release mirror over HTTPS (own certificate, trusted
+# through RETAIL_CA_FILE): retaild runs from a copy of the programs, finds
+# 9.9.9, fetches and checks it, puts it in place and exits for a restart
+update_test() {
+    local bin="$WORK/bin" rel="$WORK/rel" api=127.0.0.1:41195 ok=1
+    mkdir -p "$bin" "$rel/latest" "$rel/v9.9.9"
+    for f in retaild retail retail-tray; do
+        cp "$BIN/$f" "$bin/$f"
+        cp "$BIN/$f" "$rel/v9.9.9/$f-linux-x86_64"
+    done
+    # So the replaced files can be told from the old ones
+    printf 'new' >>"$rel/v9.9.9/retail-linux-x86_64"
+    echo 9.9.9 >"$rel/latest/VERSION"
+    (cd "$rel/v9.9.9" && sha256sum -- * >SHA256SUMS)
+    # A private CA (trusted through RETAIL_CA_FILE) and the mirror's certificate from it
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj /CN=retail-test-ca \
+        -keyout "$WORK/ca.key" -out "$WORK/ca.crt" 2>/dev/null
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=127.0.0.1 \
+        -keyout "$WORK/rel.key" -out "$WORK/rel.csr" 2>/dev/null
+    printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\n' >"$WORK/rel.ext"
+    openssl x509 -req -in "$WORK/rel.csr" -CA "$WORK/ca.crt" -CAkey "$WORK/ca.key" -CAcreateserial -days 2 \
+        -extfile "$WORK/rel.ext" -out "$WORK/rel.crt" 2>/dev/null
+    python3 -c '
+import functools, http.server, ssl, sys
+h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 9443), h)
+c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+c.load_cert_chain(sys.argv[2], sys.argv[3])
+s.socket = c.wrap_socket(s.socket, server_side=True)
+s.serve_forever()' "$rel" "$WORK/rel.crt" "$WORK/rel.key" >"$WORK/mirror.log" 2>&1 &
+    local mirror=$!
+    sleep 0.5
+    up() { RETAIL_API_TOKEN_FILE="$WORK/u.token" "$bin/retail" --api "$api" "$@"; }
+    RETAIL_RELEASES=https://127.0.0.1:9443 RETAIL_CA_FILE="$WORK/ca.crt" RETAIL_API_TOKEN_FILE="$WORK/u.token" RETAIL_NO_PORTMAP=1 \
+        "$bin/retaild" --state-dir "$WORK/ustate" --api "$api" --port 41695 --web-port 0 >"$WORK/update.log" 2>&1 &
+    local daemon=$!
+    for _ in $(seq 50); do up status >/dev/null 2>&1 && break; sleep 0.1; done
+
+    local said
+    said=$(up update --check 2>&1)
+    echo "  check: $said"
+    [[ $said == *"9.9.9 is available"* ]] || ok=0
+    up update >/dev/null 2>&1 || { echo "  install refused"; ok=0; }
+    local code=none
+    for _ in $(seq 100); do
+        if ! kill -0 "$daemon" 2>/dev/null; then wait "$daemon"; code=$?; break; fi
+        sleep 0.1
+    done
+    echo "  retaild exited with $code to be restarted"
+    [ "$code" = 75 ] || { ok=0; tail -5 "$WORK/update.log"; }
+    cmp -s "$bin/retail" "$rel/v9.9.9/retail-linux-x86_64" && echo "  the programs were replaced" || { echo "  retail was not replaced"; ok=0; }
+    ls "$bin" | grep -qE '\.(new|old)$' && { echo "  leftovers: $(ls "$bin")"; ok=0; }
+
+    # A release whose file does not match its checksum is refused
+    printf 'tampered' >>"$rel/v9.9.9/retaild-linux-x86_64"
+    cp "$BIN/retaild" "$bin/retaild.copy" && mv "$bin/retaild.copy" "$bin/retaild"
+    RETAIL_RELEASES=https://127.0.0.1:9443 RETAIL_CA_FILE="$WORK/ca.crt" RETAIL_API_TOKEN_FILE="$WORK/u.token" RETAIL_NO_PORTMAP=1 \
+        "$bin/retaild" --state-dir "$WORK/ustate" --api "$api" --port 41695 --web-port 0 >>"$WORK/update.log" 2>&1 &
+    daemon=$!
+    for _ in $(seq 50); do up status >/dev/null 2>&1 && break; sleep 0.1; done
+    up update >/dev/null 2>&1
+    local err=
+    for _ in $(seq 100); do
+        err=$(up status --json 2>/dev/null | jq -r '.update.error // empty')
+        [ -n "$err" ] && break
+        sleep 0.1
+    done
+    if [[ $err == *checksum* ]] && kill -0 "$daemon" 2>/dev/null && cmp -s "$bin/retaild" "$BIN/retaild"; then
+        echo "  a tampered release is refused: $err"
+    else
+        echo "  tampered release: error '$err'"; ok=0
+    fi
+    kill "$daemon" "$mirror" 2>/dev/null
     [ "$ok" = 1 ]
 }
 
@@ -583,6 +680,7 @@ run_scenario() {
     cleanup
     rm -rf "$WORK" && mkdir -p "$WORK"
     [ "$sc" = install ] && { install_test; return; }
+    [ "$sc" = update ] && { update_test; return; }
     HOST_V6=0; [ "$sc" = ipv6 ] || [ "$sc" = nat64 ] && HOST_V6=1
     NAT64=0; [ "$sc" = nat64 ] && NAT64=1
     topology_up "$masq"
@@ -850,7 +948,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper switch install
+    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper switch install update
 else
     set -- "$WHICH"
 fi
