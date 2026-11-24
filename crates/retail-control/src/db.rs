@@ -15,6 +15,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use retail_proto::api::{RegisterRequest, RegisterResponse};
+use retail_proto::route::Ipv4Net;
 use retail_proto::{Key, MESH_NETWORK, MESH_PREFIX_LEN};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -45,6 +46,12 @@ struct Data {
     /// The member device that is this server's helper node
     #[serde(default, skip_serializing_if = "Option::is_none")]
     helper_device: Option<i64>,
+    /// Device keys expire this many days after joining or renewal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_expiry_days: Option<u32>,
+    /// Devices not seen for this many days are removed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remove_inactive_days: Option<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -66,6 +73,18 @@ struct NodeRec {
     /// another device's name
     #[serde(default)]
     label: String,
+    /// When the key expires, `None` for never
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<i64>,
+    /// Exempt from key expiry (the hosting device, or by the administrator)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_expiry: bool,
+    /// The invite it joined with
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invite_id: Option<i64>,
+    /// Networks the administrator lets it route
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<Ipv4Net>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -85,6 +104,9 @@ struct KeyRec {
     secret: Option<String>,
     #[serde(default)]
     uses: u64,
+    /// The hosting device's own invite: who joins with it never expires
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    host: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +121,16 @@ pub struct NodeRow {
     pub tags: Vec<String>,
     /// `<label>.retail.internal`
     pub dns_name: String,
+    pub expires_at: Option<i64>,
+    /// The invite it joined with, while that invite exists
+    pub invite_id: Option<i64>,
+    pub approved_routes: Vec<Ipv4Net>,
+}
+
+impl NodeRow {
+    pub fn expired(&self, now: i64) -> bool {
+        self.expires_at.is_some_and(|t| t <= now)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -132,6 +164,23 @@ pub fn now_unix() -> i64 {
 }
 
 // Tokens and auth keys are 256-bit random values, so a fast unsalted hash is sufficient
+/// Seconds in a "day" of the expiry settings. `RETAIL_DAY_SECONDS` shortens
+/// it for tests.
+pub fn day_secs() -> i64 {
+    static DAY: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *DAY.get_or_init(|| std::env::var("RETAIL_DAY_SECONDS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(86_400))
+}
+
+fn expiry(days: Option<u32>, exempt: bool, now: i64) -> Option<i64> {
+    days.filter(|_| !exempt).map(|d| now.saturating_add(i64::from(d) * day_secs()))
+}
+
+/// Checks a database file, for restoring a backup
+pub fn check(bytes: &[u8]) -> Result<()> {
+    serde_json::from_slice::<Data>(bytes).context("the server data in the backup is damaged")?;
+    Ok(())
+}
+
 fn hash_secret(secret: &str) -> String {
     Sha256::digest(secret.as_bytes())
         .iter()
@@ -199,6 +248,15 @@ impl Db {
 
     /// Only the hash of the returned key is stored
     pub async fn create_preauth(&self, reusable: bool, ttl: Duration) -> Result<String> {
+        self.create_key(reusable, ttl, false)
+    }
+
+    /// For the hosting device itself, which never expires
+    pub async fn create_host_key(&self, ttl: Duration) -> Result<String> {
+        self.create_key(false, ttl, true)
+    }
+
+    fn create_key(&self, reusable: bool, ttl: Duration, host: bool) -> Result<String> {
         let key = format!("{AUTH_KEY_PREFIX}{}", random_secret());
         let now = now_unix();
         let mut s = self.inner.lock().unwrap();
@@ -215,6 +273,7 @@ impl Db {
             name: None,
             secret: None,
             uses: 0,
+            host,
         });
         s.save()?;
         Ok(key)
@@ -238,6 +297,7 @@ impl Db {
             name: Some(name.to_string()),
             secret: Some(key.clone()),
             uses: 0,
+            host: false,
         });
         s.save()?;
         Ok((id, key))
@@ -272,6 +332,8 @@ impl Db {
             .ok_or(RegisterError::InvalidAuthKey)?;
         key.used = true;
         key.uses += 1;
+        let (key_id, host_key) = (key.id, key.host);
+        let policy = s.data.key_expiry_days;
 
         let token = random_secret();
         let token_hash = hash_secret(&token);
@@ -288,6 +350,10 @@ impl Db {
                 n.hostname = hostname;
                 n.os = os;
                 n.label = label;
+                n.no_expiry |= host_key;
+                // Joining again with an invite renews the key
+                n.expires_at = expiry(policy, n.no_expiry, now);
+                n.invite_id = Some(key_id);
                 (n.id, n.ip)
             }
             None => {
@@ -306,6 +372,10 @@ impl Db {
                     endpoints: Vec::new(),
                     last_seen: None,
                     tags: Vec::new(),
+                    expires_at: expiry(policy, host_key, now),
+                    no_expiry: host_key,
+                    invite_id: Some(key_id),
+                    routes: Vec::new(),
                 });
                 (id, ip)
             }
@@ -367,6 +437,9 @@ impl Db {
                 last_seen: n.last_seen,
                 tags: n.tags.clone(),
                 dns_name: format!("{}.{}", n.label, retail_proto::MAGIC_DNS_DOMAIN),
+                expires_at: n.expires_at,
+                invite_id: n.invite_id.filter(|id| s.data.keys.iter().any(|k| k.id == *id)),
+                approved_routes: n.routes.clone(),
             })
             .collect();
         rows.sort_by_key(|r| r.id);
@@ -388,6 +461,109 @@ impl Db {
             n.last_seen = Some(now_unix());
         }
         Ok(())
+    }
+
+    /// The whole database as saved, last-seen times included
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec_pretty(&self.inner.lock().unwrap().data)?)
+    }
+
+    /// Saves last-seen times now and then, so a crash loses little
+    pub fn save(&self) -> Result<()> {
+        self.inner.lock().unwrap().save()
+    }
+
+    pub fn expiry_settings(&self) -> (Option<u32>, Option<u32>) {
+        let s = self.inner.lock().unwrap();
+        (s.data.key_expiry_days, s.data.remove_inactive_days)
+    }
+
+    /// A new key lifetime starts now for every device it applies to, so
+    /// turning it on never cuts off devices that joined long ago
+    pub fn set_expiry_settings(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {
+        let check = |d: Option<u32>| d.is_none_or(|d| (1..=3650).contains(&d));
+        if !check(key_days) || !check(inactive_days) {
+            anyhow::bail!("days are 1 to 3650");
+        }
+        let now = now_unix();
+        let mut s = self.inner.lock().unwrap();
+        if s.data.key_expiry_days != key_days {
+            s.data.key_expiry_days = key_days;
+            for n in &mut s.data.nodes {
+                n.expires_at = expiry(key_days, n.no_expiry, now);
+            }
+        }
+        s.data.remove_inactive_days = inactive_days;
+        s.save()
+    }
+
+    /// A new key lifetime from now, or none at all with `never`. `false` if
+    /// there is no such device.
+    pub fn renew(&self, id: i64, never: bool) -> Result<bool> {
+        let now = now_unix();
+        let mut s = self.inner.lock().unwrap();
+        let policy = s.data.key_expiry_days;
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        n.no_expiry = never;
+        n.expires_at = expiry(policy, never, now);
+        s.save()?;
+        Ok(true)
+    }
+
+    /// Exempts a device from key expiry, changing nothing else
+    pub fn keep_forever(&self, id: i64) -> Result<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id)
+            && !n.no_expiry
+        {
+            n.no_expiry = true;
+            n.expires_at = None;
+            s.save()?;
+        }
+        Ok(())
+    }
+
+    /// The networks a device may route. `false` if there is no such device.
+    pub fn set_routes(&self, id: i64, routes: &[Ipv4Net]) -> Result<bool> {
+        for r in routes {
+            r.check_route().map_err(anyhow::Error::msg)?;
+        }
+        if routes.len() > retail_proto::route::MAX_ROUTES {
+            anyhow::bail!("at most {} networks", retail_proto::route::MAX_ROUTES);
+        }
+        let mut routes = routes.to_vec();
+        routes.sort();
+        routes.dedup();
+        let mut s = self.inner.lock().unwrap();
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        n.routes = routes;
+        s.save()?;
+        Ok(true)
+    }
+
+    /// Removes devices not seen within the configured time, except those
+    /// online now, never seen and exempt from expiry (the hosting device).
+    /// Returns the ids removed.
+    pub fn remove_inactive(&self, online: &dyn Fn(i64) -> bool) -> Result<Vec<i64>> {
+        let now = now_unix();
+        let mut s = self.inner.lock().unwrap();
+        let Some(days) = s.data.remove_inactive_days else { return Ok(Vec::new()) };
+        let cutoff = now - i64::from(days) * day_secs();
+        let stale: Vec<i64> = s
+            .data
+            .nodes
+            .iter()
+            .filter(|n| !n.no_expiry && !online(n.id) && n.last_seen.is_some_and(|t| t < cutoff))
+            .map(|n| n.id)
+            .collect();
+        if !stale.is_empty() {
+            s.data.nodes.retain(|n| !stale.contains(&n.id));
+            if s.data.helper_device.is_some_and(|h| stale.contains(&h)) {
+                s.data.helper_device = None;
+            }
+            s.save()?;
+        }
+        Ok(stale)
     }
 
     /// Persists last-seen times, which are not saved as they change
@@ -430,19 +606,25 @@ impl Db {
         self.inner.lock().unwrap().data.helper_device
     }
 
+    /// The helper device never expires: losing it would cut off the server
     pub fn set_helper_device(&self, id: Option<i64>) -> Result<()> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(id) = id
-            && !s.data.nodes.iter().any(|n| n.id == id)
-        {
-            anyhow::bail!("there is no device {id}");
+        if let Some(id) = id {
+            let n = s.data.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("there is no device {id}"))?;
+            n.no_expiry = true;
+            n.expires_at = None;
         }
         s.data.helper_device = id;
         s.save()
     }
 
-    pub async fn delete_node(&self, id: i64) -> Result<bool> {
+    /// With `revoke_invite`, the invite it joined with goes too
+    pub async fn delete_node(&self, id: i64, revoke_invite: bool) -> Result<bool> {
         let mut s = self.inner.lock().unwrap();
+        let invite = s.data.nodes.iter().find(|n| n.id == id).and_then(|n| n.invite_id);
+        if revoke_invite && let Some(k) = invite {
+            s.data.keys.retain(|x| x.id != k);
+        }
         let before = s.data.nodes.len();
         s.data.nodes.retain(|n| n.id != id);
         let deleted = s.data.nodes.len() != before;
@@ -572,7 +754,7 @@ mod tests {
         assert_eq!(db.node_id_by_token(&a.token).await.unwrap(), None);
         assert_eq!(db.node_id_by_token(&a2.token).await.unwrap(), Some(a.node_id));
 
-        assert!(db.delete_node(a.node_id).await.unwrap());
+        assert!(db.delete_node(a.node_id, false).await.unwrap());
         let c = db.register(&req(&key, 3)).await.unwrap();
         assert_eq!(c.ip, Ipv4Addr::new(100, 64, 0, 1));
 
@@ -651,6 +833,55 @@ mod tests {
         assert!(matches!(db.register(&req(&new, 6)).await, Err(RegisterError::InvalidAuthKey)), "revoked");
         let rows = db.list_preauth().await.unwrap();
         assert!(rows.iter().any(|r| r.name.as_deref() == Some("work") && r.uses == 1 && r.expires_at == NEVER));
+    }
+
+    #[tokio::test]
+    async fn key_expiry_and_inactive_devices() {
+        let (db, path) = temp_db().await;
+        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let host = db.create_host_key(Duration::from_secs(60)).await.unwrap();
+        let h = db.register(&req(&host, 1)).await.unwrap();
+        let a = db.register(&req(&key, 2)).await.unwrap();
+        let row = |db: &Db, id| {
+            let db = db.clone();
+            async move { db.all_nodes().await.unwrap().into_iter().find(|n| n.id == id).unwrap() }
+        };
+        assert_eq!(row(&db, a.node_id).await.expires_at, None, "no expiry by default");
+        assert!(row(&db, a.node_id).await.invite_id.is_some());
+        // Turning it on starts the clock now for everyone but the host
+        db.set_expiry_settings(Some(30), None).unwrap();
+        let now = now_unix();
+        let exp = row(&db, a.node_id).await.expires_at.unwrap();
+        assert!((exp - now - 30 * day_secs()).abs() < 5);
+        assert_eq!(row(&db, h.node_id).await.expires_at, None);
+        assert!(!row(&db, a.node_id).await.expired(now));
+        assert!(row(&db, a.node_id).await.expired(exp));
+        // Renewal: never, then back to the network's time
+        db.renew(a.node_id, true).unwrap();
+        assert_eq!(row(&db, a.node_id).await.expires_at, None);
+        db.renew(a.node_id, false).unwrap();
+        assert!(row(&db, a.node_id).await.expires_at.is_some());
+        assert!(db.set_expiry_settings(Some(0), None).is_err());
+        // Inactive devices go, unless online, exempt or never seen
+        let b = db.register(&req(&key, 3)).await.unwrap();
+        db.set_expiry_settings(Some(30), Some(1)).unwrap();
+        {
+            let mut s = db.inner.lock().unwrap();
+            for n in &mut s.data.nodes {
+                n.last_seen = Some(now - 2 * day_secs());
+            }
+        }
+        assert_eq!(db.remove_inactive(&|id| id == b.node_id).unwrap(), vec![a.node_id]);
+        assert_eq!(db.all_nodes().await.unwrap().len(), 2, "host and online b stay");
+        // Routes are checked
+        assert!(db.set_routes(b.node_id, &["0.0.0.0/0".parse().unwrap()]).is_err());
+        assert!(db.set_routes(b.node_id, &["192.168.1.0/24".parse().unwrap()]).unwrap());
+        assert_eq!(row(&db, b.node_id).await.approved_routes.len(), 1);
+        // Removing a device can revoke the invite it used
+        assert!(db.delete_node(b.node_id, true).await.unwrap());
+        assert!(matches!(db.register(&req(&key, 4)).await, Err(RegisterError::InvalidAuthKey)));
+        check(&db.snapshot().unwrap()).unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

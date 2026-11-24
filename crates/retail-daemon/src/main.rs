@@ -1,4 +1,5 @@
 mod backend;
+mod backup;
 mod control;
 mod crypto;
 mod engine;
@@ -164,6 +165,7 @@ async fn main() -> Result<()> {
     if let Err(e) = backend.start_if_wanted().await {
         tracing::error!("could not resume session: {e:#}");
     }
+    backend.exempt_own_node().await;
 
     let listener = tokio::net::TcpListener::bind(args.api)
         .await
@@ -172,6 +174,15 @@ async fn main() -> Result<()> {
 
     update::clean_up(&state_dir);
     update::spawn(backend.clone());
+    // Devices learn the hosted server's current addresses, which change
+    // with the router's public address or the LAN
+    let b = backend.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            b.host.publish_addrs().await;
+        }
+    });
 
     let shutdown_backend = backend.clone();
     let updater = backend.updater.clone();

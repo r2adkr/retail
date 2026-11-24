@@ -244,6 +244,8 @@ impl Dashboard {
         let busy = self.is_busy();
         let label = if busy { tr("Opening…") } else { tr("Open server") };
         self.button(c, t, label, PAD, y + 18.0, 150.0, Style::Primary, !busy, DashAction::Start);
+        // Restoring a backup happens in the web admin page, which has a file picker
+        self.button(c, t, tr("Restore from a backup…"), PAD + 158.0, y + 18.0, w - 158.0, Style::Secondary, !busy, DashAction::OpenWeb);
         y + 18.0 + BUTTON_H
     }
 

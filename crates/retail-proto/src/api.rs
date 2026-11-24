@@ -38,6 +38,10 @@ pub enum ClientMessage {
         /// Offers to route other nodes' internet traffic
         #[serde(default)]
         exit_node: bool,
+        /// Networks it offers to route for the others (subnet routes); they
+        /// work once the server's administrator approves them
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<crate::route::Ipv4Net>,
     },
     /// This node as a helper for the server (asked by `NetMap::helper`):
     /// its helper code once it listens, `None` if it cannot or stopped
@@ -61,6 +65,17 @@ pub struct NetMap {
     /// reached from other networks, and an administrator chose this node)
     #[serde(default)]
     pub helper: bool,
+    /// When this node's key expires (unix seconds), `None` for never
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// The key expired: the node is cut off from the others until the
+    /// administrator renews it, so `peers` is empty
+    #[serde(default)]
+    pub expired: bool,
+    /// The addresses the server is reachable at now (`host:port`), for
+    /// nodes to find it after its public address changes
+    #[serde(default)]
+    pub server_addrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,6 +97,9 @@ pub struct Node {
     /// What the netmap's owner accepts from this node
     #[serde(default)]
     pub accept: crate::acl::Accept,
+    /// Networks routed through this node (subnet routes), approved and offered
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<crate::route::Ipv4Net>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +158,12 @@ pub struct ServerStatus {
     /// `None`: every device reaches every other
     #[serde(default)]
     pub acl: Option<crate::acl::AclPolicy>,
+    /// Device keys expire this many days after joining or renewal
+    #[serde(default)]
+    pub key_expiry_days: Option<u32>,
+    /// Devices not seen for this many days are removed
+    #[serde(default)]
+    pub remove_inactive_days: Option<u32>,
     pub nodes: Vec<ServerNode>,
     pub invites: Vec<ServerInvite>,
     pub last_error: Option<String>,
@@ -176,6 +200,20 @@ pub struct ServerNode {
     pub dns_name: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Networks the device offers to route, while it is connected
+    #[serde(default)]
+    pub advertised_routes: Vec<crate::route::Ipv4Net>,
+    /// Networks the administrator lets it route
+    #[serde(default)]
+    pub approved_routes: Vec<crate::route::Ipv4Net>,
+    /// When its key expires, `None` for never
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub expired: bool,
+    /// The invite it joined with, if that invite still exists
+    #[serde(default)]
+    pub invite_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +319,12 @@ pub struct StatusResponse {
     pub servers: Vec<SavedServer>,
     #[serde(default)]
     pub update: UpdateStatus,
+    /// When this device's key expires, `None` for never
+    #[serde(default)]
+    pub key_expires_at: Option<i64>,
+    /// The key expired: the administrator must renew it
+    #[serde(default)]
+    pub key_expired: bool,
 }
 
 /// New official releases, as the daemon sees them
@@ -324,6 +368,58 @@ pub struct TagsRequest {
     pub tags: Vec<String>,
 }
 
+/// `POST /server/nodes/{id}/routes`: the networks it may route
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoutesRequest {
+    pub routes: Vec<crate::route::Ipv4Net>,
+}
+
+/// `POST /server/expiry`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExpiryRequest {
+    /// `None`: keys never expire
+    pub key_expiry_days: Option<u32>,
+    /// `None`: inactive devices stay
+    pub remove_inactive_days: Option<u32>,
+}
+
+/// `POST /server/nodes/{id}/renew`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RenewRequest {
+    /// The key never expires (instead of the network's usual time)
+    #[serde(default)]
+    pub never: bool,
+}
+
+/// `POST /server/nodes/{id}/delete`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoveRequest {
+    /// Also revoke the invite the device joined with, so nobody can join
+    /// with it again
+    #[serde(default)]
+    pub revoke_invite: bool,
+}
+
+/// `POST /server/backup`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackupRequest {
+    /// Encrypts the backup; restoring needs it
+    pub passphrase: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackupResponse {
+    /// The backup file's contents
+    pub backup: String,
+}
+
+/// `POST /server/restore`, while the server is stopped
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestoreRequest {
+    pub backup: String,
+    pub passphrase: String,
+}
+
 /// `POST /server/helper-device`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HelperDeviceRequest {
@@ -355,6 +451,9 @@ pub struct Prefs {
     /// Install new official releases on their own
     #[serde(default)]
     pub auto_update: bool,
+    /// Networks this device offers to route for the others
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advertise_routes: Vec<crate::route::Ipv4Net>,
 }
 
 /// `POST /prefs`. Fields left out stay as they are.
@@ -373,6 +472,9 @@ pub struct PrefsRequest {
     pub proxy: Option<String>,
     #[serde(default)]
     pub auto_update: Option<bool>,
+    /// Networks such as `192.168.1.0/24`; empty stops routing any
+    #[serde(default)]
+    pub advertise_routes: Option<Vec<String>>,
 }
 
 /// `POST /proxy/system`: the proxies the signed-in user's settings choose for
@@ -440,6 +542,9 @@ pub struct PeerStatus {
     /// This device takes only some traffic from it (an access rule)
     #[serde(default)]
     pub restricted: bool,
+    /// Networks reached through it
+    #[serde(default)]
+    pub routes: Vec<crate::route::Ipv4Net>,
 }
 
 #[cfg(test)]
@@ -466,12 +571,16 @@ mod tests {
             exit_node: false,
             dns_name: "a.retail.internal".into(),
             accept: crate::acl::Accept::Ports { ports: vec![crate::acl::PortRule::parse("tcp:22").unwrap()] },
+            routes: vec!["192.168.1.0/24".parse().unwrap()],
         };
         let nm = ServerMessage::NetMap(NetMap {
             self_node: node.clone(),
             peers: vec![node],
             stun_servers: vec![],
             helper: false,
+            expires_at: Some(1),
+            expired: false,
+            server_addrs: vec!["203.0.113.1:443".into()],
         });
         let s = serde_json::to_string(&nm).unwrap();
         assert!(s.starts_with(r#"{"type":"net_map""#));
@@ -482,5 +591,9 @@ mod tests {
         let ServerMessage::NetMap(nm) = serde_json::from_str::<ServerMessage>(old).unwrap();
         assert_eq!(nm.self_node.accept, crate::acl::Accept::All);
         assert!(!nm.helper);
+        assert!(!nm.expired && nm.expires_at.is_none() && nm.server_addrs.is_empty() && nm.self_node.routes.is_empty());
+        // And an older client's hostinfo
+        let ClientMessage::Hostinfo { routes, .. } = serde_json::from_str(r#"{"type":"hostinfo","exit_node":true}"#).unwrap() else { panic!() };
+        assert!(routes.is_empty());
     }
 }

@@ -1277,6 +1277,7 @@ mod preview {
             rx_bytes: 0,
             dns_name: format!("{name}.retail.internal"),
             restricted: false,
+            routes: vec![],
         }
     }
 
@@ -1320,6 +1321,8 @@ mod preview {
                 ..Default::default()
             },
             memory_peak: Some(9_437_184),
+            key_expires_at: None,
+            key_expired: state == "expired",
             control_via: None,
             update: retail_proto::api::UpdateStatus {
                 current: env!("CARGO_PKG_VERSION").into(),
@@ -1413,6 +1416,11 @@ mod preview {
             }),
             dns_name: format!("{name}.retail.internal"),
             tags: Vec::new(),
+            advertised_routes: Vec::new(),
+            approved_routes: Vec::new(),
+            expires_at: None,
+            expired: false,
+            invite_id: None,
         };
         d.status = Some(Ok(if state == "idle" {
             ServerStatus::default()

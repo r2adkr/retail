@@ -20,6 +20,7 @@ use futures_util::SinkExt;
 use tokio::sync::{mpsc, watch};
 
 use crate::db::{Db, NodeRow, RegisterError};
+use retail_proto::route::Ipv4Net;
 
 /// Keeps netmaps small
 const MAX_ENDPOINTS: usize = 16;
@@ -54,6 +55,10 @@ pub struct AppState {
     next_conn: Arc<AtomicU64>,
     /// Reported on connect, forgotten on disconnect
     exit_nodes: Arc<Mutex<std::collections::HashSet<i64>>>,
+    /// Networks each connected node offers to route
+    offered_routes: Arc<Mutex<HashMap<i64, Vec<Ipv4Net>>>>,
+    /// Where the server is reachable now, sent to nodes
+    server_addrs: Arc<Mutex<Vec<String>>>,
     /// Helper codes of member devices acting as helper nodes, while connected
     helper_codes: Arc<Mutex<HashMap<i64, String>>>,
     /// The chosen helper device's code, for the hosting daemon to link to
@@ -78,6 +83,8 @@ impl AppState {
             relays: Arc::default(),
             next_conn: Arc::default(),
             exit_nodes: Arc::default(),
+            offered_routes: Arc::default(),
+            server_addrs: Arc::default(),
             helper_codes: Arc::default(),
             helper_code: Arc::new(watch::channel(None).0),
             shutdown: Arc::new(watch::channel(false).0),
@@ -124,6 +131,73 @@ impl AppState {
         });
     }
 
+    pub(crate) fn set_server_addrs(&self, addrs: Vec<String>) {
+        let changed = {
+            let mut cur = self.server_addrs.lock().unwrap();
+            let changed = *cur != addrs;
+            *cur = addrs;
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+    }
+
+    pub(crate) fn offered_routes(&self, id: i64) -> Vec<Ipv4Net> {
+        self.offered_routes.lock().unwrap().get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Who routes each network: of the connected nodes offering an approved
+    /// network, the oldest, so the choice does not flap
+    fn route_owners(&self, nodes: &[NodeRow], now: i64) -> HashMap<Ipv4Net, i64> {
+        let offered = self.offered_routes.lock().unwrap();
+        let online = self.online.lock().unwrap();
+        let mut owners: HashMap<Ipv4Net, i64> = HashMap::new();
+        for n in nodes.iter().filter(|n| online.contains_key(&n.id) && !n.expired(now)) {
+            for r in offered.get(&n.id).into_iter().flatten().filter(|r| n.approved_routes.contains(r)) {
+                owners.entry(*r).and_modify(|o| *o = (*o).min(n.id)).or_insert(n.id);
+            }
+        }
+        owners
+    }
+
+    /// Runs the clock-driven work: expiring keys (by sending new netmaps),
+    /// removing inactive devices, and saving last-seen times
+    pub(crate) async fn maintain(self) {
+        let period = Duration::from_secs(crate::db::day_secs().clamp(1, 60) as u64);
+        let mut expired: std::collections::HashSet<i64> = Default::default();
+        let mut tick = tokio::time::interval(period);
+        let mut last_save = std::time::Instant::now();
+        loop {
+            tick.tick().await;
+            let now = crate::db::now_unix();
+            let Ok(nodes) = self.db.all_nodes().await else { continue };
+            let now_expired: std::collections::HashSet<i64> = nodes.iter().filter(|n| n.expired(now)).map(|n| n.id).collect();
+            let mut changed = now_expired != expired;
+            for id in now_expired.difference(&expired) {
+                tracing::info!(node_id = id, "device key expired");
+            }
+            expired = now_expired;
+            match self.db.remove_inactive(&|id| self.is_online(id)) {
+                Ok(gone) if !gone.is_empty() => {
+                    tracing::info!(?gone, "removed devices not seen for too long");
+                    changed = true;
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("removing inactive devices: {e:#}"),
+            }
+            if changed {
+                self.notify();
+            }
+            if last_save.elapsed() >= Duration::from_secs(600) {
+                last_save = std::time::Instant::now();
+                if let Err(e) = self.db.save() {
+                    tracing::warn!("saving the server state: {e:#}");
+                }
+            }
+        }
+    }
+
     pub(crate) fn is_exit_node(&self, id: i64) -> bool {
         self.exit_nodes.lock().unwrap().contains(&id)
     }
@@ -156,12 +230,20 @@ impl AppState {
 
     /// `None` if the node no longer exists
     async fn netmap_for(&self, node_id: i64) -> Result<Option<NetMap>> {
+        let now = crate::db::now_unix();
         let nodes = self.db.all_nodes().await?;
+        let owners = self.route_owners(&nodes, now);
         let online = self.online.lock().unwrap().clone();
         let exits = self.exit_nodes.lock().unwrap().clone();
         let acl = self.db.acl();
         let Some(me) = nodes.iter().find(|n| n.id == node_id) else { return Ok(None) };
+        let expired = me.expired(now);
         let viewer = crate::acl::Member { id: me.id, tags: &me.tags };
+        let routes_of = |id: i64| {
+            let mut r: Vec<Ipv4Net> = owners.iter().filter(|(_, o)| **o == id).map(|(r, _)| *r).collect();
+            r.sort();
+            r
+        };
         let to_node = |n: &NodeRow, accept| Node {
             online: online.contains_key(&n.id),
             exit_node: exits.contains(&n.id) && online.contains_key(&n.id),
@@ -173,11 +255,13 @@ impl AppState {
             endpoints: n.endpoints.clone(),
             dns_name: n.dns_name.clone(),
             accept,
+            routes: routes_of(n.id),
         };
-        // Devices that may not talk either way do not see each other at all
+        // Devices that may not talk either way do not see each other at all,
+        // and one whose key expired sees and is seen by nobody
         let peers = nodes
             .iter()
-            .filter(|n| n.id != node_id)
+            .filter(|n| n.id != node_id && !expired && !n.expired(now))
             .filter_map(|n| {
                 let accept = crate::acl::view(acl.as_ref(), &viewer, &crate::acl::Member { id: n.id, tags: &n.tags })?;
                 Some(to_node(n, accept))
@@ -187,7 +271,10 @@ impl AppState {
             self_node: to_node(me, retail_proto::acl::Accept::All),
             peers,
             stun_servers: self.stun_servers.lock().unwrap().clone(),
-            helper: self.db.helper_device() == Some(node_id),
+            helper: self.db.helper_device() == Some(node_id) && !expired,
+            expires_at: me.expires_at,
+            expired,
+            server_addrs: self.server_addrs.lock().unwrap().clone(),
         }))
     }
 }
@@ -313,8 +400,9 @@ async fn serve_node(state: &AppState, node_id: i64, socket: WebSocket) -> Result
     let mut relays = state.relays.lock().unwrap();
     if relays.by_key.get(&key).is_some_and(|(c, _)| *c == conn) {
         relays.by_key.remove(&key);
-        // The exit node offer ends with the node's newest connection
+        // The exit node and route offers end with the node's newest connection
         state.exit_nodes.lock().unwrap().remove(&node_id);
+        state.offered_routes.lock().unwrap().remove(&node_id);
         // So does a helper node on it
         if state.helper_codes.lock().unwrap().remove(&node_id).is_some() {
             state.refresh_helper_code();
@@ -334,6 +422,8 @@ async fn serve_connection(
     let mut shutdown = state.shutdown.subscribe();
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut last_sent: Option<String> = None;
+    // An expired node may not relay to anyone
+    let mut blocked = true;
     // Send the first netmap immediately
     changes.mark_changed();
 
@@ -347,6 +437,7 @@ async fn serve_connection(
                     let _ = socket.send(Message::Close(None)).await;
                     return Ok(());
                 };
+                blocked = nm.expired;
                 let json = serde_json::to_string(&ServerMessage::NetMap(nm))?;
                 if last_sent.as_deref() != Some(json.as_str()) {
                     socket.send(Message::Text(json.clone().into())).await?;
@@ -362,13 +453,28 @@ async fn serve_connection(
                             state.db.set_endpoints(node_id, &endpoints).await?;
                             state.notify();
                         }
-                        Ok(ClientMessage::Hostinfo { exit_node }) => {
-                            let changed = {
+                        Ok(ClientMessage::Hostinfo { exit_node, mut routes }) => {
+                            let mut changed = {
                                 let mut exits = state.exit_nodes.lock().unwrap();
                                 if exit_node { exits.insert(node_id) } else { exits.remove(&node_id) }
                             };
                             if changed {
                                 tracing::info!(node_id, exit_node, "exit node offer changed");
+                            }
+                            routes.retain(|r| r.check_route().is_ok());
+                            routes.sort();
+                            routes.dedup();
+                            routes.truncate(retail_proto::route::MAX_ROUTES);
+                            {
+                                let mut offered = state.offered_routes.lock().unwrap();
+                                let before = offered.get(&node_id).cloned().unwrap_or_default();
+                                if before != routes {
+                                    tracing::info!(node_id, ?routes, "routes offered");
+                                    changed = true;
+                                    if routes.is_empty() { offered.remove(&node_id) } else { offered.insert(node_id, routes) };
+                                }
+                            }
+                            if changed {
                                 state.notify();
                             }
                         }
@@ -385,7 +491,7 @@ async fn serve_connection(
                         }
                         Err(e) => tracing::warn!(node_id, "bad client message: {e}"),
                     },
-                    Some(Ok(Message::Binary(frame))) => state.forward(&key, frame),
+                    Some(Ok(Message::Binary(frame))) if !blocked => state.forward(&key, frame),
                     Some(Ok(Message::Close(_))) | None => return Ok(()),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),

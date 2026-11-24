@@ -43,9 +43,9 @@ impl retail_web::Backend for Glue {
     fn revoke(&self, id: i64) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.revoke_invite(id).await.map(|_| ()).map_err(text) })
     }
-    fn delete_node(&self, id: i64) -> BoxFut<'_, Result<(), String>> {
+    fn delete_node(&self, id: i64, revoke_invite: bool) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move {
-            self.backend.host.delete_node(id).await.map_err(text)?;
+            self.backend.host.delete_node(id, revoke_invite).await.map_err(text)?;
             let _ = self.backend.host.set_web_admin(id, false);
             Ok(())
         })
@@ -73,6 +73,21 @@ impl retail_web::Backend for Glue {
     }
     fn set_helper_device(&self, id: Option<i64>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.set_helper_device(id).await.map_err(text) })
+    }
+    fn set_routes(&self, id: i64, routes: Vec<retail_proto::route::Ipv4Net>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.set_routes(id, &routes).await.map_err(text) })
+    }
+    fn renew(&self, id: i64, never: bool) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.renew(id, never).await.map_err(text) })
+    }
+    fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.set_expiry(key_days, inactive_days).await.map_err(text) })
+    }
+    fn backup(&self, passphrase: String) -> BoxFut<'_, Result<String, String>> {
+        Box::pin(async move { self.backend.host.backup(&passphrase).await.map_err(text) })
+    }
+    fn restore(&self, backup: String, passphrase: String) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.restore(&backup, &passphrase).await.map_err(text) })
     }
     fn fetch_client(&self, variant: &str) -> BoxFut<'_, Result<(), String>> {
         let variant = variant.to_string();

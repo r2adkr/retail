@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use retail_proto::LOCAL_API_ADDR;
 use retail_proto::acl::{AclPolicy, AclRule};
 use retail_proto::api::{
-    AclRequest, ApiError, BackendState, HelperDeviceRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
+    AclRequest, ApiError, BackendState, BackupRequest, BackupResponse, ExpiryRequest, HelperDeviceRequest, RemoveRequest, RenewRequest, RestoreRequest, RoutesRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
     StatusResponse, TagsRequest, UpRequest,
 };
 
@@ -83,6 +83,11 @@ enum Cmd {
         /// Install new official releases on their own
         #[arg(long, value_name = "true|false", num_args = 0..=1, default_missing_value = "true")]
         auto_update: Option<bool>,
+        /// Route these networks for the other devices (subnet router, e.g.
+        /// 192.168.1.0/24,10.0.0.0/24), once the server's administrator
+        /// approves them; `none` stops. Linux only.
+        #[arg(long, value_name = "NETWORKS|none")]
+        advertise_routes: Option<String>,
     },
     /// Check for a new release and install it
     Update {
@@ -182,8 +187,54 @@ enum ServerCmd {
         #[arg(long)]
         print: bool,
     },
-    /// Remove a device from the network
-    Remove { id: i64 },
+    /// Remove a device from the network (a lost laptop, say). It needs an
+    /// invite to come back.
+    Remove {
+        /// Device: name, mesh IP or id
+        device: String,
+        /// Also expire the invite it joined with, so nobody can join with it again
+        #[arg(long)]
+        revoke_invite: bool,
+    },
+    /// Let a device route networks for the others (a subnet router). Without
+    /// networks, approves all it offers.
+    Routes {
+        /// Device: name, mesh IP or id
+        device: String,
+        /// Networks such as 192.168.1.0/24
+        networks: Vec<String>,
+        /// Stop it routing any
+        #[arg(long, conflicts_with = "networks")]
+        off: bool,
+    },
+    /// Device key expiry and the removal of devices not seen for long: show,
+    /// or change
+    Expiry {
+        /// Days a device key lasts after joining or renewal, or `never`
+        #[arg(long, value_name = "DAYS|never")]
+        keys: Option<String>,
+        /// Remove devices not seen for this many days, or `never`
+        #[arg(long, value_name = "DAYS|never")]
+        inactive: Option<String>,
+    },
+    /// Give a device's key a new lifetime (also brings back one that expired)
+    Renew {
+        /// Device: name, mesh IP or id
+        device: String,
+        /// Its key never expires
+        #[arg(long)]
+        never: bool,
+    },
+    /// Save the server's data (devices, invites, rules, keys) to a
+    /// passphrase-encrypted file, to move or restore the server
+    Backup {
+        file: String,
+    },
+    /// Replace this device's server data with a backup's (the server must be
+    /// stopped); then `retail server start`
+    Restore {
+        file: String,
+    },
     /// Revoke an invite (a named one stops working at once)
     Revoke { id: i64 },
     /// Access between devices: show the rules, or change them
@@ -329,13 +380,14 @@ async fn main() -> Result<()> {
                 _ => println!("retail {} is the newest version", u.current),
             }
         }
-        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update } => {
+        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update, advertise_routes } => {
+            let advertise_routes = advertise_routes.map(|r| if r.trim() == "none" { Vec::new() } else { vec![r] });
             let memory_limit_mb = match memory_limit.as_deref() {
                 None => None,
                 Some("auto") | Some("0") => Some(0),
                 Some(v) => Some(v.parse::<u32>().context("--memory-limit takes a number of MiB or `auto`")?),
             };
-            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update };
+            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes };
             print_status(&client.post::<_, StatusResponse>("/prefs", Some(&req)).await?);
         }
         Cmd::ExitNodes => {
@@ -417,7 +469,75 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
             println!("{}", inv.code);
             return Ok(());
         }
-        ServerCmd::Remove { id } => client.post::<(), _>(&format!("/server/nodes/{id}/delete"), None).await?,
+        ServerCmd::Remove { device, revoke_invite } => {
+            let current: ServerStatus = client.get("/server").await?;
+            let id = find_device(&current, &device)?;
+            client.post(&format!("/server/nodes/{id}/delete"), Some(&RemoveRequest { revoke_invite })).await?
+        }
+        ServerCmd::Routes { device, networks, off } => {
+            let current: ServerStatus = client.get("/server").await?;
+            let id = find_device(&current, &device)?;
+            let node = current.nodes.iter().find(|n| n.id == id).context("no such device")?;
+            let routes = if off {
+                Vec::new()
+            } else if networks.is_empty() {
+                if node.advertised_routes.is_empty() {
+                    bail!("{} offers no networks (on it: retail set --advertise-routes 192.168.1.0/24)", node.hostname);
+                }
+                let mut all = node.approved_routes.clone();
+                all.extend(node.advertised_routes.iter().filter(|r| !node.approved_routes.contains(r)));
+                all
+            } else {
+                retail_proto::route::parse_routes(&networks).map_err(anyhow::Error::msg)?
+            };
+            client.post(&format!("/server/nodes/{id}/routes"), Some(&RoutesRequest { routes })).await?
+        }
+        ServerCmd::Renew { device, never } => {
+            let current: ServerStatus = client.get("/server").await?;
+            let id = find_device(&current, &device)?;
+            client.post(&format!("/server/nodes/{id}/renew"), Some(&RenewRequest { never })).await?
+        }
+        ServerCmd::Expiry { keys, inactive } => {
+            let current: ServerStatus = client.get("/server").await?;
+            if keys.is_none() && inactive.is_none() {
+                print_expiry(&current);
+                return Ok(());
+            }
+            let days = |v: Option<String>, cur: Option<u32>| -> Result<Option<u32>> {
+                match v.as_deref().map(str::trim) {
+                    None => Ok(cur),
+                    Some("never") | Some("off") => Ok(None),
+                    Some(d) => Ok(Some(d.parse().context("days are a number, or `never`")?)),
+                }
+            };
+            let req = ExpiryRequest {
+                key_expiry_days: days(keys, current.key_expiry_days)?,
+                remove_inactive_days: days(inactive, current.remove_inactive_days)?,
+            };
+            let st: ServerStatus = client.post("/server/expiry", Some(&req)).await?;
+            print_expiry(&st);
+            return Ok(());
+        }
+        ServerCmd::Backup { file } => {
+            if std::path::Path::new(&file).exists() {
+                bail!("{file} exists already; choose another name");
+            }
+            let passphrase = passphrase(true)?;
+            let r: BackupResponse = client.post("/server/backup", Some(&BackupRequest { passphrase })).await?;
+            write_private(&file, r.backup.as_bytes())?;
+            println!("saved the server's backup to {file}");
+            eprintln!("Keep the file and its passphrase safe: together they let anyone pose as this server.");
+            return Ok(());
+        }
+        ServerCmd::Restore { file } => {
+            let backup = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
+            let passphrase = passphrase(false)?;
+            client.post::<_, ServerStatus>("/server/restore", Some(&RestoreRequest { backup, passphrase })).await?;
+            println!("restored the server's data; start it with `retail server start`");
+            eprintln!("Stop the old server for good if it still runs: two servers with the same keys confuse the devices.");
+            eprintln!("If its address changed and has no domain, give each device a new invite: it keeps its address and name.");
+            return Ok(());
+        }
         ServerCmd::Revoke { id } => client.post::<(), _>(&format!("/server/invites/{id}/revoke"), None).await?,
         ServerCmd::Tag { device, tags } => {
             let current: ServerStatus = client.get("/server").await?;
@@ -473,6 +593,73 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
     };
     print_server(&st);
     Ok(())
+}
+
+/// Reads a passphrase without showing it, from `RETAIL_BACKUP_PASSPHRASE` if set
+fn passphrase(confirm: bool) -> Result<String> {
+    if let Ok(p) = std::env::var("RETAIL_BACKUP_PASSPHRASE") {
+        return Ok(p);
+    }
+    let first = read_hidden("Passphrase: ")?;
+    if confirm {
+        if first.chars().count() < 8 {
+            bail!("the passphrase needs at least 8 characters");
+        }
+        if read_hidden("Again: ")? != first {
+            bail!("the passphrases differ");
+        }
+    }
+    Ok(first)
+}
+
+fn read_hidden(prompt: &str) -> Result<String> {
+    use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+    use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    use std::io::Write;
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    enable_raw_mode().context("no terminal to type a passphrase in (set RETAIL_BACKUP_PASSPHRASE)")?;
+    let mut s = String::new();
+    let result = loop {
+        match read() {
+            Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => match k.code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break Err(anyhow::anyhow!("cancelled")),
+                KeyCode::Char(c) => s.push(c),
+                KeyCode::Backspace => {
+                    s.pop();
+                }
+                KeyCode::Esc => break Err(anyhow::anyhow!("cancelled")),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(e) => break Err(e.into()),
+        }
+    };
+    let _ = disable_raw_mode();
+    eprintln!();
+    result.map(|()| s)
+}
+
+/// Readable by the owner only, where the system has such permissions
+fn write_private(path: &str, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path).with_context(|| format!("writing {path}"))?;
+    f.write_all(bytes)?;
+    Ok(())
+}
+
+fn print_expiry(st: &ServerStatus) {
+    let days = |d: Option<u32>| d.map_or("never".to_string(), |d| format!("{d} days"));
+    println!("keys:     expire after {} (`retail server renew DEVICE` renews one)", days(st.key_expiry_days));
+    println!("inactive: devices not seen for {} are removed", days(st.remove_inactive_days));
 }
 
 /// A device by name (`laptop` or `laptop.retail.internal`), mesh IP or id
@@ -555,6 +742,12 @@ fn print_server(st: &ServerStatus) {
     if st.acl.is_some() {
         println!("access:  limited by rules (`retail server acl`)");
     }
+    if let Some(d) = st.key_expiry_days {
+        println!("keys:    expire after {d} days (`retail server expiry`)");
+    }
+    if let Some(d) = st.remove_inactive_days {
+        println!("cleanup: devices not seen for {d} days are removed");
+    }
     if !st.fronts.is_empty() {
         println!("cdn:     {}", st.fronts.join(", "));
     }
@@ -569,7 +762,18 @@ fn print_server(st: &ServerStatus) {
             let exit = if n.exit_node { " exit node" } else { "" };
             let tags = if n.tags.is_empty() { String::new() } else { format!(" [{}]", n.tags.join(", ")) };
             let name = if n.dns_name.is_empty() { &n.hostname } else { &n.dns_name };
-            println!("{:<5} {:<16} {:<30} {:<8} {status}{exit}{tags}", n.id, n.ip.to_string(), name, n.os);
+            let key = match (n.expired, n.expires_at) {
+                (true, _) => " KEY EXPIRED".to_string(),
+                (false, Some(at)) => format!(" key {}d", (at - now_unix()).max(0) / 86_400),
+                _ => String::new(),
+            };
+            let live: Vec<String> = n.advertised_routes.iter().filter(|r| n.approved_routes.contains(r)).map(ToString::to_string).collect();
+            let waiting: Vec<String> = n.advertised_routes.iter().filter(|r| !n.approved_routes.contains(r)).map(ToString::to_string).collect();
+            let routes = if live.is_empty() { String::new() } else { format!(" routes {}", live.join(",")) };
+            println!("{:<5} {:<16} {:<30} {:<8} {status}{exit}{routes}{key}{tags}", n.id, n.ip.to_string(), name, n.os);
+            if !waiting.is_empty() {
+                println!("      offers {} (approve: retail server routes {})", waiting.join(", "), n.hostname);
+            }
         }
     }
     let named: Vec<_> = st.invites.iter().filter(|i| i.name.is_some()).collect();
@@ -646,6 +850,18 @@ fn print_status(st: &StatusResponse) {
     if st.prefs.advertise_exit_node {
         println!("offer:   this device is an exit node for the others");
     }
+    if !st.prefs.advertise_routes.is_empty() {
+        let nets: Vec<String> = st.prefs.advertise_routes.iter().map(ToString::to_string).collect();
+        println!("routes:  offers {} (the server's administrator approves them)", nets.join(", "));
+    }
+    if st.key_expired {
+        println!("key:     EXPIRED: this device is cut off until the server's administrator renews it");
+    } else if let Some(at) = st.key_expires_at {
+        let days = (at - now_unix()).max(0) / 86_400;
+        if days < 14 {
+            println!("key:     expires in {days} days; the server's administrator can renew it");
+        }
+    }
     if let Some(proxy) = &st.prefs.proxy {
         // Without the password
         let shown = match proxy.split_once("://").zip(proxy.rsplit_once('@')) {
@@ -691,6 +907,7 @@ fn print_status(st: &StatusResponse) {
             {
                 let name = if p.dns_name.is_empty() { p.hostname.clone() } else { p.dns_name.trim_end_matches(".retail.internal").to_string() };
                 let name = if p.restricted { format!("{name} [limited]") } else { name };
+                let name = if p.routes.is_empty() { name } else { format!("{name} [routes]") };
                 if p.exit_node { format!("{name} [exit]") } else { name }
             },
             if p.online { "online" } else { "offline" },

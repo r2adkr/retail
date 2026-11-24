@@ -17,6 +17,9 @@ A self-hosted mesh VPN. Your devices reach each other directly over WireGuard, f
 - **Works behind CGNAT** with a helper node: any member device that other networks can reach, or a VPS.
 - **MagicDNS**: reach devices by name, such as `nas.retail.internal`.
 - **Access control** with device tags and rules.
+- **Subnet routes**: reach a whole LAN (printers, NAS, cameras) through one device in it.
+- **Lost devices** are cut off with one click; device keys can expire, and devices gone for long are cleaned up.
+- **Encrypted server backups** to restore or move the server; devices keep their addresses and names.
 - **Exit nodes**, several saved networks per device, and automatic updates.
 - **Small and fast**: about 12 MB of memory, faster than wireguard-go in our [measurements](docs/DESIGN.md), and builds for Raspberry Pi and other ARM machines.
 - Desktop app for Windows, macOS and Linux in English, Korean, Japanese, Chinese and Spanish, plus a CLI and a terminal UI.
@@ -64,6 +67,8 @@ Then, for example:
 retail set --exit-node <device>                                       # send internet traffic through another device
 retail server acl allow --from '*' --to tag:server --ports tcp:443    # access rules
 retail server helper-device <device>                                  # helper node behind CGNAT
+retail set --advertise-routes 192.168.1.0/24                          # route this LAN (then: retail server routes <device>)
+retail server backup retail-server.retail-backup                      # encrypted backup of the server
 retail server web                                                     # open the web admin page
 ```
 
@@ -71,7 +76,7 @@ retail server web                                                     # open the
 
 ## Documentation
 
-- [Self-hosting](docs/SELF-HOSTING.md): servers, helper nodes, CDN and REALITY, access rules, updates, backups
+- [Self-hosting](docs/SELF-HOSTING.md): servers, helper nodes, CDN and REALITY, access rules, subnet routes, backups, updates
 - [Design](docs/DESIGN.md): how it works, security model, performance, known limitations
 - [Development](docs/DEVELOPMENT.md): building, tests, releases
 

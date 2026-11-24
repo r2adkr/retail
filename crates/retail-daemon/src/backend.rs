@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 
 use crate::control;
 use crate::engine::{DataPlaneTask, Engine, EngineConfig};
-use crate::exit::{ClientRoutes, ExitNat};
+use crate::exit::{ClientRoutes, Gateway, SubnetRoutes};
 use crate::state::Persisted;
 
 pub struct Options {
@@ -31,9 +31,10 @@ struct Session {
     tasks: JoinSet<()>,
     threads: Vec<std::thread::JoinHandle<()>>,
     stop: watch::Sender<bool>,
-    /// Exit-node routing (we use an exit) and forwarding (we are one), undone on drop
+    /// Exit-node routing (we use an exit), undone on drop
     exit_routes: Option<ClientRoutes>,
-    exit_nat: Option<ExitNat>,
+    /// Forwarding for the mesh (we are an exit node or route networks)
+    gateway: Arc<std::sync::Mutex<Gateway>>,
     /// The system sends MagicDNS names to us while this lives
     _dns: Option<crate::magicdns::SystemDns>,
 }
@@ -41,7 +42,7 @@ struct Session {
 pub struct Backend {
     opts: Options,
     state_path: PathBuf,
-    persisted: Mutex<Persisted>,
+    persisted: Arc<Mutex<Persisted>>,
     session: Mutex<Option<Session>>,
     last_error: Arc<std::sync::Mutex<Option<String>>>,
     /// Fatal errors of session tasks, on which the supervisor restarts the session
@@ -76,7 +77,7 @@ impl Backend {
         Ok(Backend {
             opts,
             state_path,
-            persisted: Mutex::new(persisted),
+            persisted: Arc::new(Mutex::new(persisted)),
             session: Mutex::new(None),
             last_error: Arc::default(),
             failures,
@@ -162,9 +163,32 @@ impl Backend {
         };
         let server = target.url.clone();
         let mut p = self.persisted.lock().await;
+        let previous = p.clone();
+        // The same server at a new address (moved, or restored from a backup
+        // on another device) has the same key: this device stays the same
+        // member, with its address and name, rather than joining anew
+        if let Some(pin) = target.pin.map(|k| retail_proto::invite::encode_pin(&k))
+            && p.server.as_deref() != Some(server.as_str())
+        {
+            let current = p.token.is_some() && p.server_pin.as_deref() == Some(pin.as_str());
+            let saved = p.saved.iter().find(|s| s.server_pin.as_deref() == Some(pin.as_str()) && s.token.is_some()).cloned();
+            if current || saved.is_some() {
+                let old = if current { p.server.clone().unwrap_or_default() } else { saved.as_ref().map(|s| s.server.clone()).unwrap_or_default() };
+                tracing::info!("{old} is now at {server}");
+                if !current {
+                    self.stop_session().await;
+                    p.remember_current();
+                    p.clear_current();
+                    if let Some(s) = &saved {
+                        p.load_profile(s);
+                    }
+                }
+                p.saved.retain(|s| s.server != old);
+                p.server = Some(server.clone());
+            }
+        }
         // Joining another server keeps the current one in the saved list, to
         // switch back to, and goes back to it if joining fails
-        let previous = p.clone();
         if p.token.is_some() && p.server.as_deref() != Some(server.as_str()) {
             self.stop_session().await;
             p.remember_current();
@@ -322,6 +346,13 @@ impl Backend {
         if let Some(on) = req.advertise_exit_node {
             prefs.advertise_exit_node = on;
         }
+        if let Some(routes) = &req.advertise_routes {
+            let routes = retail_proto::route::parse_routes(routes).map_err(anyhow::Error::msg)?;
+            if !routes.is_empty() && !cfg!(target_os = "linux") {
+                anyhow::bail!("routing networks for the mesh is supported on Linux only");
+            }
+            prefs.advertise_routes = routes;
+        }
         if let Some(mb) = req.memory_limit_mb {
             prefs.memory_limit_mb = (mb > 0).then_some(mb);
         }
@@ -386,14 +417,37 @@ impl Backend {
             p.token.is_some() && own.is_some() && p.server == own
         };
         if joined {
-            let p = self.persisted.lock().await;
-            if self.session.lock().await.is_none() && p.want_running {
-                self.start_locked(&p).await?;
+            {
+                let p = self.persisted.lock().await;
+                if self.session.lock().await.is_none() && p.want_running {
+                    self.start_locked(&p).await?;
+                }
             }
+            self.exempt_own_node().await;
             return Ok(());
         }
         let code = self.host.self_invite().await?;
-        self.up(UpRequest { invite: Some(code), ..Default::default() }).await
+        self.up(UpRequest { invite: Some(code), ..Default::default() }).await?;
+        self.exempt_own_node().await;
+        Ok(())
+    }
+
+    /// The device hosting the network never expires from it, even when it
+    /// joined before hosting devices were exempt
+    pub async fn exempt_own_node(&self) {
+        let Some(own) = self.host.local_url().await else { return };
+        let id = {
+            let p = self.persisted.lock().await;
+            if p.server.as_deref() != Some(own.as_str()) {
+                return;
+            }
+            p.node_id
+        };
+        if let Some(id) = id
+            && let Err(e) = self.host.keep_forever(id).await
+        {
+            tracing::debug!("exempting this device from key expiry: {e:#}");
+        }
     }
 
     /// This device's mesh address while it is a member of the network it hosts
@@ -486,7 +540,58 @@ impl Backend {
         // Registering the domain runs system tools, which can take a moment
         let tun = engine.tun_device().0;
         let dns = tokio::task::spawn_blocking(move || crate::magicdns::SystemDns::configure(&tun)).await.ok().flatten();
-        let mut session = Session { engine, tasks, threads, stop, exit_routes: None, exit_nat: None, _dns: dns };
+        let (tun, tun_index) = engine.tun_device();
+        let gateway = Arc::new(std::sync::Mutex::new(Gateway::new(&tun, tun_index)));
+        // Routes and forwarding follow the netmap: what peers route, and what
+        // the server approved for this device
+        let mut routes = engine.subscribe_routes();
+        let (gw, last_error) = (gateway.clone(), self.last_error.clone());
+        tasks.spawn(async move {
+            let mut subnets = SubnetRoutes::new(&tun, tun_index);
+            loop {
+                let state = routes.borrow_and_update().clone();
+                let gw = gw.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut g = gw.lock().unwrap();
+                    let exit = g.exit();
+                    let forwarding = g.set(exit, &state.own).context("routing networks for the mesh");
+                    drop(g);
+                    let routes = subnets.set(&state.accepted);
+                    (forwarding.and(routes), subnets)
+                })
+                .await;
+                let Ok((result, back)) = result else { break };
+                subnets = back;
+                if let Err(e) = result {
+                    tracing::warn!("{e:#}");
+                    *last_error.lock().unwrap() = Some(format!("{e:#}"));
+                }
+                if routes.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+        // The server's addresses as it reports them, kept for the next start
+        let mut addrs = engine.subscribe_server_addrs();
+        let (persisted, state_path) = (self.persisted.clone(), self.state_path.clone());
+        tasks.spawn(async move {
+            while addrs.changed().await.is_ok() {
+                let fresh = addrs.borrow_and_update().clone();
+                let mut p = persisted.lock().await;
+                if p.server.as_deref() != Some(server.as_str()) {
+                    continue;
+                }
+                let merged = crate::control::merge_alts(&server, &fresh, &p.server_alts);
+                if merged != p.server_alts {
+                    p.server_alts = merged;
+                    p.remember_current();
+                    if let Err(e) = p.save(&state_path) {
+                        tracing::warn!("saving the server's addresses: {e:#}");
+                    }
+                }
+            }
+        });
+        let mut session = Session { engine, tasks, threads, stop, exit_routes: None, gateway, _dns: dns };
         if let Err(e) = apply_exit_prefs(&mut session, &p.prefs) {
             // The mesh still works, so only report the exit-node problem
             tracing::warn!("{e:#}");
@@ -588,6 +693,8 @@ impl Backend {
             control_via: engine.and_then(|e| e.control_via()),
             servers: saved_servers(&p),
             update: self.updater.status(),
+            key_expires_at: engine.and_then(|e| e.key_state().0),
+            key_expired: engine.is_some_and(|e| e.key_state().1),
         }
     }
 }
@@ -638,24 +745,16 @@ fn apply_exit_prefs(s: &mut Session, prefs: &Prefs) -> Result<()> {
         }
         _ => {}
     }
-    match (prefs.advertise_exit_node, s.exit_nat.is_some()) {
-        (true, false) => match ExitNat::enable(&tun, tun_index) {
-            Ok(n) => {
-                s.exit_nat = Some(n);
-                s.engine.set_advertise_exit(true);
-            }
-            Err(e) => {
-                s.engine.set_advertise_exit(false);
-                if result.is_ok() {
-                    result = Err(e.context("offering this device as an exit node"));
-                }
-            }
-        },
-        (false, true) => {
-            s.engine.set_advertise_exit(false);
-            s.exit_nat = None;
-        }
-        _ => {}
+    let own = s.engine.subscribe_routes().borrow().own.clone();
+    let mut gateway = s.gateway.lock().unwrap();
+    if gateway.exit() != prefs.advertise_exit_node
+        && let Err(e) = gateway.set(prefs.advertise_exit_node, &own)
+        && result.is_ok()
+    {
+        result = Err(e.context("offering this device as an exit node"));
     }
+    s.engine.set_advertise_exit(gateway.exit());
+    drop(gateway);
+    s.engine.set_advertise_routes(prefs.advertise_routes.clone());
     result
 }

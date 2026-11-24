@@ -9,6 +9,7 @@ pub mod package;
 pub mod key;
 pub mod local;
 pub mod relay;
+pub mod route;
 pub mod stun;
 
 pub use key::Key;

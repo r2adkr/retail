@@ -17,7 +17,8 @@ retail server start            # start the server (this device joins too)
 retail server invite           # print an invite code (--reusable: many uses, --name: a named invite)
 retail server web              # open the web admin page
 retail server status           # addresses, router state, devices, invites
-retail server remove <id>      # remove a device
+retail server remove <device>  # remove a device (--revoke-invite: and the invite it joined with)
+retail server backup <file>    # save the server's data, encrypted with a passphrase
 retail server stop             # stop (registrations stay and resume on the next start)
 ```
 
@@ -149,9 +150,49 @@ retail server acl off                # everyone reaches everyone again
 
 Rules are enforced by each receiving device; the server only tells each device what to accept from whom.
 
-## Backups
+## Reaching a whole LAN: subnet routes
 
-The server's data is one folder, `server` in the state directory (`retail.json`: devices and invites, `tls/`: the server certificate and key, `host.json`: settings). Copy that folder. If the certificate key is lost, devices no longer trust the server and need new invites.
+A device can route its LAN for the others, so printers, NAS boxes and other things that cannot run retail are reachable from anywhere. On a Linux device in that LAN:
+
+```sh
+retail set --advertise-routes 192.168.1.0/24      # several: 192.168.1.0/24,10.0.0.0/24; none stops
+```
+
+Nothing changes until the server's administrator approves it, since a route sends other devices' traffic through that device: in the web admin page the device shows the networks it offers, and ⋯ → **Approve routes** turns them on (or `retail server routes <device>`; `--off` stops them). Then every device sends traffic for those networks through it. The router masquerades it, so hosts on the LAN need no route back.
+
+- A device on the routed LAN itself keeps using its own LAN directly.
+- Access rules: a device reaches routed networks only if it has full access (all ports) to the router device.
+- Offering routes needs Linux for now; every system can use them. `0.0.0.0/0` is what an exit node is for.
+
+## Lost devices and old devices
+
+- **Remove a device** (⋯ → **Remove device**, or `retail server remove <device>`) cuts it off at once: every other device drops it and it cannot reconnect. If it joined with a multi-device invite that still works, the page offers to expire that invite too (`--revoke-invite`), so whoever has the device cannot join again with it.
+- **Key expiry** (the **Device keys** card, or `retail server expiry --keys 180`): device keys then last that many days from joining. When one expires, the device is cut off from the others until it is renewed (⋯ → **Renew key**, `retail server renew <device>`) or joins again with an invite; its tray says so. Turning expiry on starts the clock for every device on that day. The server's own device and the helper node never expire, and ⋯ → **Key never expires** (`--never`) exempts others, such as a router at home.
+- **Removing inactive devices** (`retail server expiry --inactive 90`): devices not seen for that many days are removed. Devices that are online, or exempt from expiry, stay.
+
+## Backups and moving the server
+
+A backup holds everything the server has: devices, invites, access rules, settings, and the certificate and REALITY keys that devices trust. Make one in the web admin page (the **Backup** card, on the server's own device only) or with:
+
+```sh
+retail server backup retail-server.retail-backup
+```
+
+It asks for a passphrase (or reads `RETAIL_BACKUP_PASSPHRASE`) and encrypts the backup with it. Keep the file and the passphrase safe: together they let anyone pose as your server.
+
+To restore it, on the same or another device, with its server stopped:
+
+```sh
+retail server restore retail-server.retail-backup
+retail server start
+```
+
+In the web admin page: **Restore from a backup…** while the server is off (the tray's server window opens it). The data the device had is kept in `server.bak` next to it.
+
+- Devices keep their addresses, names and rules. If the server's address stayed the same (same router, or a domain name pointed at the new machine), they reconnect on their own.
+- If the address changed, give each device a new invite from the restored server. Since it has the same key, the device recognises it as the same network: it keeps its address and name instead of joining as a new device.
+- Devices also learn the server's current addresses while connected, so a change of the server's public address alone does not strand them.
+- Do not run the old server again after moving: two servers with the same key confuse the devices.
 
 ## Updates
 

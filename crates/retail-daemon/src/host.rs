@@ -197,8 +197,14 @@ impl Host {
         }
         std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
         crate::state::secure_dir(&self.dir);
-        let port = req.port.unwrap_or(DEFAULT_PORT);
-        let domain = req.domain.clone().filter(|d| !d.trim().is_empty());
+        let saved = self.config();
+        // Left out, the port and domain stay as they were (a restored backup's)
+        let port = req.port.or(saved.port).unwrap_or(DEFAULT_PORT);
+        let domain = match req.domain.as_deref().map(str::trim) {
+            Some("") | Some("off") => None,
+            Some(d) => Some(d.to_string()),
+            None => saved.domain.clone(),
+        };
         let tls = if req.insecure_http { retail_control::Tls::Off } else { retail_control::Tls::SelfSigned };
         let previous = self.config().reality;
         let reality = match req.reality.as_deref().map(str::trim) {
@@ -210,7 +216,6 @@ impl Host {
             },
             None => previous,
         };
-        let saved = self.config();
         let fronts = match &req.fronts {
             Some(f) => f.iter().map(|u| normalize_front(u)).collect::<Result<Vec<_>>>()?,
             None => saved.fronts.clone(),
@@ -297,6 +302,69 @@ impl Host {
             web_admins: saved.web_admins.clone(),
         })?;
         *self.last_error.lock().unwrap() = None;
+        drop(running);
+        self.publish_addrs().await;
+        Ok(())
+    }
+
+    /// Tells devices where the server is reachable now, so they follow a
+    /// change of its public address. Cheap when nothing changed.
+    pub async fn publish_addrs(&self) {
+        let running = self.running.lock().await;
+        if let Some(r) = running.as_ref() {
+            r.server.set_addrs(Self::invite_addrs(r));
+        }
+    }
+
+    /// The server's data in a passphrase-encrypted file
+    pub async fn backup(&self, passphrase: &str) -> Result<String> {
+        let running = self.running.lock().await;
+        let mut files = crate::backup::Files::read_dir(&self.dir, &[retail_control::DATA_FILE])?;
+        match running.as_ref() {
+            // From memory, which has the latest last-seen times
+            Some(r) => files.insert(retail_control::DATA_FILE, &r.server.snapshot()?),
+            None => {
+                let data = std::fs::read(self.dir.join(retail_control::DATA_FILE)).context("this device has no server to back up")?;
+                files.insert(retail_control::DATA_FILE, &data);
+            }
+        }
+        crate::backup::seal(&files, passphrase, retail_control::now_unix())
+    }
+
+    /// Replaces this device's server data with a backup's. The server must
+    /// be stopped; the data it had is kept in `server.bak`.
+    pub async fn restore(&self, backup: &str, passphrase: &str) -> Result<()> {
+        let running = self.running.lock().await;
+        if running.is_some() {
+            bail!("stop the server first (retail server stop)");
+        }
+        let files = crate::backup::open(backup, passphrase)?;
+        let data = files.get(retail_control::DATA_FILE).context("the backup has no server data")?;
+        retail_control::check_data(&data)?;
+        let parent = self.dir.parent().context("no state directory")?;
+        let incoming = parent.join("server.restore");
+        let previous = parent.join("server.bak");
+        let _ = std::fs::remove_dir_all(&incoming);
+        std::fs::create_dir_all(&incoming)?;
+        crate::state::secure_dir(&incoming);
+        if let Err(e) = files.write_dir(&incoming) {
+            let _ = std::fs::remove_dir_all(&incoming);
+            return Err(e);
+        }
+        let _ = std::fs::remove_dir_all(&previous);
+        if self.dir.exists() {
+            std::fs::rename(&self.dir, &previous).with_context(|| format!("moving {} aside", self.dir.display()))?;
+        }
+        if let Err(e) = std::fs::rename(&incoming, &self.dir) {
+            let _ = std::fs::rename(&previous, &self.dir);
+            return Err(e).context("putting the restored data in place");
+        }
+        crate::state::secure_dir(&self.dir);
+        // It starts when the user starts it, not on its own at the next boot
+        let mut c = self.config();
+        c.enabled = false;
+        self.save_config(&c)?;
+        tracing::info!("server data restored from a backup");
         Ok(())
     }
 
@@ -321,6 +389,28 @@ impl Host {
     /// A member device becomes the helper node (`None`: none)
     pub async fn set_helper_device(&self, id: Option<i64>) -> Result<()> {
         self.with_server(|s| s.set_helper_device(id)).await
+    }
+
+    pub async fn keep_forever(&self, id: i64) -> Result<()> {
+        self.with_server(|s| s.keep_forever(id)).await
+    }
+
+    pub async fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {
+        self.with_server(|s| s.set_expiry_settings(key_days, inactive_days)).await
+    }
+
+    pub async fn renew(&self, id: i64, never: bool) -> Result<()> {
+        if !self.with_server(|s| s.renew(id, never)).await? {
+            bail!("there is no device {id}");
+        }
+        Ok(())
+    }
+
+    pub async fn set_routes(&self, id: i64, routes: &[retail_proto::route::Ipv4Net]) -> Result<()> {
+        if !self.with_server(|s| s.set_routes(id, routes)).await? {
+            bail!("there is no device {id}");
+        }
+        Ok(())
     }
 
     pub fn web_admins(&self) -> Vec<i64> {
@@ -407,7 +497,10 @@ impl Host {
         let reachable = r.helper_linked.load(std::sync::atomic::Ordering::Relaxed)
             || r.device_linked.load(std::sync::atomic::Ordering::Relaxed);
         let invites = r.server.keys().await.unwrap_or_default();
+        let (key_expiry_days, remove_inactive_days) = r.server.expiry_settings();
         ServerStatus {
+            key_expiry_days,
+            remove_inactive_days,
             running: true,
             port: Some(r.server.port()),
             public,
@@ -436,6 +529,11 @@ impl Host {
                     last_seen: n.last_seen,
                     dns_name: n.dns_name,
                     tags: n.tags,
+                    advertised_routes: n.advertised_routes,
+                    approved_routes: n.approved_routes,
+                    expires_at: n.expires_at,
+                    expired: n.expired,
+                    invite_id: n.invite_id,
                 })
                 .collect(),
             invites: invites
@@ -506,7 +604,7 @@ impl Host {
     pub async fn self_invite(&self) -> Result<String> {
         let running = self.running.lock().await;
         let r = running.as_ref().context("the server is not running")?;
-        let key = r.server.create_key(false, Duration::from_secs(600)).await?;
+        let key = r.server.create_host_key(Duration::from_secs(600)).await?;
         let invite = Invite {
             addrs: vec![format!("127.0.0.1:{}", r.server.port())],
             pin: r.server.pin().as_ref().map(encode_pin),
@@ -517,9 +615,9 @@ impl Host {
         Ok(invite.encode())
     }
 
-    pub async fn delete_node(&self, id: i64) -> Result<bool> {
+    pub async fn delete_node(&self, id: i64, revoke_invite: bool) -> Result<bool> {
         let running = self.running.lock().await;
-        running.as_ref().context("the server is not running")?.server.delete_node(id).await
+        running.as_ref().context("the server is not running")?.server.delete_node(id, revoke_invite).await
     }
 
     pub async fn revoke_invite(&self, id: i64) -> Result<bool> {
@@ -688,6 +786,21 @@ pub fn is_own(ip: std::net::Ipv4Addr) -> bool {
         *c = Some((std::time::Instant::now(), all));
     }
     c.as_ref().is_some_and(|(_, all)| all.contains(&IpAddr::V4(ip)))
+}
+
+/// The IPv4 networks this machine's interfaces are on, outside the mesh
+pub fn local_networks() -> Vec<retail_proto::route::Ipv4Net> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else { return Vec::new() };
+    ifaces
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() && !retail_proto::in_mesh(v4.ip) => {
+                let len = u32::from(v4.netmask).leading_ones() as u8;
+                retail_proto::route::Ipv4Net::new(v4.ip, len)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn lan_ips() -> Vec<IpAddr> {

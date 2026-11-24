@@ -119,7 +119,7 @@ impl Ui {
             Some(s) if s.state == BackendState::Stopped => CARD_H + 12.0 + NOTE_H,
             Some(s) if s.state != BackendState::NeedsLogin => {
                 let rows = s.peers.len().clamp(1, MAX_ROWS) as f32;
-                let error = if s.last_error.is_some() { 44.0 } else { 0.0 };
+                let error = if error_text(s).is_some() { 44.0 } else { 0.0 };
                 CARD_H + 12.0 + SECTION_H + rows * ROW_H + error + 8.0
             }
             Some(_) => MESSAGE_H,
@@ -220,7 +220,7 @@ impl Ui {
             View::Status(s) => {
                 y = self.device_card(&mut c, &t, &s, y + 4.0);
                 y = self.devices(&mut c, &t, &s, y + 8.0);
-                if let Some(err) = &s.last_error {
+                if let Some(err) = &error_text(&s) {
                     c.fill_rrect(PAD, y + 4.0, WIDTH - 2.0 * PAD, 36.0, 8.0, with_alpha(t.red, 0.12));
                     c.text(err, PAD + 12.0, y + 26.0, 12.0, Weight::Regular, t.red, Some(WIDTH - 2.0 * PAD - 24.0));
                 }
@@ -492,6 +492,14 @@ impl Ui {
 }
 
 /// The exit node in use (hostname) and whether it is unreachable
+/// What goes in the red box under the devices
+fn error_text(s: &StatusResponse) -> Option<String> {
+    if s.key_expired {
+        return Some(tr("Key expired · ask the admin to renew it").to_string());
+    }
+    s.last_error.clone()
+}
+
 fn exit_in_use(s: &StatusResponse) -> Option<(String, bool)> {
     let key = s.prefs.exit_node?;
     Some(match s.peers.iter().find(|p| p.node_key == key) {

@@ -20,6 +20,11 @@ impl Backend for Fake {
                 last_seen: None,
                 dns_name: format!("n{id}.retail.internal"),
                 tags: Vec::new(),
+                advertised_routes: Vec::new(),
+                approved_routes: Vec::new(),
+                expires_at: None,
+                expired: false,
+                invite_id: None,
             };
             ServerStatus { running: true, nodes: vec![node(1, [100, 64, 0, 1]), node(2, [100, 64, 0, 2])], ..Default::default() }
         })
@@ -42,7 +47,22 @@ impl Backend for Fake {
     fn revoke(&self, _: i64) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
-    fn delete_node(&self, _: i64) -> BoxFut<'_, Result<(), String>> {
+    fn delete_node(&self, _: i64, _: bool) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn set_routes(&self, _: i64, _: Vec<retail_proto::route::Ipv4Net>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn renew(&self, _: i64, _: bool) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn set_expiry(&self, _: Option<u32>, _: Option<u32>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn backup(&self, _: String) -> BoxFut<'_, Result<String, String>> {
+        Box::pin(async { Ok("{}".into()) })
+    }
+    fn restore(&self, _: String, _: String) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
     fn admins(&self) -> Vec<i64> {

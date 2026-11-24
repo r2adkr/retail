@@ -36,17 +36,21 @@ pub enum Decrypted {
     Rejected,
 }
 
-/// Inner source addresses a peer may use: its mesh address, plus any
-/// address outside the mesh if it is our exit node.
+/// Inner source addresses a peer may use: its mesh address, any address in
+/// the networks it routes, plus any address outside the mesh if it is our
+/// exit node.
 #[derive(Clone, Copy)]
-pub struct AllowedSrc {
+pub struct AllowedSrc<'a> {
     pub ip: Ipv4Addr,
     pub internet: bool,
+    pub routes: &'a [retail_proto::route::Ipv4Net],
 }
 
-impl AllowedSrc {
+impl AllowedSrc<'_> {
     pub fn permits(self, src: Ipv4Addr) -> bool {
-        src == self.ip || (self.internet && !retail_proto::in_mesh(src))
+        src == self.ip
+            || (self.internet && !retail_proto::in_mesh(src))
+            || self.routes.iter().any(|r| r.contains(src))
     }
 }
 
@@ -57,7 +61,7 @@ pub fn decrypt_batch(
     datagrams: &[&[u8]],
     bufs: &mut [Vec<u8>],
     offset: usize,
-    allowed: AllowedSrc,
+    allowed: AllowedSrc<'_>,
     results: &mut Vec<Decrypted>,
 ) {
     results.clear();
@@ -66,7 +70,7 @@ pub fn decrypt_batch(
     }
 }
 
-fn decrypt_one(session: &Session, dgram: &[u8], buf: &mut Vec<u8>, offset: usize, allowed: AllowedSrc) -> Decrypted {
+fn decrypt_one(session: &Session, dgram: &[u8], buf: &mut Vec<u8>, offset: usize, allowed: AllowedSrc<'_>) -> Decrypted {
     let need = offset + dgram.len();
     if buf.len() < need {
         buf.resize(need, 0);
@@ -213,15 +217,19 @@ mod tests {
         assert_eq!(results, vec![Decrypted::Authenticated]);
     }
 
-    fn only(ip: Ipv4Addr) -> AllowedSrc {
-        AllowedSrc { ip, internet: false }
+    fn only(ip: Ipv4Addr) -> AllowedSrc<'static> {
+        AllowedSrc { ip, internet: false, routes: &[] }
     }
 
     #[test]
     fn exit_node_may_send_from_internet_but_not_other_mesh_addresses() {
         let me = Ipv4Addr::new(100, 64, 0, 2);
-        let exit = AllowedSrc { ip: me, internet: true };
+        let exit = AllowedSrc { ip: me, internet: true, routes: &[] };
         assert!(exit.permits(me));
+        let routes = ["192.168.7.0/24".parse().unwrap()];
+        let router = AllowedSrc { ip: me, internet: false, routes: &routes };
+        assert!(router.permits(Ipv4Addr::new(192, 168, 7, 9)));
+        assert!(!router.permits(Ipv4Addr::new(192, 168, 8, 9)));
         assert!(exit.permits(Ipv4Addr::new(93, 184, 216, 34)));
         assert!(!exit.permits(Ipv4Addr::new(100, 64, 0, 9)), "mesh addresses stay bound to their node");
         assert!(!only(me).permits(Ipv4Addr::new(93, 184, 216, 34)));

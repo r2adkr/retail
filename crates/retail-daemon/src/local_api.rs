@@ -38,6 +38,11 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
         .route("/server/invite", post(server_invite))
         .route("/server/nodes/{id}/delete", post(server_delete_node))
         .route("/server/nodes/{id}/tags", post(server_tags))
+        .route("/server/nodes/{id}/routes", post(server_routes))
+        .route("/server/nodes/{id}/renew", post(server_renew))
+        .route("/server/expiry", post(server_expiry))
+        .route("/server/backup", post(server_backup))
+        .route("/server/restore", post(server_restore))
         .route("/server/acl", post(server_acl))
         .route("/server/helper-device", post(server_helper_device))
         .route("/server/invites/{id}/revoke", post(server_revoke_invite))
@@ -222,8 +227,16 @@ async fn server_invite(State(b): State<Arc<Backend>>, Json(req): Json<InviteRequ
     }
 }
 
-async fn server_delete_node(State(b): State<Arc<Backend>>, Path(id): Path<i64>) -> Response {
-    match b.host.delete_node(id).await {
+async fn server_delete_node(State(b): State<Arc<Backend>>, Path(id): Path<i64>, body: axum::body::Bytes) -> Response {
+    // The body is optional: older callers send none
+    let req: retail_proto::api::RemoveRequest = match body.is_empty() {
+        true => Default::default(),
+        false => match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+        },
+    };
+    match b.host.delete_node(id, req.revoke_invite).await {
         Ok(true) => Json(b.server_status().await).into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, "no such device"),
         Err(e) => failed(e),
@@ -232,6 +245,41 @@ async fn server_delete_node(State(b): State<Arc<Backend>>, Path(id): Path<i64>) 
 
 async fn server_tags(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::TagsRequest>) -> Response {
     match b.host.set_tags(id, &req.tags).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_routes(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RoutesRequest>) -> Response {
+    match b.host.set_routes(id, &req.routes).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_renew(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RenewRequest>) -> Response {
+    match b.host.renew(id, req.never).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_expiry(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::ExpiryRequest>) -> Response {
+    match b.host.set_expiry(req.key_expiry_days, req.remove_inactive_days).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_backup(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::BackupRequest>) -> Response {
+    match b.host.backup(&req.passphrase).await {
+        Ok(backup) => Json(retail_proto::api::BackupResponse { backup }).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_restore(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::RestoreRequest>) -> Response {
+    match b.host.restore(&req.backup, &req.passphrase).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }

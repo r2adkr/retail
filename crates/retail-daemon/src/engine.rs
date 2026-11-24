@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use retail_proto::route::Ipv4Net;
 use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Packet, Tunn, TunnResult};
@@ -234,6 +235,8 @@ pub struct Peer {
     is_exit: AtomicBool,
     /// What we take from it (access rules)
     filter: crate::filter::Filter,
+    /// Networks we reach through it (subnet routes we accepted)
+    routes: RwLock<Arc<[Ipv4Net]>>,
 }
 
 impl Peer {
@@ -373,8 +376,12 @@ impl Peer {
         self.info.lock().unwrap().ip
     }
 
-    fn allowed_src(&self) -> crate::crypto::AllowedSrc {
-        crate::crypto::AllowedSrc { ip: self.ip(), internet: self.is_exit.load(Ordering::Relaxed) }
+    fn routes(&self) -> Arc<[Ipv4Net]> {
+        self.routes.read().unwrap().clone()
+    }
+
+    fn allowed_src<'a>(&self, routes: &'a [Ipv4Net]) -> crate::crypto::AllowedSrc<'a> {
+        crate::crypto::AllowedSrc { ip: self.ip(), internet: self.is_exit.load(Ordering::Relaxed), routes }
     }
 }
 
@@ -386,9 +393,15 @@ struct PeerTable {
     /// Selected exit node if it is in the netmap. Gets every packet for an
     /// address outside the mesh.
     exit: Option<Arc<Peer>>,
+    /// Routed networks and their routers, longest prefix first
+    routes: Vec<(Ipv4Net, Arc<Peer>)>,
 }
 
 impl PeerTable {
+    fn routed(&self, dst: Ipv4Addr) -> Option<&Arc<Peer>> {
+        self.routes.iter().find(|(r, _)| r.contains(dst)).map(|(_, p)| p)
+    }
+
     fn select_exit(&mut self, key: Option<Key>) {
         for p in self.by_key.values() {
             p.is_exit.store(Some(p.key) == key, Ordering::Relaxed);
@@ -568,6 +581,16 @@ pub struct Engine {
     /// User's choice, kept even while the peer is absent from the netmap
     exit_pref: Mutex<Option<Key>>,
     advertise_exit: watch::Sender<bool>,
+    /// Networks this device offers to route
+    advertise_routes: watch::Sender<Vec<Ipv4Net>>,
+    /// Networks this device routes, as the server approved them
+    own_routes: RwLock<Arc<[Ipv4Net]>>,
+    /// What the system's routes and forwarding should follow
+    route_state: watch::Sender<RouteState>,
+    /// This device's key: when it expires, and whether it has
+    key_state: Mutex<(Option<i64>, bool)>,
+    /// Where the server says it is reachable now
+    server_addrs: watch::Sender<Vec<String>>,
     /// Tells the control loop to reconnect so its socket picks up new routes
     pub control_reset: tokio::sync::Notify,
     memory_limit_mb: Option<u32>,
@@ -666,6 +689,11 @@ impl Engine {
             relay_out_rx: Mutex::new(Some(relay_out_rx)),
             exit_pref: Mutex::new(None),
             advertise_exit: watch::channel(false).0,
+            advertise_routes: watch::channel(Vec::new()).0,
+            own_routes: RwLock::new(Arc::from(Vec::new())),
+            route_state: watch::channel(RouteState::default()).0,
+            key_state: Mutex::default(),
+            server_addrs: watch::channel(Vec::new()).0,
             control_reset: tokio::sync::Notify::new(),
             memory_limit_mb: cfg.memory_limit_mb,
             extra_endpoints: Mutex::default(),
@@ -717,6 +745,32 @@ impl Engine {
         self.advertise_exit.subscribe()
     }
 
+    pub fn set_advertise_routes(&self, routes: Vec<Ipv4Net>) {
+        self.advertise_routes.send_if_modified(|r| std::mem::replace(r, routes.clone()) != routes);
+    }
+
+    pub fn subscribe_advertise_routes(&self) -> watch::Receiver<Vec<Ipv4Net>> {
+        self.advertise_routes.subscribe()
+    }
+
+    pub fn subscribe_routes(&self) -> watch::Receiver<RouteState> {
+        self.route_state.subscribe()
+    }
+
+    pub fn subscribe_server_addrs(&self) -> watch::Receiver<Vec<String>> {
+        self.server_addrs.subscribe()
+    }
+
+    /// When this device's key expires, and whether it has
+    pub fn key_state(&self) -> (Option<i64>, bool) {
+        *self.key_state.lock().unwrap()
+    }
+
+    /// What this device takes from the mesh
+    fn here<'a>(&self, routes: &'a [Ipv4Net]) -> crate::filter::Here<'a> {
+        crate::filter::Here { ip: self.self_ip, exit: *self.advertise_exit.borrow(), routes }
+    }
+
     /// Re-applies the exit-node socket bypass, needed on Windows/macOS where it
     /// pins the socket to the current interface.
     pub fn refresh_bypass(&self) {
@@ -758,6 +812,29 @@ impl Engine {
         *self.names.write().unwrap() = names;
         *self.self_dns_name.lock().unwrap() = nm.self_node.dns_name.clone();
         self.helper_role.send_if_modified(|h| std::mem::replace(h, nm.helper) != nm.helper);
+        {
+            let mut k = self.key_state.lock().unwrap();
+            if nm.expired && !k.1 {
+                tracing::warn!("this device's key expired; the server's administrator can renew it");
+            }
+            *k = (nm.expires_at, nm.expired);
+        }
+        let addrs: Vec<String> = nm.server_addrs.iter().take(16).filter(|a| a.len() < 300).cloned().collect();
+        if !addrs.is_empty() {
+            self.server_addrs.send_if_modified(|cur| std::mem::replace(cur, addrs.clone()) != addrs);
+        }
+        let own_routes: Arc<[Ipv4Net]> = Arc::from(nm.self_node.routes.clone());
+        *self.own_routes.write().unwrap() = own_routes.clone();
+        // Networks this device is on itself stay off the tunnel, or it would
+        // lose its own LAN
+        let local = crate::host::local_networks();
+        let accepted: Vec<(Ipv4Net, Key)> = nm
+            .peers
+            .iter()
+            .filter(|n| n.node_key != own_key)
+            .flat_map(|n| n.routes.iter().map(move |r| (*r, n.node_key)))
+            .filter(|(r, _)| r.check_route().is_ok() && !local.iter().any(|l| l.overlaps(r)) && !own_routes.iter().any(|o| o.overlaps(r)))
+            .collect();
 
         let mut kick = Vec::new();
         let table = {
@@ -767,12 +844,19 @@ impl Engine {
                 if node.node_key == own_key || node.ip == self.self_ip || !in_mesh(node.ip) {
                     continue;
                 }
+                // An endpoint inside a routed network would send the tunnel through itself
+                let routed = |e: &SocketAddr| match e.ip() {
+                    IpAddr::V4(v4) => accepted.iter().any(|(r, _)| r.contains(v4)),
+                    IpAddr::V6(_) => false,
+                };
                 let candidates: Vec<SocketAddr> = node
                     .endpoints
                     .iter()
                     .copied()
                     .filter(|e| e.is_ipv4() || (self.dual_stack && usable_ip(e.ip())))
+                    .filter(|e| !routed(e))
                     .collect();
+                let routes: Arc<[Ipv4Net]> = accepted.iter().filter(|(_, k)| *k == node.node_key).map(|(r, _)| *r).collect();
                 let peer = match old.by_key.get(&node.node_key) {
                     Some(p) => {
                         let mut info = p.info.lock().unwrap();
@@ -785,6 +869,7 @@ impl Engine {
                         info.candidates = candidates;
                         drop(info);
                         p.filter.set(&node.accept);
+                        *p.routes.write().unwrap() = routes.clone();
                         if changed {
                             kick.push(p.clone());
                         }
@@ -792,6 +877,7 @@ impl Engine {
                     }
                     None => {
                         let p = Arc::new(self.new_peer(node, candidates));
+                        *p.routes.write().unwrap() = routes.clone();
                         tracing::info!(peer = %node.hostname, ip = %node.ip, "peer added");
                         kick.push(p.clone());
                         p
@@ -807,9 +893,13 @@ impl Engine {
                 }
             }
             table.select_exit(*self.exit_pref.lock().unwrap());
+            table.routes = accepted.iter().filter_map(|(r, k)| Some((*r, table.by_key.get(k)?.clone()))).collect();
+            table.routes.sort_by_key(|(r, _)| std::cmp::Reverse(r.prefix_len()));
             table
         };
         *self.peers.write().unwrap() = table;
+        let state = RouteState { own: own_routes.to_vec(), accepted: accepted.iter().map(|(r, _)| *r).collect() };
+        self.route_state.send_if_modified(|s| std::mem::replace(s, state.clone()) != state);
 
         // Both sides handshake at once on seeing a new or moved peer, which punches the NAT holes
         let mut out = [0u8; 256];
@@ -844,6 +934,7 @@ impl Engine {
             tunn: Mutex::new(tunn),
             is_exit: AtomicBool::new(false),
             filter,
+            routes: RwLock::new(Arc::from(Vec::new())),
             info: Mutex::new(PeerInfo {
                 hostname: node.hostname.clone(),
                 dns_name: node.dns_name.clone(),
@@ -1179,7 +1270,7 @@ impl Engine {
                 match peers.by_ip.get(&dst) {
                     Some(p) => Some(p.clone()),
                     // Unknown mesh addresses never go to the exit node
-                    None if !in_mesh(dst) => peers.exit.clone(),
+                    None if !in_mesh(dst) => peers.routed(dst).or(peers.exit.as_ref()).cloned(),
                     None => None,
                 }
             };
@@ -1452,6 +1543,8 @@ impl Engine {
     /// batch, with one peer lookup and two short `Tunn` locks. Anything else
     /// goes through [`Self::receive`].
     fn receive_run<'a>(&self, dgrams: impl Iterator<Item = &'a [u8]>, src: Src, b: &mut RxBatch) {
+        let own_routes = self.own_routes.read().unwrap().clone();
+        let here = self.here(&own_routes);
         let mut dgrams = dgrams.peekable();
         let mut run: Vec<&[u8]> = Vec::with_capacity(RX_BATCH);
         let mut results = Vec::with_capacity(RX_BATCH);
@@ -1492,7 +1585,8 @@ impl Engine {
                 b.bufs.push(vec![0u8; PKT_BUF]);
             }
 
-            crate::crypto::decrypt_batch(&session, &run, &mut b.bufs[b.len..], TUN_OFFSET, peer.allowed_src(), &mut results);
+            let peer_routes = peer.routes();
+            crate::crypto::decrypt_batch(&session, &run, &mut b.bufs[b.len..], TUN_OFFSET, peer.allowed_src(&peer_routes), &mut results);
 
             // Keep delivered packets contiguous and in order
             let first = b.len;
@@ -1501,7 +1595,7 @@ impl Engine {
                 match *r {
                     crate::crypto::Decrypted::Packet(len) => {
                         authenticated = true;
-                        if !peer.filter.inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], *self.advertise_exit.borrow()) {
+                        if !peer.filter.inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], &here) {
                             continue;
                         }
                         b.bufs.swap(first + i, b.len);
@@ -1563,12 +1657,13 @@ impl Engine {
             TunnResult::WriteToTunnelV4(b, inner_src) => {
                 let (start, len) = (b.as_ptr() as usize - base, b.len());
                 drop(tunn);
-                if !peer.allowed_src().permits(inner_src) {
+                if !peer.allowed_src(&peer.routes()).permits(inner_src) {
                     tracing::debug!(%inner_src, "dropping packet with spoofed source");
                     return false;
                 }
                 self.note_rx(&peer, src, true);
-                if !peer.filter.inbound(&out[start..start + len], *self.advertise_exit.borrow()) {
+                let own_routes = self.own_routes.read().unwrap().clone();
+                if !peer.filter.inbound(&out[start..start + len], &self.here(&own_routes)) {
                     return false;
                 }
                 if start != TUN_OFFSET {
@@ -1878,12 +1973,22 @@ impl Engine {
                     exit_node: info.exit_node,
                     tx_bytes: tx as u64,
                     rx_bytes: rx as u64,
+                    routes: p.routes().to_vec(),
                 }
             })
             .collect();
         out.sort_by_key(|p| p.ip);
         out
     }
+}
+
+/// Subnet routes as the system should see them
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct RouteState {
+    /// Networks this device routes for the others (forwarding)
+    pub own: Vec<Ipv4Net>,
+    /// Networks reached through peers (routes into the tunnel)
+    pub accepted: Vec<Ipv4Net>,
 }
 
 pub type DataPlaneTask = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;

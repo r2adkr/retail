@@ -319,12 +319,19 @@ impl App {
             if p.restricted {
                 flags.push("limited");
             }
+            if !p.routes.is_empty() {
+                flags.push("routes");
+            }
             let style = if p.online { Style::new() } else { Style::new().fg(Color::DarkGray) };
             Row::new(vec![Cell::from(name), Cell::from(p.ip.to_string()), Cell::from(path), Cell::from(hs), Cell::from(flags.join(", "))]).style(style)
         });
         let table = Table::new(rows, [Constraint::Fill(2), Constraint::Length(15), Constraint::Fill(3), Constraint::Length(9), Constraint::Length(20)])
             .header(Row::new(["DEVICE", "IP", "PATH", "HANDSHAKE", ""]).style(Style::new().add_modifier(Modifier::BOLD)))
-            .block(Block::new().borders(Borders::TOP).title(format!(" {} devices ", s.peers.len())))
+            .block(Block::new().borders(Borders::TOP).title(if s.key_expired {
+                " this device's key expired: ask the server's administrator to renew it ".to_string()
+            } else {
+                format!(" {} devices ", s.peers.len())
+            }))
             .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
         f.render_stateful_widget(table, area, &mut self.rows[0]);
     }

@@ -52,7 +52,10 @@ details.menu>summary::-webkit-details-marker{display:none}
 .field{display:grid;gap:6px;margin:14px 0}
 .field label{font-size:12.5px;color:var(--dim)}
 .field input{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:9px;padding:8px 10px;outline:none}
-.field input:focus{border-color:var(--accent)}
+.field input:focus,.field select:focus{border-color:var(--accent)}
+.field select{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:9px;padding:8px 10px;outline:none}
+.pill.bad{background:var(--warn-soft);color:var(--bad)}
+.meta.warn{color:var(--warn)}
 .code{font:12px ui-monospace,Consolas,monospace;background:var(--chip);padding:8px 10px;border-radius:9px;overflow-wrap:anywhere;max-height:96px;overflow:auto}
 .share{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
 .share .qr{width:148px;height:148px;background:#fff;border-radius:10px;padding:6px;flex:none}
@@ -88,12 +91,17 @@ dialog h3{margin:0 0 4px;font-size:17px}
 <p id="meshNote" class="muted small" style="margin:10px 4px 0"></p>
 <div class="head"><h2 data-t>Access</h2></div>
 <div class="card pad"><div id="access"></div></div>
+<div class="head"><h2 data-t>Device keys</h2></div>
+<div class="card pad"><div id="keys"></div></div>
+<div id="backupBox" hidden><div class="head"><h2 data-t>Backup</h2></div>
+<div class="card pad"><p style="margin:0 0 12px" data-t>A backup holds this server's devices, invites, rules and keys. Restore it on another device to move the server there; the devices keep their addresses and names.</p><button onclick="openBackup()" data-t>Download backup…</button></div></div>
 </div>
 </main>
 
 <dialog id="createDlg"><div id="createBody"></div></dialog>
 <dialog id="shareDlg"><h3 id="shareTitle"></h3><p class="muted small" style="margin:0 0 14px" data-t>Scan it with a phone, or copy the code and paste it into retail settings on the other device.</p><div class="share" id="shareBody"></div><div class="actions"><button onclick="$('#shareDlg').close()" data-t>Close</button></div></dialog>
 <dialog id="uploadDlg"><div id="uploadBody"></div></dialog>
+<dialog id="backupDlg"><div id="backupBody"></div></dialog>
 <div id="toast" class="toast" role="status"></div>
 
 <script>
@@ -224,6 +232,49 @@ const TR={
 "{host} will relay connections to this server for devices on other networks. It has to be reachable from the internet: a public address, or a router that opens ports for it. Continue?":["{host}이(가) 다른 네트워크의 기기를 이 서버로 이어 줍니다. 이 기기는 인터넷에서 접속할 수 있어야 합니다(공인 주소이거나, 공유기가 포트를 열어 줄 수 있는 곳). 계속할까요?","{host} が他のネットワークのデバイスからこのサーバーへの接続を中継します。このデバイスはインターネットから到達できる必要があります（グローバルアドレス、またはルーターがポートを開けられる環境）。続けますか？","{host} 将为其他网络中的设备中继到此服务器的连接。它必须能从互联网访问（公网地址，或路由器能为它打开端口）。继续吗？","{host} retransmitirá a este servidor las conexiones de dispositivos de otras redes. Debe ser accesible desde internet: una dirección pública o un router que le abra puertos. ¿Continuar?"],
 "{host} is the helper node now":["이제 {host}이(가) 보조 노드입니다","{host} が補助ノードになりました","{host} 现在是辅助节点","{host} es ahora el nodo auxiliar"],
 "Helper node removed":["보조 노드를 해제했습니다","補助ノードを解除しました","已移除辅助节点","Nodo auxiliar quitado"],
+"Routes {nets}":["라우팅 {nets}","ルーティング {nets}","路由 {nets}","Enruta {nets}"],
+"Offers to route {nets} · not approved yet":["{nets} 라우팅을 제공함 · 아직 승인하지 않음","{nets} のルーティングを提供 · まだ承認していません","提供 {nets} 的路由 · 尚未批准","Ofrece enrutar {nets} · aún sin aprobar"],
+"Approve routes":["라우팅 승인","ルーティングを承認","批准路由","Aprobar rutas"],
+"Stop routing its networks":["라우팅 승인 취소","ルーティングの承認を取り消す","取消路由批准","Dejar de enrutar sus redes"],
+"{host} will route {nets} for the other devices. Devices with full access to {host} can then reach the hosts there. Continue?":["{host}이(가) 다른 기기를 위해 {nets}을(를) 라우팅합니다. {host}에 제한 없이 접근할 수 있는 기기는 그 네트워크의 장치에 접속할 수 있게 됩니다. 계속할까요?","{host} が他のデバイスのために {nets} をルーティングします。{host} に制限なくアクセスできるデバイスは、そのネットワークの機器に接続できるようになります。続けますか？","{host} 将为其他设备路由 {nets}。可不受限制访问 {host} 的设备将能访问该网络中的主机。继续吗？","{host} enrutará {nets} para los demás dispositivos. Los que tengan acceso completo a {host} podrán llegar a los equipos de esa red. ¿Continuar?"],
+"Routes approved":["라우팅을 승인했습니다","ルーティングを承認しました","已批准路由","Rutas aprobadas"],
+"Routing stopped":["라우팅을 멈췄습니다","ルーティングを停止しました","已停止路由","Enrutamiento detenido"],
+"Key expired":["키 만료됨","キー期限切れ","密钥已过期","Clave caducada"],
+"Key expires in {n} d":["키 {n}일 뒤 만료","キーは {n} 日後に期限切れ","密钥 {n} 天后过期","La clave caduca en {n} d"],
+"Key expires in {n} h":["키 {n}시간 뒤 만료","キーは {n} 時間後に期限切れ","密钥 {n} 小时后过期","La clave caduca en {n} h"],
+"Renew key":["키 갱신","キーを更新","续期密钥","Renovar clave"],
+"Key never expires":["키 만료 안 함","キーを無期限に","密钥永不过期","La clave no caduca"],
+"Key expires as set for the network":["네트워크 설정대로 키 만료","ネットワークの設定どおりに期限切れ","按网络设置让密钥过期","La clave caduca según la red"],
+"Key renewed":["키를 갱신했습니다","キーを更新しました","密钥已续期","Clave renovada"],
+"Device keys":["기기 키","デバイスキー","设备密钥","Claves de dispositivos"],
+"Device keys expire after":["기기 키 만료 기간","デバイスキーの有効期間","设备密钥有效期","Las claves caducan a los"],
+"Remove devices not seen for":["접속 없는 기기 자동 제거","接続のないデバイスを自動削除","自动移除未在线的设备","Quitar dispositivos sin conexión durante"],
+"Never":["안 함","しない","从不","Nunca"],
+"90 days":["90일","90 日","90 天","90 días"],
+"180 days":["180일","180 日","180 天","180 días"],
+"1 year":["1년","1 年","1 年","1 año"],
+"{n} days":["{n}일","{n} 日","{n} 天","{n} días"],
+"A device whose key expired is cut off until you renew it here or it joins again with an invite. This device and the helper node never expire.":["키가 만료된 기기는 여기서 갱신하거나 초대로 다시 참여할 때까지 연결이 끊깁니다. 이 기기와 보조 노드는 만료되지 않습니다.","キーが期限切れになったデバイスは、ここで更新するか招待で再参加するまで切断されます。このデバイスと補助ノードは期限切れになりません。","密钥过期的设备将被断开，直到你在此续期或它通过邀请重新加入。本设备和辅助节点不会过期。","Un dispositivo con la clave caducada queda desconectado hasta que la renueves aquí o vuelva a unirse con una invitación. Este dispositivo y el nodo auxiliar no caducan."],
+"Settings saved":["설정을 저장했습니다","設定を保存しました","设置已保存","Ajustes guardados"],
+"{host} joined with the invite '{name}', which still works. Expire that invite too, so nobody can join with it again?":["{host}은(는) '{name}' 초대로 참여했고, 그 초대는 아직 쓸 수 있습니다. 아무도 다시 쓰지 못하게 그 초대도 만료할까요?","{host} は招待「{name}」で参加しており、その招待はまだ使えます。誰も再利用できないよう、その招待も期限切れにしますか？","{host} 是通过邀请“{name}”加入的，该邀请仍然有效。要让它也过期，以免有人再用它加入吗？","{host} se unió con la invitación «{name}», que sigue funcionando. ¿Caducarla también para que nadie vuelva a unirse con ella?"],
+"Backup":["백업","バックアップ","备份","Copia de seguridad"],
+"A backup holds this server's devices, invites, rules and keys. Restore it on another device to move the server there; the devices keep their addresses and names.":["백업에는 이 서버의 기기, 초대, 규칙, 키가 들어 있습니다. 다른 기기에서 복원하면 서버를 그리로 옮길 수 있고, 기기들은 주소와 이름을 그대로 유지합니다.","バックアップにはこのサーバーのデバイス、招待、ルール、キーが含まれます。別のデバイスで復元するとサーバーを移せ、各デバイスはアドレスと名前をそのまま保ちます。","备份包含此服务器的设备、邀请、规则和密钥。在另一台设备上恢复即可把服务器迁移过去，各设备保留原有地址和名称。","Una copia contiene los dispositivos, invitaciones, reglas y claves de este servidor. Restáurala en otro dispositivo para mover el servidor allí; los dispositivos conservan sus direcciones y nombres."],
+"Download backup…":["백업 받기…","バックアップをダウンロード…","下载备份…","Descargar copia…"],
+"Download backup":["백업 받기","バックアップをダウンロード","下载备份","Descargar copia"],
+"Choose a passphrase. The backup is encrypted with it and restoring needs it. Keep both safe: together they let anyone pose as this server.":["암호 문구를 정하세요. 백업은 이 문구로 암호화되고, 복원할 때 필요합니다. 둘 다 안전하게 보관하세요. 둘이 함께 있으면 누구든 이 서버 행세를 할 수 있습니다.","パスフレーズを決めてください。バックアップはこれで暗号化され、復元時に必要です。両方を安全に保管してください。両方があれば誰でもこのサーバーになりすませます。","请设置密码短语。备份用它加密，恢复时需要它。请妥善保管两者：同时拥有两者的人可以冒充此服务器。","Elige una frase de contraseña. La copia se cifra con ella y hace falta para restaurarla. Guarda ambas a salvo: juntas permiten hacerse pasar por este servidor."],
+"Passphrase":["암호 문구","パスフレーズ","密码短语","Frase de contraseña"],
+"Repeat passphrase":["암호 문구 확인","パスフレーズ（確認）","再次输入密码短语","Repite la frase"],
+"At least 8 characters":["8자 이상 입력하세요","8 文字以上にしてください","至少 8 个字符","Al menos 8 caracteres"],
+"The passphrases differ":["암호 문구가 서로 다릅니다","パスフレーズが一致しません","两次输入的密码短语不同","Las frases no coinciden"],
+"Download":["받기","ダウンロード","下载","Descargar"],
+"Backup saved":["백업을 저장했습니다","バックアップを保存しました","备份已保存","Copia guardada"],
+"Restore from a backup…":["백업에서 복원…","バックアップから復元…","从备份恢复…","Restaurar una copia…"],
+"Restore from a backup":["백업에서 복원","バックアップから復元","从备份恢复","Restaurar una copia"],
+"Replaces this device's server data with the backup's. The data it has now is kept in server.bak beside it. Stop the old server first: two servers with the same keys confuse the devices.":["이 기기의 서버 데이터를 백업 내용으로 바꿉니다. 지금 데이터는 옆의 server.bak에 남겨 둡니다. 예전 서버는 먼저 꺼 두세요. 같은 키를 가진 서버가 둘이면 기기들이 헷갈립니다.","このデバイスのサーバーデータをバックアップの内容に置き換えます。現在のデータは隣の server.bak に残します。古いサーバーは先に止めてください。同じキーのサーバーが 2 台あるとデバイスが混乱します。","用备份替换本设备的服务器数据，现有数据保存在旁边的 server.bak 中。请先停止旧服务器：两台密钥相同的服务器会让设备混乱。","Sustituye los datos del servidor de este dispositivo por los de la copia. Los actuales se guardan en server.bak al lado. Apaga antes el servidor antiguo: dos servidores con las mismas claves confunden a los dispositivos."],
+"Backup file":["백업 파일","バックアップファイル","备份文件","Archivo de copia"],
+"Choose the backup file":["백업 파일을 고르세요","バックアップファイルを選んでください","请选择备份文件","Elige el archivo de copia"],
+"Restore":["복원","復元","恢复","Restaurar"],
+"Restored. Turn the server on to continue.":["복원했습니다. 서버를 켜면 이어집니다.","復元しました。サーバーをオンにすると再開します。","已恢复。开启服务器即可继续。","Restaurado. Enciende el servidor para continuar."],
 "The router's external address ({ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Pick a device they can reach and choose \"Use as helper node\" in its ⋯ menu; devices on the same network can join as they are.":["공유기의 외부 주소({ip})가 사설 주소(CGNAT)라 다른 네트워크의 기기는 이 서버에 바로 접속할 수 없습니다. 인터넷에서 접속할 수 있는 기기 하나를 골라 ⋯ 메뉴에서 \"보조 노드로 쓰기\"를 선택하세요. 같은 네트워크의 기기는 그대로 참여할 수 있습니다.","ルーターの外部アドレス（{ip}）はプライベートアドレス（CGNAT）のため、他のネットワークのデバイスはこのサーバーに直接接続できません。インターネットから到達できるデバイスを選び、⋯ メニューで「補助ノードとして使う」を選んでください。同じネットワークのデバイスはそのまま参加できます。","路由器的外部地址（{ip}）是私有地址（CGNAT），其他网络中的设备无法直接访问此服务器。请选一台能从互联网访问的设备，在其 ⋯ 菜单中选择“用作辅助节点”；同一网络中的设备可以直接加入。","La dirección externa del router ({ip}) es privada (CGNAT), así que los dispositivos de otras redes no llegan a este servidor directamente. Elige un dispositivo al que sí lleguen y pulsa «Usar como nodo auxiliar» en su menú ⋯; los de la misma red pueden unirse tal cual."],
 };
 const LANGS=["ko","ja","zh","es"];
@@ -253,6 +304,7 @@ document.addEventListener("click",e=>{if(!e.target.closest("details.menu"))close
 document.addEventListener("toggle",e=>{if(e.target.matches?.("details.menu")&&e.target.open)closeMenus(e.target)},true);
 const menu=(label,items,cls="")=>`<details class="menu"><summary class="btn ${cls}" aria-label="${label==="⋯"?esc(t("More")):esc(label)}">${esc(label)}</summary><div class="pop">${items}</div></details>`;
 function expires(at){if(at>=9e18)return t("Never expires");const h=Math.round((at-Date.now()/1000)/3600);return h<=0?t("Expired"):h<48?t("Expires in {n} h",{n:h}):t("Expires in {n} d",{n:Math.round(h/24)})}
+function keyExpires(at){const h=Math.round((at-Date.now()/1000)/3600);return h<48?t("Key expires in {n} h",{n:Math.max(h,1)}):t("Key expires in {n} d",{n:Math.round(h/24)})}
 function ago(at){if(!at)return t("Never connected");const m=Math.floor((Date.now()/1000-at)/60);return m<1?t("Seen just now"):m<60?t("Seen {n} min ago",{n:m}):m<1440?t("Seen {n} h ago",{n:Math.floor(m/60)}):t("Seen {n} d ago",{n:Math.floor(m/1440)})}
 function routerText(r){if(!r)return t("Automatic opening is off");return r.kind==="opened"?t("Opened with {method} (TCP {tcp}, UDP {udp})",r):t("Could not open automatically")}
 function noticeText(n){if(!n)return"";if(n.kind==="cgnat")return t("The router's external address ({ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Pick a device they can reach and choose \"Use as helper node\" in its ⋯ menu; devices on the same network can join as they are.",{ip:n.router_ip});return t("The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",n)}
@@ -265,7 +317,7 @@ function render(){
   const s=view.server;
   $("#state").textContent=t(s.running?"Running":"Off");$("#state").className="pill"+(s.running?" on":"");
   if(!s.running){
-    $("#server").innerHTML=`<div class="card pad"><p style="margin-top:0">${esc(t("The network server on this device is off. Turn it on to make this device the server and invite other devices."))}</p>${s.last_error?`<div class="notice">${esc(s.last_error)}</div>`:""}<button class="primary" onclick="act('/api/server/start',{},t('Server turned on'))">${esc(t("Turn on server"))}</button></div>`;
+    $("#server").innerHTML=`<div class="card pad"><p style="margin-top:0">${esc(t("The network server on this device is off. Turn it on to make this device the server and invite other devices."))}</p>${s.last_error?`<div class="notice">${esc(s.last_error)}</div>`:""}<button class="primary" onclick="act('/api/server/start',{},t('Server turned on'))">${esc(t("Turn on server"))}</button>${view.local?` <button onclick="openRestore()">${esc(t("Restore from a backup…"))}</button>`:""}</div>`;
     $("#networked").hidden=true;return;
   }
   const rows=[[t("Address from outside"),s.public||t("Not reachable from other networks")],[t("This network"),(s.lan||[]).slice(0,3).join(", ")||"-"],[t("Router ports"),routerText(s.router)]];
@@ -299,10 +351,17 @@ function render(){
   $("#nodes").innerHTML=nodes.length?nodes.map((n,k)=>{const self=view.own_ip===n.ip;const allowed=view.admins.includes(n.id);
     const helper=s.helper_device===n.id;
     const tags=(n.tags||[]).map(g=>`<span class="tag">#${esc(g)}</span>`).join("");
-    return`<div class="item"><div class="main"><div class="name"><span class="dot${n.online?" on":""}"></span>${esc(n.hostname)}${self?`<span class="pill">${esc(t("This device"))}</span>`:""}${n.exit_node?'<span class="pill">Exit node</span>':""}${helper?`<span class="pill on">${esc(t("Helper node"))}</span>`:""}${allowed&&!self?`<span class="pill on">${esc(t("Can manage"))}</span>`:""}${tags}</div>
-    <div class="meta">${esc(n.dns_name||n.ip)} · ${esc(n.ip)} · ${esc(n.os)} · ${esc(n.online?t("Connected"):ago(n.last_seen))}</div></div>
-    <div class="side">${menu("⋯",`<button onclick="editTags(${k})">${esc(t("Edit tags…"))}</button>${self?"":`<button onclick="setAdmin(${k},${!allowed})">${esc(t(allowed?"Stop allowing management":"Allow managing from this device"))}</button><button onclick="setHelper(${k},${!helper})">${esc(t(helper?"Stop using as helper node":"Use as helper node"))}</button><button class="danger" onclick="removeNode(${k})">${esc(t("Remove device"))}</button>`}`,"icon")}</div></div>`}).join(""):`<div class="empty">${esc(t("No devices have joined yet."))}</div>`;
+    const adv=n.advertised_routes||[],ok=n.approved_routes||[];
+    const live=adv.filter(r=>ok.includes(r)),waiting=adv.filter(r=>!ok.includes(r));
+    const keyMenu=self?"":n.expired||n.expires_at!=null?`<button onclick="renewKey(${k},false)">${esc(t("Renew key"))}</button><button onclick="renewKey(${k},true)">${esc(t("Key never expires"))}</button>`:s.key_expiry_days?`<button onclick="renewKey(${k},false)">${esc(t("Key expires as set for the network"))}</button>`:"";
+    const routeMenu=(waiting.length?`<button onclick="approveRoutes(${k})">${esc(t("Approve routes"))}</button>`:"")+(ok.length?`<button onclick="stopRoutes(${k})">${esc(t("Stop routing its networks"))}</button>`:"");
+    return`<div class="item"><div class="main"><div class="name"><span class="dot${n.online?" on":""}"></span>${esc(n.hostname)}${self?`<span class="pill">${esc(t("This device"))}</span>`:""}${n.expired?`<span class="pill bad">${esc(t("Key expired"))}</span>`:""}${n.exit_node?'<span class="pill">Exit node</span>':""}${live.length?`<span class="pill on">${esc(t("Routes {nets}",{nets:live.join(", ")}))}</span>`:""}${helper?`<span class="pill on">${esc(t("Helper node"))}</span>`:""}${allowed&&!self?`<span class="pill on">${esc(t("Can manage"))}</span>`:""}${tags}</div>
+    <div class="meta">${esc(n.dns_name||n.ip)} · ${esc(n.ip)} · ${esc(n.os)} · ${esc(n.online?t("Connected"):ago(n.last_seen))}${n.expires_at!=null&&!n.expired?` · ${esc(keyExpires(n.expires_at))}`:""}</div>
+    ${waiting.length?`<div class="meta warn">${esc(t("Offers to route {nets} · not approved yet",{nets:waiting.join(", ")}))}</div>`:""}</div>
+    <div class="side">${menu("⋯",`<button onclick="editTags(${k})">${esc(t("Edit tags…"))}</button>${routeMenu}${keyMenu}${self?"":`<button onclick="setAdmin(${k},${!allowed})">${esc(t(allowed?"Stop allowing management":"Allow managing from this device"))}</button><button onclick="setHelper(${k},${!helper})">${esc(t(helper?"Stop using as helper node":"Use as helper node"))}</button><button class="danger" onclick="removeNode(${k})">${esc(t("Remove device"))}</button>`}`,"icon")}</div></div>`}).join(""):`<div class="empty">${esc(t("No devices have joined yet."))}</div>`;
   renderAccess(s);
+  renderKeys(s);
+  $("#backupBox").hidden=!view.local;
   $("#meshNote").textContent=view.mesh_url?t("Devices allowed to manage can open this page at {url} while connected to retail.",{url:view.mesh_url}):"";
 }
 async function load(force){if(!force&&(document.querySelector("details.menu[open]")||document.querySelector("dialog[open]")))return;
@@ -335,7 +394,46 @@ function openAccess(){act("/api/acl",{acl:null},t("Every device reaches every ot
 function addRule(){const acl=structuredClone(view.server.acl||{rules:[]});const ports=$("#rPorts").value.split(",").map(x=>x.trim()).filter(Boolean);
   acl.rules.push({from:[$("#rFrom").value],to:[$("#rTo").value],ports});act("/api/acl",{acl},t("Rule added"))}
 function removeRule(i){const acl=structuredClone(view.server.acl);acl.rules.splice(i,1);act("/api/acl",{acl},t("Rule removed"))}
-function removeNode(k){const n=nodes[k];if(confirm(t("Remove {host} from the network? It will need an invite to come back.",{host:n.hostname})))act(`/api/nodes/${n.id}/delete`,{},t("Device removed"))}
+function removeNode(k){const n=nodes[k];if(!confirm(t("Remove {host} from the network? It will need an invite to come back.",{host:n.hostname})))return;
+  // An invite that still works would let it, or whoever has it now, back in
+  const inv=(view.server.invites||[]).find(i=>i.id===n.invite_id&&(i.name||i.reusable)&&i.expires_at>Date.now()/1000);
+  const revoke_invite=!!inv&&confirm(t("{host} joined with the invite '{name}', which still works. Expire that invite too, so nobody can join with it again?",{host:n.hostname,name:inv.name||"#"+inv.id}));
+  act(`/api/nodes/${n.id}/delete`,{revoke_invite},t("Device removed"))}
+function approveRoutes(k){const n=nodes[k];const all=[...new Set([...(n.approved_routes||[]),...(n.advertised_routes||[])])];
+  if(confirm(t("{host} will route {nets} for the other devices. Devices with full access to {host} can then reach the hosts there. Continue?",{host:n.hostname,nets:all.join(", ")})))act(`/api/nodes/${n.id}/routes`,{routes:all},t("Routes approved"))}
+function stopRoutes(k){act(`/api/nodes/${nodes[k].id}/routes`,{routes:[]},t("Routing stopped"))}
+function renewKey(k,never){act(`/api/nodes/${nodes[k].id}/renew`,{never},t("Key renewed"))}
+
+// How long device keys last, and when unused devices go
+function renderKeys(s){
+  const sel=(id,cur,opts)=>{if(cur!=null&&!opts.some(([v])=>v===cur))opts=[...opts,[cur,t("{n} days",{n:cur})]];
+    return`<select id="${id}" onchange="saveExpiry()">${opts.map(([v,l])=>`<option value="${v??""}"${v===cur?" selected":""}>${esc(l)}</option>`).join("")}</select>`};
+  const never=[null,t("Never")],d=n=>[n,t(n===365?"1 year":n+" days")];
+  $("#keys").innerHTML=`<div class="field" style="margin-top:0"><label for="kExp">${esc(t("Device keys expire after"))}</label>${sel("kExp",s.key_expiry_days??null,[never,d(30),d(90),d(180),d(365)])}</div>
+  <div class="field"><label for="kIdle">${esc(t("Remove devices not seen for"))}</label>${sel("kIdle",s.remove_inactive_days??null,[never,d(30),d(90),d(180)])}</div>
+  <p class="muted small" style="margin:0">${esc(t("A device whose key expired is cut off until you renew it here or it joins again with an invite. This device and the helper node never expire."))}</p>`;
+}
+function saveExpiry(){const v=id=>{const x=$(id).value;return x?Number(x):null};act("/api/expiry",{key_expiry_days:v("#kExp"),remove_inactive_days:v("#kIdle")},t("Settings saved"))}
+
+// Backups: made and restored on the server's own device only
+function openBackup(){
+  $("#backupBody").innerHTML=`<h3>${esc(t("Download backup"))}</h3><p class="muted small" style="margin:0">${esc(t("Choose a passphrase. The backup is encrypted with it and restoring needs it. Keep both safe: together they let anyone pose as this server."))}</p>
+  <div class="field"><label for="bp1">${esc(t("Passphrase"))}</label><input id="bp1" type="password" autocomplete="new-password"></div>
+  <div class="field"><label for="bp2">${esc(t("Repeat passphrase"))}</label><input id="bp2" type="password" autocomplete="new-password" onkeydown="if(event.key==='Enter')doBackup()"></div>
+  <div class="actions"><button onclick="$('#backupDlg').close()">${esc(t("Cancel"))}</button><button class="primary" onclick="doBackup()">${esc(t("Download"))}</button></div>`;
+  $("#backupDlg").showModal();setTimeout(()=>$("#bp1")?.focus(),50)}
+async function doBackup(){const a=$("#bp1").value;if(a.length<8)return toast(t("At least 8 characters"));if(a!==$("#bp2").value)return toast(t("The passphrases differ"));
+  try{const j=await api("/api/backup",{passphrase:a});const u=URL.createObjectURL(new Blob([j.backup],{type:"application/json"}));
+    const el=document.createElement("a");el.href=u;el.download=`retail-server-${new Date().toISOString().slice(0,10)}.retail-backup`;document.body.appendChild(el);el.click();el.remove();setTimeout(()=>URL.revokeObjectURL(u),10000);
+    $("#backupDlg").close();toast(t("Backup saved"))}catch(e){toast(e.message)}}
+function openRestore(){
+  $("#backupBody").innerHTML=`<h3>${esc(t("Restore from a backup"))}</h3><p class="muted small" style="margin:0">${esc(t("Replaces this device's server data with the backup's. The data it has now is kept in server.bak beside it. Stop the old server first: two servers with the same keys confuse the devices."))}</p>
+  <div class="field"><label for="rFile">${esc(t("Backup file"))}</label><input id="rFile" type="file" accept=".retail-backup,application/json"></div>
+  <div class="field"><label for="rPass">${esc(t("Passphrase"))}</label><input id="rPass" type="password" onkeydown="if(event.key==='Enter')doRestore()"></div>
+  <div class="actions"><button onclick="$('#backupDlg').close()">${esc(t("Cancel"))}</button><button class="primary" onclick="doRestore()">${esc(t("Restore"))}</button></div>`;
+  $("#backupDlg").showModal()}
+async function doRestore(){const f=$("#rFile").files[0];if(!f)return toast(t("Choose the backup file"));
+  try{await api("/api/restore",{backup:await f.text(),passphrase:$("#rPass").value});$("#backupDlg").close();toast(t("Restored. Turn the server on to continue."),5000);load(true)}catch(e){toast(e.message)}}
 
 // Creating an invite: one dialog for both kinds
 let draft={kind:"multi",ttl:null};

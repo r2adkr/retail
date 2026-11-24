@@ -1,7 +1,16 @@
-//! Access rules on the receiving side. The netmap says what this device takes
-//! from each peer (`Accept`). For a restricted peer, packets that start
-//! something are let in only to the allowed ports; replies to what this
-//! device sent first always come in, tracked here per flow.
+//! What comes in from the mesh, on the receiving side.
+//!
+//! First by destination: this device takes packets for itself, for the
+//! networks it routes (subnet routes), and for the internet while it is an
+//! exit node, and nothing else, so a peer cannot use it to reach other
+//! networks it happens to be connected to.
+//!
+//! Then access rules. The netmap says what this device takes from each peer
+//! (`Accept`). For a restricted peer, packets that start something are let
+//! in only to the allowed ports; replies to what this device sent first always
+//! come in, tracked here per flow. Routed networks are reached only by peers
+//! with full access to the router, since port rules name devices, not the
+//! hosts behind them.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -10,6 +19,43 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use retail_proto::acl::{Accept, PortRule};
+use retail_proto::route::Ipv4Net;
+
+/// This device, as the destination check sees it
+pub struct Here<'a> {
+    pub ip: Ipv4Addr,
+    /// Offers itself as an exit node
+    pub exit: bool,
+    /// Networks it routes for the others
+    pub routes: &'a [Ipv4Net],
+}
+
+#[derive(PartialEq, Debug)]
+enum Dest {
+    Own,
+    Subnet,
+    Internet,
+}
+
+impl Here<'_> {
+    fn classify(&self, dst: Ipv4Addr) -> Option<Dest> {
+        if dst == self.ip {
+            return Some(Dest::Own);
+        }
+        if self.routes.iter().any(|r| r.contains(dst)) {
+            return Some(Dest::Subnet);
+        }
+        if dst.is_multicast() || dst.is_broadcast() {
+            return Some(Dest::Own);
+        }
+        // Its LAN or public address is this device too
+        let own = crate::host::is_own(dst);
+        if self.exit && is_internet(dst) && !own {
+            return Some(Dest::Internet);
+        }
+        own.then_some(Dest::Own)
+    }
+}
 
 /// A flow is forgotten after this long without packets either way
 const FLOW_IDLE: Duration = Duration::from_secs(600);
@@ -106,19 +152,29 @@ impl Filter {
         flows.insert(key, Instant::now());
     }
 
-    /// Whether a packet from the peer may come in. `exit` says whether this
-    /// device is an exit node: then packets for public internet addresses are
-    /// internet traffic through it and pass. Anything else counts as traffic
-    /// to this device, whatever address it names (its LAN or public address,
-    /// broadcast), since the system takes it as its own.
-    pub fn inbound(&self, p: &[u8], exit: bool) -> bool {
-        if !self.restricted() {
+    /// Whether a packet from the peer may come in
+    pub fn inbound(&self, p: &[u8], here: &Here) -> bool {
+        if p.len() < 20 {
+            return false;
+        }
+        let dst = Ipv4Addr::new(p[16], p[17], p[18], p[19]);
+        let restricted = self.restricted();
+        // The usual case, quickly
+        if dst == here.ip && !restricted {
             return true;
         }
+        match here.classify(dst) {
+            None => false,
+            // Internet traffic through an exit node is not the rules' business
+            Some(Dest::Internet) => true,
+            Some(Dest::Subnet) => !restricted,
+            Some(Dest::Own) => !restricted || self.allowed(p),
+        }
+    }
+
+    /// Access rules for a restricted peer's packet to this device
+    fn allowed(&self, p: &[u8]) -> bool {
         let Some(h) = parse(p) else { return false };
-        if exit && is_internet(h.dst) && !crate::host::is_own(h.dst) {
-            return true;
-        }
         if h.later_fragment {
             return false;
         }
@@ -157,15 +213,16 @@ impl Filter {
     }
 }
 
-/// A public unicast address: what exit-node traffic is for
-fn is_internet(ip: Ipv4Addr) -> bool {
+/// A public unicast address: what exit-node traffic is for. Documentation
+/// ranges count, since they never reach the real internet anyway and test
+/// networks use them.
+pub fn is_internet(ip: Ipv4Addr) -> bool {
     !(ip.is_private()
         || ip.is_loopback()
         || ip.is_link_local()
         || ip.is_broadcast()
         || ip.is_multicast()
         || ip.is_unspecified()
-        || ip.is_documentation()
         || ip.octets()[0] == 0
         || ip.octets()[0] >= 240
         || retail_proto::in_mesh(ip))
@@ -207,50 +264,70 @@ mod tests {
         p
     }
 
+    const PLAIN: Here<'static> = Here { ip: ME, exit: false, routes: &[] };
+    const EXIT: Here<'static> = Here { ip: ME, exit: true, routes: &[] };
+
     #[test]
-    fn unrestricted_peers_pass() {
+    fn unrestricted_peers_reach_this_device_only() {
         let f = Filter::default();
-        assert!(f.inbound(&packet(TCP, PEER, ME, 1000, 22), false));
+        assert!(f.inbound(&packet(TCP, PEER, ME, 1000, 22), &PLAIN));
+        assert!(f.inbound(&packet(UDP, PEER, Ipv4Addr::new(224, 0, 0, 251), 5353, 5353), &PLAIN));
+        // Not a way into other networks, nor to the internet unless an exit node
+        let lan = packet(TCP, PEER, Ipv4Addr::new(10, 99, 0, 7), 1000, 22);
+        assert!(!f.inbound(&lan, &PLAIN));
+        let internet = packet(TCP, PEER, Ipv4Addr::new(8, 8, 8, 8), 40000, 80);
+        assert!(!f.inbound(&internet, &PLAIN));
+        assert!(f.inbound(&internet, &EXIT));
+        assert!(!f.inbound(&lan, &EXIT), "an exit node keeps its private networks to itself");
+        // A routed network is reachable
+        let routes: [Ipv4Net; 1] = ["10.99.0.0/24".parse().unwrap()];
+        let router = Here { ip: ME, exit: false, routes: &routes };
+        assert!(f.inbound(&lan, &router));
+        assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::new(10, 98, 0, 7), 1000, 22), &router));
     }
 
     #[test]
     fn allowed_ports_and_replies_only() {
         let f = Filter::default();
         f.set(&Accept::Ports { ports: vec![PortRule::parse("tcp:443").unwrap()] });
-        assert!(f.inbound(&packet(TCP, PEER, ME, 40000, 443), false));
-        assert!(!f.inbound(&packet(TCP, PEER, ME, 40000, 22), false));
-        assert!(!f.inbound(&packet(UDP, PEER, ME, 40000, 443), false));
+        assert!(f.inbound(&packet(TCP, PEER, ME, 40000, 443), &PLAIN));
+        assert!(!f.inbound(&packet(TCP, PEER, ME, 40000, 22), &PLAIN));
+        assert!(!f.inbound(&packet(UDP, PEER, ME, 40000, 443), &PLAIN));
         // We connect to the peer's port 22: its answers come back, others do not
         f.outbound(&packet(TCP, ME, PEER, 50000, 22));
-        assert!(f.inbound(&packet(TCP, PEER, ME, 22, 50000), false));
-        assert!(!f.inbound(&packet(TCP, PEER, ME, 22, 50001), false));
-        assert!(!f.inbound(&packet(TCP, Ipv4Addr::new(100, 64, 0, 3), ME, 22, 50000), false));
+        assert!(f.inbound(&packet(TCP, PEER, ME, 22, 50000), &PLAIN));
+        assert!(!f.inbound(&packet(TCP, PEER, ME, 22, 50001), &PLAIN));
+        assert!(!f.inbound(&packet(TCP, Ipv4Addr::new(100, 64, 0, 3), ME, 22, 50000), &PLAIN));
         // Pings: ours get answered, theirs are not let in
         f.outbound(&icmp(8, ME, PEER, 7));
-        assert!(f.inbound(&icmp(0, PEER, ME, 7), false));
-        assert!(!f.inbound(&icmp(0, PEER, ME, 8), false));
-        assert!(!f.inbound(&icmp(8, PEER, ME, 9), false));
+        assert!(f.inbound(&icmp(0, PEER, ME, 7), &PLAIN));
+        assert!(!f.inbound(&icmp(0, PEER, ME, 8), &PLAIN));
+        assert!(!f.inbound(&icmp(8, PEER, ME, 9), &PLAIN));
         // Internet traffic through us as an exit node is not ours to filter
         let internet = packet(TCP, PEER, Ipv4Addr::new(8, 8, 8, 8), 40000, 80);
-        assert!(f.inbound(&internet, true));
-        assert!(!f.inbound(&internet, false), "not an exit node: no internet traffic either");
-        // Other addresses of ours, LAN hosts and broadcast are this device's, exit node or not
+        assert!(f.inbound(&internet, &EXIT));
+        assert!(!f.inbound(&internet, &PLAIN), "not an exit node: no internet traffic either");
+        // Broadcast and other mesh addresses are not let in on the side
         for dst in [Ipv4Addr::new(192, 168, 1, 10), Ipv4Addr::new(255, 255, 255, 255), Ipv4Addr::new(224, 0, 0, 251), Ipv4Addr::new(100, 64, 0, 9)] {
-            assert!(!f.inbound(&packet(UDP, PEER, dst, 40000, 5353), true), "{dst}");
+            assert!(!f.inbound(&packet(UDP, PEER, dst, 40000, 5353), &EXIT), "{dst}");
         }
+        // Routed networks only for peers with full access
+        let routes: [Ipv4Net; 1] = ["10.99.0.0/24".parse().unwrap()];
+        let router = Here { ip: ME, exit: false, routes: &routes };
+        assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::new(10, 99, 0, 7), 40000, 443), &router));
         // Garbage and later fragments are dropped
-        assert!(!f.inbound(&[0x45, 0, 0], false));
+        assert!(!f.inbound(&[0x45, 0, 0], &PLAIN));
         let mut frag = packet(TCP, PEER, ME, 40000, 443);
         frag[7] = 1;
-        assert!(!f.inbound(&frag, false));
+        assert!(!f.inbound(&frag, &PLAIN));
     }
 
     #[test]
     fn replies_only_and_back_to_all() {
         let f = Filter::default();
         f.set(&Accept::Ports { ports: vec![] });
-        assert!(!f.inbound(&icmp(8, PEER, ME, 1), false));
+        assert!(!f.inbound(&icmp(8, PEER, ME, 1), &PLAIN));
         f.set(&Accept::All);
-        assert!(f.inbound(&icmp(8, PEER, ME, 1), false));
+        assert!(f.inbound(&icmp(8, PEER, ME, 1), &PLAIN));
     }
 }

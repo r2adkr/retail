@@ -47,6 +47,21 @@ pub fn default_stun_server(server: &str) -> String {
     }
 }
 
+/// The server's other addresses: the ones it reports now first, then those
+/// known before, without its main address and at most 16
+pub fn merge_alts(server: &str, fresh: &[String], known: &[String]) -> Vec<String> {
+    let main = server.split_once("://").map_or(server, |(_, r)| r);
+    let mut out: Vec<String> = Vec::new();
+    for a in fresh.iter().chain(known) {
+        let a = a.trim();
+        if !a.is_empty() && a != main && !a.contains(['/', ' ']) && !out.iter().any(|x| x == a) {
+            out.push(a.to_string());
+        }
+    }
+    out.truncate(16);
+    out
+}
+
 fn poll_url(server: &str) -> Result<String> {
     let ws = if let Some(r) = server.strip_prefix("https://") {
         format!("wss://{r}")
@@ -75,6 +90,18 @@ pub async fn control_loop(engine: Arc<Engine>, target: Target, token: String) ->
     let mut relay_out = engine.take_relay_out().context("control loop already running")?;
     loop {
         let started = Instant::now();
+        // Where the server said it is now, except inside networks routed
+        // through the mesh, which need this connection to work first
+        let mut target = target.clone();
+        let fresh = engine.subscribe_server_addrs().borrow().clone();
+        let routed = engine.subscribe_routes().borrow().accepted.clone();
+        target.alts = merge_alts(&target.url, &fresh, &target.alts)
+            .into_iter()
+            .filter(|a| match a.parse::<std::net::SocketAddr>() {
+                Ok(std::net::SocketAddr::V4(v4)) => !routed.iter().any(|r| r.contains(*v4.ip())),
+                _ => true,
+            })
+            .collect();
         match run_once(&engine, &target, &token, &mut relay_out).await {
             Ok(()) => tracing::info!("control connection closed by server"),
             Err(e) => tracing::warn!("control connection: {e:#}"),
@@ -166,11 +193,13 @@ where
     let current = endpoints.borrow_and_update().clone();
     send(&mut tx, send_endpoints(current)?).await?;
     let mut advertise = engine.subscribe_advertise_exit();
-    let hostinfo = |exit_node| -> Result<Message> {
-        Ok(Message::text(serde_json::to_string(&ClientMessage::Hostinfo { exit_node })?))
+    let mut advertise_routes = engine.subscribe_advertise_routes();
+    let hostinfo = |exit_node, routes| -> Result<Message> {
+        Ok(Message::text(serde_json::to_string(&ClientMessage::Hostinfo { exit_node, routes })?))
     };
     let offer = *advertise.borrow_and_update();
-    send(&mut tx, hostinfo(offer)?).await?;
+    let routes = advertise_routes.borrow_and_update().clone();
+    send(&mut tx, hostinfo(offer, routes)?).await?;
     let mut helper_code = engine.subscribe_helper_code();
     let helper_msg = |code| -> Result<Message> {
         Ok(Message::text(serde_json::to_string(&ClientMessage::HelperCode { code })?))
@@ -213,7 +242,14 @@ where
             changed = advertise.changed() => {
                 changed?;
                 let offer = *advertise.borrow_and_update();
-                send(&mut tx, hostinfo(offer)?).await?;
+                let routes = advertise_routes.borrow().clone();
+                send(&mut tx, hostinfo(offer, routes)?).await?;
+            }
+            changed = advertise_routes.changed() => {
+                changed?;
+                let routes = advertise_routes.borrow_and_update().clone();
+                let offer = *advertise.borrow();
+                send(&mut tx, hostinfo(offer, routes)?).await?;
             }
             changed = helper_code.changed() => {
                 changed?;

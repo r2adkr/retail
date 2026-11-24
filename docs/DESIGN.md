@@ -123,13 +123,14 @@ The last resort for networks where HTTPS to the server is itself blocked (firewa
 ### 6.3 Names and access control
 
 - **MagicDNS**: the server gives every node a unique `dns_name` (`<hostname>.retail.internal`, later duplicates `-2`, `-3`). Packets to 100.100.100.100 (inside the mesh range, never assigned) reach no peer, so the engine hands UDP queries to port 53 to `magicdns.rs`, which answers A and reverse (PTR) lookups from the netmap and writes the reply to TUN. NXDOMAIN for unknown names in the domain, REFUSED outside it. The system is told to send only `retail.internal` there: an NRPT rule on Windows, `/etc/resolver/retail.internal` on macOS, `resolvectl dns/domain` on Linux; undone when the session ends.
-- **Access control** (`retail_proto::acl`, `retail-control/src/acl.rs`, `retail-daemon/src/filter.rs`): the policy is stored with the server data; `None` means everyone reaches everyone. Rules name sources and destinations by `*`, `tag:NAME` or `id:N`, with optional ports. For each pair the server computes what the receiver accepts from the sender (`Accept::All`, or `Ports`), sent with that peer in the receiver's netmap. A pair with no rule either way is left out of both netmaps, so the devices cannot even handshake. When only one side may start traffic, the other gets `Ports { [] }`: replies only. The receiver enforces it after decryption: new traffic must match an allowed port; otherwise it must answer a flow this device started (tracked per peer by protocol, peer address and ports, 10 minutes idle, at most 16k flows). ICMP echo replies match our echo ids; ICMP errors are allowed from peers we have flows with; later fragments of restricted peers are dropped. Packets not addressed to the device itself (exit-node traffic) are not filtered here.
+- **Access control** (`retail_proto::acl`, `retail-control/src/acl.rs`, `retail-daemon/src/filter.rs`): the policy is stored with the server data; `None` means everyone reaches everyone. Rules name sources and destinations by `*`, `tag:NAME` or `id:N`, with optional ports. For each pair the server computes what the receiver accepts from the sender (`Accept::All`, or `Ports`), sent with that peer in the receiver's netmap. A pair with no rule either way is left out of both netmaps, so the devices cannot even handshake. When only one side may start traffic, the other gets `Ports { [] }`: replies only. The receiver enforces it after decryption: new traffic must match an allowed port; otherwise it must answer a flow this device started (tracked per peer by protocol, peer address and ports, 10 minutes idle, at most 16k flows). ICMP echo replies match our echo ids; ICMP errors are allowed from peers we have flows with; later fragments of restricted peers are dropped. Internet traffic through an exit node is not filtered by the rules, and routed networks (6.7) take traffic only from peers the router accepts fully.
+- **Destination check** (`filter.rs`, for every peer, rules or not): a device takes packets for itself (its mesh, LAN and public addresses, broadcast and multicast), for the networks the server approved it to route, and, while it offers an exit node, for public internet addresses. Anything else is dropped, so a peer cannot use a device to reach other networks it happens to be on.
 
 ### 6.4 Exit node
 
 Using the internet through another device.
 
-- Offering side (Linux, Windows): turns on IP forwarding and puts forwarding, `100.64.0.0/10` MASQUERADE and MSS clamping rules into dedicated chains (`RETAIL-FWD`, `RETAIL-NAT`, `RETAIL-MSS`). Traffic is never sent into the exit node's private networks (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10). Leftover chains are removed at start and cleaned up at the end. Windows uses `New-NetNat` and has not been checked on real hardware yet. macOS cannot offer an exit node.
+- Offering side (Linux, Windows): turns on IP forwarding and puts forwarding, `100.64.0.0/10` MASQUERADE and MSS clamping rules into dedicated chains (`RETAIL-FWD`, `RETAIL-NAT`, `RETAIL-MSS`). Traffic is never sent into the exit node's private networks (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10) other than those it routes (6.7). One `Gateway` (`exit.rs`) owns these chains for both, so neither undoes the other. Leftover chains are removed at start and cleaned up at the end. Windows uses `New-NetNat` and has not been checked on real hardware yet. macOS cannot offer an exit node.
 - Using side: packets to destinations outside the mesh go to the chosen exit peer, and source addresses outside the mesh are accepted only from that peer (spoofing other mesh addresses stays blocked).
 - No routing loops: the daemon's own sockets (WireGuard and STUN UDP, the control connection) bypass the tunnel: fwmark and policy routing on Linux (as wg-quick does, with connmark restore for strict rp_filter), `IP_UNICAST_IF` on Windows, `IP_BOUND_IF` on macOS. The Windows and macOS paths have not been checked on real hardware yet.
 - The tunnel carries IPv4 only, so the IPv6 internet is blocked while an exit node is in use (no leaks).
@@ -163,6 +164,15 @@ So that the server is reachable from any network with internet access, the contr
 - **NAT64**: a device without an IPv4 address looks up `ipv4only.arpa` to find the NAT64 prefix (RFC 7050) and adds the server's, STUN's and peers' IPv4 addresses translated into that prefix as candidates. Devices with IPv4 do not look it up (the system resolver module costs memory).
 - `retail status` and the status API's `control_via` show the way in use.
 - Limits: captive portals before sign-in, allow-list networks (where even the CDN address is not allowed) and DNS-only networks are out of reach. The relay inside a tunnel is slower than over direct TCP, and long polling especially so.
+
+### 6.7 Subnet routes
+
+A device can route networks it is on (its LAN) for the others.
+
+- Offering: `Prefs.advertise_routes` goes to the server in `ClientMessage::Hostinfo { routes }`. The server keeps offers in memory per connection and the administrator's approval per node (`NodeRec.routes`). A netmap lists, for each peer, the networks it both offers and has approved, while it is connected and its key is valid; when several devices route the same network, the oldest wins so the choice does not flap. Networks overlapping `100.64.0.0/10`, loopback, link-local, multicast or `0.0.0.0/0` are refused (`Ipv4Net::check_route`), and a device offers at most 16.
+- Router side (Linux): forwarding to the approved networks from the TUN device and MASQUERADE towards them, in the `Gateway` chains of 6.4, so hosts there need no route back. Packets from the mesh go out only to approved networks (and the internet while it is an exit node).
+- Using side: the engine looks up a destination's peer by mesh address, then by the longest matching route, then the exit node. A peer may send from addresses inside its routes (WireGuard's allowed-IPs rule). The system gets a route for each network into the TUN device (`SubnetRoutes`: `ip route` / `netsh` / `route`), except networks overlapping one the device is on itself, and WireGuard endpoints or server addresses inside a routed network are not used (the tunnel would carry itself).
+- Access rules: a peer reaches routed networks only with full access (`Accept::All`) to the router, since rules name devices, not hosts behind them.
 
 ## 7. Local API (daemon)
 
@@ -208,7 +218,7 @@ Listens on `127.0.0.1:41180`, and also on this device's mesh address `:41180` on
   - Every server joined is kept there as a profile (its own key, token, address, pin and the invite used), so the device switches between networks without new invites and keeps its node and address in each. Joining another server keeps the current one; if joining fails, the device goes back to it. Logging out forgets only the current server.
   - Default location: `%ProgramData%\retail` on Windows, `/var/lib/retail` on Linux, `/Library/Application Support/retail` on macOS.
   - Every save resets the state directory to SYSTEM and Administrators (and the daemon's account) on Windows, and to the owner only (0700) on Unix.
-- Hosting: `<state-dir>/server/` holds `retail.json` (devices, invite key hashes), `tls/` (certificate and key) and `host.json` (ports, domain, REALITY keys). The data is small and has a single writer, so instead of a database the JSON file is rewritten whole, atomically. Endpoints and last-seen times live in memory only.
+- Hosting: `<state-dir>/server/` holds `retail.json` (devices, invite key hashes, access rules, approved routes, key expiry), `tls/` (certificate and key) and `host.json` (ports, domain, REALITY keys). The data is small and has a single writer, so instead of a database the JSON file is rewritten whole, atomically. Endpoints live in memory only; last-seen times are saved every 10 minutes and on stop.
 
 ## 9. Robustness
 
@@ -236,6 +246,10 @@ There is no separate server program. The `retail-control` library runs inside th
 - **Updates** (`retail-daemon/src/update.rs`): every 6 hours the daemon reads `VERSION` from the newest release (`releases/latest/download/VERSION`). Installing fetches this system's programs from that release, checks them against `SHA256SUMS`, and replaces the running ones in their folder (Unix: rename over the old file; Windows: the running file is renamed to `.old` first, removed at the next start). The daemon then shuts down cleanly and exits with code 75, on which systemd (`Restart=on-failure`), launchd (`KeepAlive`) and the Windows task restart it (on Windows the task is also started again after a few seconds). The tray app sees the daemon's newer version and a newer file of its own, and starts that one in its place.
 - **Command-line install**: `retaild install [--server]` copies `retaild` and `retail` into place, registers the boot service and, with `--server`, starts a server with `join: false` and prints an invite; `retaild uninstall` undoes it. The boot registration lives in `retail-daemon/src/service.rs` and the tray app's installer calls it (`retaild service register|stop|remove`), so both install the same way.
 - **Small machines**: below 1 GB of memory the daemon uses the smallest data-plane buffers unless a limit is set; releases include `linux-aarch64` (with the tray) and `linux-arm` (32-bit, daemon and CLI).
+- **Removing devices**: deleting a node closes its connection and drops it from every netmap; its token stops working. The node remembers the invite it joined with (`invite_id`), so removal can expire that invite too.
+- **Key expiry**: with `key_expiry_days` set, a node's key expires that long after it joined, joined again or was renewed; turning it on or changing it starts every node's clock anew. An expired node stays connected but gets a netmap with `expired: true` and no peers, is left out of everyone else's netmap, and its relay frames are dropped, so renewing it brings it back at once. Nodes that joined with the hosting device's own invite, and the helper device, never expire. A maintenance task (every minute) sends new netmaps when keys expire, removes nodes not seen for `remove_inactive_days` (except online and exempt ones), and saves last-seen times.
+- **Server addresses**: netmaps carry the addresses invites would carry now (`server_addrs`), refreshed every 30 seconds. Devices keep them as alternatives to the invite's addresses, so a new public address does not strand them.
+- **Backups** (`retail-daemon/src/backup.rs`): every file of the server directory (with `retail.json` taken from memory) in one JSON document, sealed with AES-256-GCM under a key from the passphrase (PBKDF2-HMAC-SHA256, 600,000 rounds). Made and restored through the local API or the web admin page on the server's own device, never by devices managing it over the network. Restoring needs the server stopped, checks the data, moves the current directory to `server.bak` and puts the backup's in place. A device given an invite whose certificate pin matches the server it belongs to (or a saved one) treats it as the same network at a new address: it keeps its key and registers with its token, so it keeps its node, address and name.
 - **Packaging**: `packaging/docker` (retaild in server mode, distroless), `packaging/systemd/retaild.service`, and the release workflow that publishes the official clients (`.github/workflows/release.yml`).
 
 ## 11. Tray app
@@ -292,8 +306,8 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 
 | Milestone | Content |
 |---|---|
-| Policy | Key expiry and rotation, admin approval of exit nodes, access rules for exit-node use |
-| Convenience | Subnet routers, IPv6 inside the mesh, mobile |
+| Policy | Key rotation, admin approval of exit nodes, access rules for exit-node use and for hosts on routed networks |
+| Convenience | IPv6 inside the mesh, offering subnet routes on Windows and macOS, mobile |
 | Releases | Code signing, signed update metadata |
 | Performance | Measure the worker count (K) on real many-core hardware, the relay on lossy and high-latency lines (a UDP relay if needed), several relay servers, a faster first REALITY connection |
 | Verification | Exit node routing, NAT and firewall rules on real Windows and macOS machines. Proxy integrated authentication (Kerberos, NTLM) and PAC on a real corporate network |
@@ -308,5 +322,6 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 - MagicDNS needs systemd-resolved on Linux for the system to use it; elsewhere ask 100.100.100.100 directly.
 - Idle memory is 11.6–12.4 MiB, at most 14.9 MiB under load (within the 10–20 MB budget).
 - Integrated proxy authentication works on Windows only. Linux and macOS use Basic and SOCKS5 passwords only, and Linux reads the system proxy from environment variables only.
-- Losing the server certificate key means inviting every device again.
+- Losing the server certificate key without a backup means inviting every device again.
+- Offering subnet routes needs Linux. Access rules cannot single out hosts on a routed network: a peer reaches all of it or none.
 - **Other VPNs that use `100.64.0.0/10` conflict**: retail takes addresses from that range and UDP 41641. retaild moves to a random port if 41641 is taken, but the address ranges overlap, so do not run such a VPN on the same device at the same time.

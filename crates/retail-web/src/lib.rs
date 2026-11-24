@@ -40,7 +40,17 @@ pub trait Backend: Send + Sync + 'static {
     fn invite(&self, req: InviteRequest) -> BoxFut<'_, Result<InviteResponse, String>>;
     fn named_code(&self, id: i64) -> BoxFut<'_, Result<String, String>>;
     fn revoke(&self, id: i64) -> BoxFut<'_, Result<(), String>>;
-    fn delete_node(&self, id: i64) -> BoxFut<'_, Result<(), String>>;
+    /// With `revoke_invite`, the invite it joined with stops working too
+    fn delete_node(&self, id: i64, revoke_invite: bool) -> BoxFut<'_, Result<(), String>>;
+    /// The networks a device may route
+    fn set_routes(&self, id: i64, routes: Vec<retail_proto::route::Ipv4Net>) -> BoxFut<'_, Result<(), String>>;
+    /// A new key lifetime, or none with `never`
+    fn renew(&self, id: i64, never: bool) -> BoxFut<'_, Result<(), String>>;
+    fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> BoxFut<'_, Result<(), String>>;
+    /// The server's data, encrypted with the passphrase
+    fn backup(&self, passphrase: String) -> BoxFut<'_, Result<String, String>>;
+    /// Replaces the server's data with a backup's, while it is stopped
+    fn restore(&self, backup: String, passphrase: String) -> BoxFut<'_, Result<(), String>>;
     /// Node ids allowed to open this page over the network
     fn admins(&self) -> Vec<i64>;
     fn set_admin(&self, id: i64, allowed: bool) -> Result<(), String>;
@@ -129,6 +139,11 @@ impl WebAdmin {
             .route("/api/nodes/{id}/delete", post(delete_node))
             .route("/api/nodes/{id}/admin", post(set_admin))
             .route("/api/nodes/{id}/tags", post(set_tags))
+            .route("/api/nodes/{id}/routes", post(set_routes))
+            .route("/api/nodes/{id}/renew", post(renew))
+            .route("/api/expiry", post(set_expiry))
+            .route("/api/backup", post(backup))
+            .route("/api/restore", post(restore).layer(axum::extract::DefaultBodyLimit::max(64 << 20)))
             .route("/api/acl", post(set_acl))
             .route("/api/helper-device", post(set_helper_device))
             .route("/api/qr", post(qr))
@@ -253,6 +268,8 @@ struct StatusView {
     clients: Vec<ClientView>,
     /// Where allowed devices open this page
     mesh_url: Option<String>,
+    /// Opened on the server's own device, where backups are made
+    local: bool,
 }
 
 #[derive(Serialize)]
@@ -276,6 +293,7 @@ async fn status(State(ctx): State<Ctx>) -> Response {
             .map(|c| ClientView { id: c.id, label: c.label, missing: c.missing, fetchable: c.fetchable })
             .collect(),
         mesh_url: own_ip.map(|ip| format!("http://{ip}:{}", ctx.web.port)),
+        local: ctx.listener == Listener::Local,
     };
     Json(view).into_response()
 }
@@ -313,8 +331,40 @@ async fn revoke(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Response {
     done(ctx.web.backend.revoke(id).await)
 }
 
-async fn delete_node(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Response {
-    done(ctx.web.backend.delete_node(id).await)
+async fn delete_node(State(ctx): State<Ctx>, Path(id): Path<i64>, body: axum::body::Bytes) -> Response {
+    let req: retail_proto::api::RemoveRequest = serde_json::from_slice(&body).unwrap_or_default();
+    done(ctx.web.backend.delete_node(id, req.revoke_invite).await)
+}
+
+async fn set_routes(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RoutesRequest>) -> Response {
+    done(ctx.web.backend.set_routes(id, req.routes).await)
+}
+
+async fn renew(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RenewRequest>) -> Response {
+    done(ctx.web.backend.renew(id, req.never).await)
+}
+
+async fn set_expiry(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::ExpiryRequest>) -> Response {
+    done(ctx.web.backend.set_expiry(req.key_expiry_days, req.remove_inactive_days).await)
+}
+
+/// A backup holds the server's keys, so only the server's own device makes
+/// or restores one, not devices allowed to manage it over the network
+async fn backup(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::BackupRequest>) -> Response {
+    if ctx.listener != Listener::Local {
+        return deny(StatusCode::FORBIDDEN, "backups are made on the server's own device");
+    }
+    match ctx.web.backend.backup(req.passphrase).await {
+        Ok(backup) => Json(retail_proto::api::BackupResponse { backup }).into_response(),
+        Err(e) => deny(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+async fn restore(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::RestoreRequest>) -> Response {
+    if ctx.listener != Listener::Local {
+        return deny(StatusCode::FORBIDDEN, "backups are restored on the server's own device");
+    }
+    done(ctx.web.backend.restore(req.backup, req.passphrase).await)
 }
 
 #[derive(Deserialize)]

@@ -1,5 +1,7 @@
 //! Exit nodes: sending all internet traffic through a peer (client side) and
-//! forwarding other nodes' traffic to the internet (exit side).
+//! forwarding other nodes' traffic to the internet (exit side). Subnet
+//! routes, the same on a smaller scale: routes for the networks peers route
+//! (client side) and forwarding to the networks this device routes.
 //!
 //! Client side, the default route moves into the tunnel, so the daemon's own
 //! outside sockets (WireGuard/STUN, control) must bypass it or the tunnel would
@@ -21,6 +23,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result, bail};
+use retail_proto::route::Ipv4Net;
 
 /// "RTL" in ASCII
 #[cfg(target_os = "linux")]
@@ -213,31 +216,57 @@ impl Drop for ClientRoutes {
     }
 }
 
-/// Forwards and NATs traffic from the mesh to the internet until dropped
-pub struct ExitNat {
+/// Forwards and NATs traffic from the mesh until dropped: to the internet
+/// (an exit node), and to the networks this device routes. One set of rules
+/// for both, so neither undoes the other.
+pub struct Gateway {
     #[allow(dead_code)]
     tun: String,
     #[allow(dead_code)]
     tun_index: u32,
     #[allow(dead_code)]
     restore_forwarding: bool,
+    exit: bool,
+    routes: Vec<Ipv4Net>,
 }
 
-/// The exit's own private networks stay unreachable since an exit node is not
-/// a subnet router
+/// The exit's own private networks stay unreachable unless it routes them
 #[cfg(target_os = "linux")]
 const PRIVATE: [&str; 6] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8"];
 
-impl ExitNat {
-    pub fn enable(tun: &str, tun_index: u32) -> Result<Self> {
-        let mut nat = ExitNat { tun: tun.to_string(), tun_index, restore_forwarding: false };
-        nat.cleanup();
-        if let Err(e) = nat.install() {
-            nat.cleanup();
+impl Gateway {
+    pub fn new(tun: &str, tun_index: u32) -> Self {
+        Gateway { tun: tun.to_string(), tun_index, restore_forwarding: false, exit: false, routes: Vec::new() }
+    }
+
+    pub fn exit(&self) -> bool {
+        self.exit
+    }
+
+    /// Forwards for what is asked, or nothing on an error
+    pub fn set(&mut self, exit: bool, routes: &[Ipv4Net]) -> Result<()> {
+        if self.exit == exit && self.routes == routes {
+            return Ok(());
+        }
+        self.cleanup();
+        self.exit = exit;
+        self.routes = routes.to_vec();
+        if !exit && routes.is_empty() {
+            return Ok(());
+        }
+        if let Err(e) = self.install() {
+            self.cleanup();
+            self.exit = false;
+            self.routes.clear();
             return Err(e);
         }
-        tracing::info!(tun, "offering this node as an exit node");
-        Ok(nat)
+        if exit {
+            tracing::info!(tun = %self.tun, "offering this node as an exit node");
+        }
+        if !routes.is_empty() {
+            tracing::info!(?routes, "routing networks for the mesh");
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -247,18 +276,34 @@ impl ExitNat {
             run("sysctl", &["-qw", "net.ipv4.ip_forward=1"])?;
             self.restore_forwarding = true;
         }
-        let tun = self.tun.as_str();
+        let tun = self.tun.clone();
+        let tun = tun.as_str();
+        let routes: Vec<String> = self.routes.iter().map(|r| r.to_string()).collect();
         let ipt = |args: &[&str]| run("iptables", args);
         // First in FORWARD because Docker and firewalls often set DROP
         ipt(&["-N", "RETAIL-FWD"])?;
-        for net in PRIVATE {
-            ipt(&["-A", "RETAIL-FWD", "-i", tun, "-d", net, "-j", "DROP"])?;
+        for net in &routes {
+            ipt(&["-A", "RETAIL-FWD", "-i", tun, "-d", net, "-j", "ACCEPT"])?;
         }
-        ipt(&["-A", "RETAIL-FWD", "-i", tun, "-j", "ACCEPT"])?;
+        if self.exit {
+            for net in PRIVATE {
+                ipt(&["-A", "RETAIL-FWD", "-i", tun, "-d", net, "-j", "DROP"])?;
+            }
+            ipt(&["-A", "RETAIL-FWD", "-i", tun, "-j", "ACCEPT"])?;
+        } else {
+            ipt(&["-A", "RETAIL-FWD", "-i", tun, "-j", "DROP"])?;
+        }
         ipt(&["-A", "RETAIL-FWD", "-o", tun, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])?;
         ipt(&["-I", "FORWARD", "1", "-j", "RETAIL-FWD"])?;
+        // Hosts on routed networks need no route back to the mesh
         ipt(&["-t", "nat", "-N", "RETAIL-NAT"])?;
-        ipt(&["-t", "nat", "-A", "RETAIL-NAT", "-s", "100.64.0.0/10", "!", "-o", tun, "-j", "MASQUERADE"])?;
+        if self.exit {
+            ipt(&["-t", "nat", "-A", "RETAIL-NAT", "-s", "100.64.0.0/10", "!", "-o", tun, "-j", "MASQUERADE"])?;
+        } else {
+            for net in &routes {
+                ipt(&["-t", "nat", "-A", "RETAIL-NAT", "-s", "100.64.0.0/10", "-d", net, "!", "-o", tun, "-j", "MASQUERADE"])?;
+            }
+        }
         ipt(&["-t", "nat", "-I", "POSTROUTING", "1", "-j", "RETAIL-NAT"])?;
         ipt(&["-t", "mangle", "-N", "RETAIL-MSS"])?;
         for dir in ["-i", "-o"] {
@@ -270,7 +315,7 @@ impl ExitNat {
 
     /// Also removes chains left behind by a crash
     #[cfg(target_os = "linux")]
-    fn cleanup(&self) {
+    fn cleanup(&mut self) {
         for (table, parent, chain) in [
             ("filter", "FORWARD", "RETAIL-FWD"),
             ("nat", "POSTROUTING", "RETAIL-NAT"),
@@ -282,11 +327,16 @@ impl ExitNat {
         }
         if self.restore_forwarding {
             run_quiet("sysctl", &["-qw", "net.ipv4.ip_forward=0"]);
+            self.restore_forwarding = false;
         }
     }
 
+    /// Routing networks is Linux-only for now; the internet NAT covers both
     #[cfg(target_os = "windows")]
     fn install(&mut self) -> Result<()> {
+        if !self.routes.is_empty() {
+            bail!("routing networks for the mesh is supported on Linux only");
+        }
         let script = format!(
             "$ErrorActionPreference='Stop'; \
              Set-NetIPInterface -InterfaceIndex {idx} -Forwarding Enabled; \
@@ -297,7 +347,7 @@ impl ExitNat {
     }
 
     #[cfg(target_os = "windows")]
-    fn cleanup(&self) {
+    fn cleanup(&mut self) {
         run_quiet(
             "powershell",
             &["-NoProfile", "-NonInteractive", "-Command", "Remove-NetNat -Name retail-exit -Confirm:$false"],
@@ -306,17 +356,109 @@ impl ExitNat {
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn install(&mut self) -> Result<()> {
-        bail!("offering an exit node is supported on Linux and Windows only")
+        if self.exit {
+            bail!("offering an exit node is supported on Linux and Windows only")
+        }
+        bail!("routing networks for the mesh is supported on Linux only")
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    fn cleanup(&self) {}
+    fn cleanup(&mut self) {}
 }
 
-impl Drop for ExitNat {
+impl Drop for Gateway {
     fn drop(&mut self) {
-        self.cleanup();
-        tracing::info!("no longer offering this node as an exit node");
+        if self.exit || !self.routes.is_empty() {
+            self.cleanup();
+            tracing::info!("no longer forwarding for the mesh");
+        }
+    }
+}
+
+/// Routes the networks peers route into the TUN device, until dropped
+pub struct SubnetRoutes {
+    #[allow(dead_code)]
+    tun: String,
+    #[allow(dead_code)]
+    tun_index: u32,
+    installed: Vec<Ipv4Net>,
+}
+
+impl SubnetRoutes {
+    pub fn new(tun: &str, tun_index: u32) -> Self {
+        SubnetRoutes { tun: tun.to_string(), tun_index, installed: Vec::new() }
+    }
+
+    /// Adds and removes routes to match `wanted`. A route that fails is
+    /// reported and left out.
+    pub fn set(&mut self, wanted: &[Ipv4Net]) -> Result<()> {
+        let gone: Vec<Ipv4Net> = self.installed.iter().filter(|r| !wanted.contains(r)).copied().collect();
+        for r in gone {
+            self.remove(r);
+            self.installed.retain(|x| *x != r);
+        }
+        let mut result = Ok(());
+        for r in wanted.iter().filter(|r| !self.installed.contains(r)).copied().collect::<Vec<_>>() {
+            match self.add(r) {
+                Ok(()) => {
+                    tracing::info!(route = %r, "routing into the mesh");
+                    self.installed.push(r);
+                }
+                Err(e) => {
+                    tracing::warn!("adding the route to {r}: {e:#}");
+                    result = Err(e.context(format!("adding the route to {r}")));
+                }
+            }
+        }
+        result
+    }
+
+    #[cfg(target_os = "linux")]
+    fn add(&self, r: Ipv4Net) -> Result<()> {
+        run("ip", &["-4", "route", "replace", &r.to_string(), "dev", &self.tun])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove(&self, r: Ipv4Net) {
+        run_quiet("ip", &["-4", "route", "del", &r.to_string(), "dev", &self.tun]);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn add(&self, r: Ipv4Net) -> Result<()> {
+        let idx = self.tun_index.to_string();
+        run("netsh", &["interface", "ipv4", "add", "route", &r.to_string(), &idx, "metric=0", "store=active"])
+    }
+
+    #[cfg(target_os = "windows")]
+    fn remove(&self, r: Ipv4Net) {
+        let idx = self.tun_index.to_string();
+        run_quiet("netsh", &["interface", "ipv4", "delete", "route", &r.to_string(), &idx]);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn add(&self, r: Ipv4Net) -> Result<()> {
+        run("route", &["-q", "-n", "add", "-inet", &r.to_string(), "-interface", &self.tun])
+    }
+
+    #[cfg(target_os = "macos")]
+    fn remove(&self, r: Ipv4Net) {
+        run_quiet("route", &["-q", "-n", "delete", "-inet", &r.to_string(), "-interface", &self.tun]);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    fn add(&self, _r: Ipv4Net) -> Result<()> {
+        bail!("subnet routes are not supported on this system")
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    fn remove(&self, _r: Ipv4Net) {}
+}
+
+impl Drop for SubnetRoutes {
+    fn drop(&mut self) {
+        for r in std::mem::take(&mut self.installed) {
+            self.remove(r);
+        }
     }
 }
 

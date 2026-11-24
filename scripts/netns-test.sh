@@ -63,6 +63,18 @@
 #   helper-device B hosts behind a router that opens nothing (as behind
 #                 CGNAT); C, a member on a public address, becomes its helper
 #                 node, and A on another network joins through C
+#   subnet        B routes its LAN (192.168.2.0/24) for the others: not before
+#                 the server approves it, then A reaches B's router (no retail
+#                 on it), which sees B's LAN address; B keeps its own LAN off
+#                 the tunnel; access rules that limit A stop it; it still
+#                 works with B as A's exit node too; and stopping it removes A's route
+#   expire        device keys last 4 "days" of 1 s each: A and B are cut off
+#                 when they expire and back when renewed; with removal of
+#                 inactive devices on, B goes once stopped; removing A with
+#                 its invite keeps it from joining again
+#   restore       the server is backed up, dies, and is restored on another
+#                 machine at another address (a wrong passphrase is refused):
+#                 A and B join it with a new invite and keep their addresses
 #   server-cli    the server set up with the CLI only, as on a VPS:
 #                 `retaild install --server` copies the programs, starts the
 #                 daemon and a server that does not join, and prints an
@@ -486,6 +498,143 @@ acl_checks() {  # ip_b
     [ "$ok" = 1 ]
 }
 
+# Is a web server on B's router reachable from A: what it saw as the client
+whoami() { nsx hA curl -s -m 2 http://192.168.2.1:8080/ 2>/dev/null; }
+
+wait_whoami() {  # expected timeout_s
+    local i got=
+    for i in $(seq $(( $2 * 10 ))); do
+        got=$(whoami)
+        [ "$got" = "$1" ] && return 0
+        sleep 0.1
+    done
+    echo "$got"
+    return 1
+}
+
+subnet_checks() {  # ip_b
+    local ok=1 got
+    nsx rB python3 "$SCRIPTS/netns/whoami.py" 192.168.2.1 8080 &
+    sleep 0.5
+    [ -z "$(whoami)" ] || { echo "  B's LAN reachable before any route (harness error)"; return 1; }
+    cli B set --advertise-routes 192.168.2.0/24 >/dev/null || { echo "  B could not offer its LAN"; return 1; }
+    local offered=
+    for _ in $(seq 50); do
+        offered=$(srv server status --json | jq -r '.nodes[] | select(.hostname == "b") | .advertised_routes | join(",")')
+        [ "$offered" = 192.168.2.0/24 ] && break
+        sleep 0.1
+    done
+    [ "$offered" = 192.168.2.0/24 ] && echo "  B offers 192.168.2.0/24" || { echo "  the server did not see B's offer ($offered)"; return 1; }
+    sleep 1
+    [ -z "$(whoami)" ] && echo "  not reachable before approval" || { echo "  B's LAN reachable before approval"; ok=0; }
+    srv server routes b >/dev/null || { echo "  approving failed"; return 1; }
+    if got=$(wait_whoami 192.168.2.10 10); then
+        echo "  approved: A reaches B's router, which sees B's address 192.168.2.10"
+    else
+        echo "  A cannot reach B's LAN after approval (got '$got')"; ok=0
+    fi
+    nsx hA ip route show 192.168.2.0/24 | grep -q "dev tun\|dev retail" || { echo "  A has no route: $(nsx hA ip route show 192.168.2.0/24)"; ok=0; }
+    [[ $(nsx hB ip route show 192.168.2.0/24) == *"dev eth0"* ]] && ! nsx hB ip route show 192.168.2.0/24 | grep -q "dev tun\|dev retail" \
+        && echo "  B keeps its own LAN off the tunnel" || { echo "  B routes its own LAN wrongly: $(nsx hB ip route show 192.168.2.0/24)"; ok=0; }
+    [ "$(cli A status --json | jq -r '.peers[0].routes | join(",")')" = 192.168.2.0/24 ] || { echo "  A's status lacks B's routes"; ok=0; }
+    # Routed networks need full access to the router
+    srv server acl allow --from a --to b --ports tcp:5201 >/dev/null
+    sleep 1
+    [ -z "$(whoami)" ] && echo "  limited by an access rule, A cannot reach B's LAN" || { echo "  A reaches B's LAN despite the rule"; ok=0; }
+    srv server acl off >/dev/null
+    wait_whoami 192.168.2.10 10 >/dev/null || { echo "  not back after access control went off"; ok=0; }
+    # Exit node and router at once: one set of forwarding rules for both
+    cli B set --advertise-exit-node >/dev/null
+    sleep 1
+    cli A set --exit-node b >/dev/null || { echo "  A could not use B as exit node"; ok=0; }
+    wait_whoami 192.168.2.10 10 >/dev/null && echo "  with B as A's exit node too, B's LAN still answers" || { echo "  B's LAN gone with the exit node in use"; ok=0; }
+    cli A set --exit-node none >/dev/null
+    cli B set --advertise-exit-node=false >/dev/null
+    srv server routes b --off >/dev/null
+    for _ in $(seq 50); do [ -z "$(nsx hA ip route show 192.168.2.0/24)" ] && break; sleep 0.1; done
+    [ -z "$(nsx hA ip route show 192.168.2.0/24)" ] && [ -z "$(whoami)" ] && echo "  stopped: A's route is gone" || { echo "  A still routes B's LAN after it stopped"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
+expire_checks() {  # ip_b invite
+    local ip_b=$1 invite=$2 ok=1 state=
+    srv server expiry --keys 4 >/dev/null || { echo "  setting the key lifetime failed"; return 1; }
+    for _ in $(seq 150); do
+        state=$(cli A status --json | jq -r .key_expired)
+        [ "$state" = true ] && break
+        sleep 0.1
+    done
+    [ "$state" = true ] && echo "  A's key expired" || { echo "  A's key did not expire"; return 1; }
+    nsx hA ping -c2 -W1 -q "$ip_b" >/dev/null 2>&1 && { echo "  A still reaches B"; ok=0; }
+    [ "$(cli A status --json | jq '.peers | length')" = 0 ] || { echo "  A still sees peers"; ok=0; }
+    srv server renew a --never >/dev/null && srv server renew b --never >/dev/null || { echo "  renewing failed"; return 1; }
+    local took
+    took=$(wait_ping "$ip_b" 15) && echo "  renewed: A reaches B after ${took}s" || { echo "  no ping after renewing"; ok=0; }
+    # Devices not seen for 2 "days" go; the exempt ones too once offline
+    srv server renew b >/dev/null
+    srv server expiry --keys never --inactive 2 >/dev/null
+    kill "${pid[B]}"
+    local n=
+    for _ in $(seq 150); do
+        n=$(srv server status --json | jq '.nodes | length')
+        [ "$n" = 1 ] && break
+        sleep 0.1
+    done
+    [ "$n" = 1 ] && echo "  B, stopped, was removed as inactive; A, online, stays" || { echo "  inactive removal: $n devices left"; ok=0; }
+    # A lost laptop: removed, and its invite with it
+    srv server remove a --revoke-invite >/dev/null || { echo "  removing A failed"; ok=0; }
+    [ "$(srv server status --json | jq '.nodes | length')" = 0 ] || { echo "  A is still listed"; ok=0; }
+    if cli A up --invite "$invite" >/dev/null 2>&1; then echo "  A joined again with the revoked invite"; ok=0; else echo "  A removed; its invite no longer works"; fi
+    [ "$ok" = 1 ]
+}
+
+restore_checks() {  # ip_b
+    local ip_b=$1 ip_a ok=1
+    ip_a=$(cli A ip)
+    RETAIL_BACKUP_PASSPHRASE=correct-horse srv server backup "$WORK/server.retail-backup" >/dev/null 2>&1 || { echo "  backup failed"; return 1; }
+    grep -q '"format": "retail-server-backup"' "$WORK/server.retail-backup" || { echo "  not a backup file"; return 1; }
+    grep -q "BEGIN" "$WORK/server.retail-backup" && { echo "  the backup is not encrypted"; return 1; }
+    server_kill
+    echo "  backed up; the server is gone"
+    # The new machine: its own namespace, another address
+    ip netns add s2; nsx s2 ip link set lo up
+    ip link add vS2 type veth peer name eth0 netns s2
+    ip addr add 10.88.0.1/24 dev vS2; ip link set vS2 up
+    nsx s2 ip addr add 10.88.0.2/24 dev eth0; nsx s2 ip link set eth0 up
+    nsx s2 ip route add default via 10.88.0.1
+    iptables -I FORWARD 1 -i vS2 -j ACCEPT
+    iptables -I FORWARD 1 -o vS2 -j ACCEPT
+    s2() { nsx s2 env RETAIL_API_TOKEN_FILE="$WORK/s2.token" "$BIN/retail" "$@"; }
+    nsx s2 env RETAIL_API_TOKEN_FILE="$WORK/s2.token" RETAIL_NO_PORTMAP=1 RUST_LOG=retail_control=info,retaild=info \
+        "$BIN/retaild" --state-dir "$WORK/server2" --port 41690 >"$WORK/control2.log" 2>&1 &
+    for _ in $(seq 50); do s2 server status >/dev/null 2>&1 && break; sleep 0.1; done
+    if RETAIL_BACKUP_PASSPHRASE=wrong-horse s2 server restore "$WORK/server.retail-backup" >/dev/null 2>&1; then
+        echo "  a wrong passphrase was accepted"; return 1
+    fi
+    RETAIL_BACKUP_PASSPHRASE=correct-horse s2 server restore "$WORK/server.retail-backup" >/dev/null 2>&1 || { echo "  restoring failed"; return 1; }
+    # Without --port: the restored settings' port
+    s2 server start --no-join >/dev/null || { echo "  the restored server did not start"; tail -5 "$WORK/control2.log"; return 1; }
+    [ "$(s2 server status --json | jq -r .port)" = 443 ] || { echo "  the restored server is not on its old port"; ok=0; }
+    [ "$(s2 server status --json | jq '.nodes | length')" = 2 ] || { echo "  the restored server lacks the devices"; return 1; }
+    local invite2
+    invite2=$(s2 server invite --reusable 2>/dev/null)
+    echo "  restored at 10.88.0.2; new invite leads with $(invite_first_addr "$invite2")"
+    for s in A B; do
+        cli "$s" up --invite "$invite2" >/dev/null || { echo "  $s could not join the restored server"; return 1; }
+    done
+    [ "$(cli A ip)" = "$ip_a" ] && [ "$(cli B ip)" = "$ip_b" ] && echo "  A and B kept their addresses" || { echo "  addresses changed: A $(cli A ip), B $(cli B ip)"; ok=0; }
+    [ "$(s2 server status --json | jq '.nodes | length')" = 2 ] || { echo "  they joined as new devices"; ok=0; }
+    [ "$(cli A servers | wc -l)" = 1 ] || { echo "  A lists the old address as another server"; ok=0; }
+    local i
+    for i in $(seq 100); do
+        [ "$(cli A status --json | jq -r .control_connected)" = true ] && [ "$(cli B status --json | jq -r .control_connected)" = true ] && break
+        sleep 0.1
+    done
+    [ "$i" -lt 100 ] && echo "  both connected to the restored server" || { echo "  not connected to the restored server"; ok=0; }
+    wait_ping "$ip_b" 15 >/dev/null || { echo "  no ping after the move"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
 invite_first_addr() {
     python3 -c 'import sys,json,base64; c=sys.argv[1].split(".",1)[1]; print(json.loads(base64.urlsafe_b64decode(c+"="*(-len(c)%4)))["a"][0])' "$1"
 }
@@ -884,6 +1033,9 @@ run_scenario() {
             # The edge listens on 8443: the server holds 443 on every address here
             server_start 443 --front https://cdn.test:8443
             start_cdn
+        elif [ "$sc" = expire ]; then
+            # Days of a second, so keys expire within the test
+            RETAIL_DAY_SECONDS=1 server_start 443
         else
             server_start 443
         fi
@@ -965,6 +1117,15 @@ run_scenario() {
     fi
     if [ "$sc" = switch ] && [ "$ok" = 1 ]; then
         switch_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = subnet ] && [ "$ok" = 1 ]; then
+        subnet_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = expire ] && [ "$ok" = 1 ]; then
+        expire_checks "$ip_b" "$invite" || ok=0
+    fi
+    if [ "$sc" = restore ] && [ "$ok" = 1 ]; then
+        restore_checks "$ip_b" || ok=0
     fi
     if [ "$sc" = rekey ] && [ "$ok" = 1 ]; then
         soak "$ip_b" || ok=0
@@ -1091,7 +1252,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device magicdns acl server-cli switch install update
+    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device magicdns acl subnet expire restore server-cli switch install update
 else
     set -- "$WHICH"
 fi

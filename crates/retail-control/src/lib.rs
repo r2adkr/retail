@@ -26,6 +26,14 @@ use tokio::task::JoinHandle;
 
 pub use db::now_unix;
 
+/// Checks the database file of a backup before it replaces the current one
+pub fn check_data(bytes: &[u8]) -> Result<()> {
+    db::check(bytes)
+}
+
+/// The database file in a server's data directory
+pub const DATA_FILE: &str = "retail.json";
+
 pub enum Tls {
     /// Plain HTTP, for tests only
     Off,
@@ -60,6 +68,11 @@ pub struct NodeInfo {
     pub last_seen: Option<i64>,
     pub dns_name: String,
     pub tags: Vec<String>,
+    pub expires_at: Option<i64>,
+    pub expired: bool,
+    pub invite_id: Option<i64>,
+    pub advertised_routes: Vec<retail_proto::route::Ipv4Net>,
+    pub approved_routes: Vec<retail_proto::route::Ipv4Net>,
 }
 
 pub use db::PreauthRow as KeyInfo;
@@ -90,7 +103,7 @@ impl Server {
     pub async fn start(cfg: Config) -> Result<Server> {
         std::fs::create_dir_all(&cfg.data_dir)
             .with_context(|| format!("creating {}", cfg.data_dir.display()))?;
-        let db = db::Db::open(&cfg.data_dir.join("retail.json")).await?;
+        let db = db::Db::open(&cfg.data_dir.join(DATA_FILE)).await?;
         let (tls_config, pin) = match cfg.tls {
             Tls::Off => (None, None),
             Tls::SelfSigned => {
@@ -144,6 +157,7 @@ impl Server {
                 })
             }
         });
+        tasks.push(tokio::spawn(state.clone().maintain()));
         tasks.push(tokio::spawn(async move {
             if let Err(e) = stun::run(stun_sock).await {
                 tracing::error!("STUN stopped: {e:#}");
@@ -197,6 +211,11 @@ impl Server {
         self.state.db.named_secret(id).await
     }
 
+    /// For the hosting device's own membership, which never expires
+    pub async fn create_host_key(&self, ttl: Duration) -> Result<String> {
+        self.state.db.create_host_key(ttl).await
+    }
+
     pub async fn keys(&self) -> Result<Vec<KeyInfo>> {
         self.state.db.list_preauth().await
     }
@@ -207,11 +226,17 @@ impl Server {
 
     pub async fn nodes(&self) -> Result<Vec<NodeInfo>> {
         let rows = self.state.db.all_nodes().await?;
+        let now = now_unix();
         Ok(rows
             .into_iter()
             .map(|n| NodeInfo {
                 online: self.state.is_online(n.id),
                 exit_node: self.state.is_exit_node(n.id),
+                expired: n.expired(now),
+                expires_at: n.expires_at,
+                invite_id: n.invite_id,
+                advertised_routes: self.state.offered_routes(n.id),
+                approved_routes: n.approved_routes,
                 dns_name: n.dns_name,
                 id: n.id,
                 hostname: n.hostname,
@@ -240,6 +265,49 @@ impl Server {
         Ok(found)
     }
 
+    /// `(key expiry days, remove-inactive days)`
+    pub fn expiry_settings(&self) -> (Option<u32>, Option<u32>) {
+        self.state.db.expiry_settings()
+    }
+
+    pub fn set_expiry_settings(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {
+        self.state.db.set_expiry_settings(key_days, inactive_days)?;
+        self.state.notify();
+        Ok(())
+    }
+
+    /// `false` if there is no such device
+    pub fn renew(&self, id: i64, never: bool) -> Result<bool> {
+        let found = self.state.db.renew(id, never)?;
+        self.state.notify();
+        Ok(found)
+    }
+
+    /// The hosting device's own membership never expires
+    pub fn keep_forever(&self, id: i64) -> Result<()> {
+        self.state.db.keep_forever(id)?;
+        self.state.notify();
+        Ok(())
+    }
+
+    /// The networks a device may route. `false` if there is no such device.
+    pub fn set_routes(&self, id: i64, routes: &[retail_proto::route::Ipv4Net]) -> Result<bool> {
+        let found = self.state.db.set_routes(id, routes)?;
+        self.state.notify();
+        Ok(found)
+    }
+
+    /// The addresses invites carry now, sent to every device so they keep
+    /// finding the server when its public address changes
+    pub fn set_addrs(&self, addrs: Vec<String>) {
+        self.state.set_server_addrs(addrs);
+    }
+
+    /// The database as saved, for backups
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        self.state.db.snapshot()
+    }
+
     pub fn helper_device(&self) -> Option<i64> {
         self.state.db.helper_device()
     }
@@ -257,9 +325,10 @@ impl Server {
         self.state.helper_code.subscribe()
     }
 
-    /// Closes the device's connection. It needs a new invite to return.
-    pub async fn delete_node(&self, id: i64) -> Result<bool> {
-        let deleted = self.state.db.delete_node(id).await?;
+    /// Closes the device's connection. It needs a new invite to return;
+    /// with `revoke_invite` the one it joined with stops working too.
+    pub async fn delete_node(&self, id: i64, revoke_invite: bool) -> Result<bool> {
+        let deleted = self.state.db.delete_node(id, revoke_invite).await?;
         if deleted {
             self.state.notify();
         }
