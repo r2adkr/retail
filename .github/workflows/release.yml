@@ -140,6 +140,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          # No build-record artifact: it is not a release file
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: packaging/docker/Dockerfile.release
@@ -156,9 +159,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only the programs the build jobs made (named after their variant)
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: dist
+          pattern: '{linux,windows,macos}-*'
           merge-multiple: true
       # VERSION lets daemons find the newest release through releases/latest/download/VERSION
       - run: cd dist && echo "${GITHUB_REF_NAME#v}" > VERSION && sha256sum * > SHA256SUMS && cat SHA256SUMS
