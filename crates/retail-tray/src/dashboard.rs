@@ -144,7 +144,7 @@ impl Dashboard {
             t.dim,
         );
         if let Some(other) = &self.other_network {
-            let note = trf("This device is connected to {other}. Opening a server moves it to the new network.", &[("other", other)]);
+            let note = trf("This device is connected to {other}. Opening a server moves it to the new network; {other} stays in the server list in Settings.", &[("other", other)]);
             y = paragraph(c, &note, PAD, y + 26.0, w, 12.5, t.amber);
         }
         if let Some(e) = &s.last_error {

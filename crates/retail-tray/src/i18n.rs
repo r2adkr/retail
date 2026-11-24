@@ -245,7 +245,7 @@ const TABLE: &[[&str; 5]] = &[
      "このデバイスで自分専用のネットワークのサーバーを開きます。他のデバイスは招待コードまたは QR コードで参加し、ルーターのポートは可能なら retail が自動で開放します。",
      "在本设备上运行你自己的网络服务器。其他设备通过邀请码或二维码加入；retail 会尽可能自动打开路由器端口。",
      "Ejecuta en este dispositivo el servidor de tu propia red. Los demás se unen con un código de invitación o QR; retail abre los puertos del router automáticamente cuando puede."],
-    ["This device is connected to {other}. Opening a server moves it to the new network.", "이 기기는 지금 {other}에 연결돼 있습니다. 서버를 열면 새 네트워크로 옮겨집니다.", "このデバイスは現在 {other} に接続されています。サーバーを開くと新しいネットワークに移ります。", "此设备当前连接到 {other}。开启服务器后将转到新网络。", "Este dispositivo está conectado a {other}. Al abrir un servidor pasará a la nueva red."],
+    ["This device is connected to {other}. Opening a server moves it to the new network; {other} stays in the server list in Settings.", "이 기기는 지금 {other}에 연결돼 있습니다. 서버를 열면 새 네트워크로 옮겨지고, {other}은(는) 설정의 서버 목록에 남습니다.", "このデバイスは現在 {other} に接続されています。サーバーを開くと新しいネットワークに移り、{other} は設定のサーバー一覧に残ります。", "此设备当前连接到 {other}。开启服务器后将转到新网络，{other} 会保留在设置的服务器列表中。", "Este dispositivo está conectado a {other}. Al abrir un servidor pasará a la nueva red; {other} queda en la lista de servidores de los ajustes."],
     ["Opening…", "여는 중…", "開いています…", "正在开启…", "Abriendo…"],
     ["Open server", "서버 열기", "サーバーを開く", "开启服务器", "Abrir servidor"],
     ["Address", "주소", "アドレス", "地址", "Dirección"],
