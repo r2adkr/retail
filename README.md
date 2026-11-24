@@ -80,6 +80,10 @@ retail server web                                                     # open the
 - retail uses the `100.64.0.0/10` address range. Do not run it on a device together with another VPN that uses that range.
 - The programs are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper may warn on first launch. There are no mobile apps yet.
 
+## Contributing
+
+Contributions are welcome, big or small: bug reports, testing on networks and devices we haven't tried, translations, docs and code. Open an [issue](https://github.com/r2adkr/retail/issues) to report a problem or discuss an idea, or send a pull request. [Development](docs/DEVELOPMENT.md) explains how to build and test.
+
 ## License
 
 [Apache-2.0](LICENSE). The vendored [boringtun](vendor/boringtun) is BSD-3-Clause.
