@@ -50,7 +50,11 @@ jobs:
           rustup target add ${{ matrix.target }}
           echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
           echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+      # One cache per runner and target: the native and cross builds share the
+      # job name, and a restored cache missing a crate (ksni) broke the native one
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
       - name: Build
         shell: bash
         run: |
