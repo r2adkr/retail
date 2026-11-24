@@ -228,6 +228,9 @@ pub struct Gateway {
     restore_forwarding: bool,
     exit: bool,
     routes: Vec<Ipv4Net>,
+    /// macOS: the reference that keeps pf enabled for us
+    #[allow(dead_code)]
+    pf_token: Option<String>,
 }
 
 /// The exit's own private networks stay unreachable unless it routes them
@@ -236,7 +239,7 @@ const PRIVATE: [&str; 6] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "16
 
 impl Gateway {
     pub fn new(tun: &str, tun_index: u32) -> Self {
-        Gateway { tun: tun.to_string(), tun_index, restore_forwarding: false, exit: false, routes: Vec::new() }
+        Gateway { tun: tun.to_string(), tun_index, restore_forwarding: false, exit: false, routes: Vec::new(), pf_token: None }
     }
 
     pub fn exit(&self) -> bool {
@@ -331,12 +334,12 @@ impl Gateway {
         }
     }
 
-    /// Routing networks is Linux-only for now; the internet NAT covers both
+    /// One NAT for the mesh's addresses covers the internet and routed
+    /// networks alike. Which destinations reach the system at all is the
+    /// engine's choice (`filter.rs`): only approved networks, and the internet
+    /// while this is an exit node.
     #[cfg(target_os = "windows")]
     fn install(&mut self) -> Result<()> {
-        if !self.routes.is_empty() {
-            bail!("routing networks for the mesh is supported on Linux only");
-        }
         let script = format!(
             "$ErrorActionPreference='Stop'; \
              Set-NetIPInterface -InterfaceIndex {idx} -Forwarding Enabled; \
@@ -354,16 +357,82 @@ impl Gateway {
         );
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    /// IP forwarding, and pf NAT in an anchor the system's pf.conf already
+    /// loads (`com.apple/*`) for each routed network, out of the interface
+    /// that reaches it
+    #[cfg(target_os = "macos")]
     fn install(&mut self) -> Result<()> {
         if self.exit {
-            bail!("offering an exit node is supported on Linux and Windows only")
+            bail!("offering an exit node is supported on Linux and Windows only");
         }
-        bail!("routing networks for the mesh is supported on Linux only")
+        let forwarding = Command::new("sysctl").args(["-n", "net.inet.ip.forwarding"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        if forwarding != "1" {
+            run("sysctl", &["-w", "net.inet.ip.forwarding=1"])?;
+            self.restore_forwarding = true;
+        }
+        let mut rules = String::new();
+        for r in &self.routes {
+            let iface = macos_route_interface(r.addr()).with_context(|| format!("finding the interface that reaches {r}"))?;
+            rules.push_str(&format!("nat on {iface} inet from 100.64.0.0/10 to {r} -> ({iface})\n"));
+        }
+        run_with_input("pfctl", &["-a", PF_ANCHOR, "-f", "-"], &rules)?;
+        // Enabling pf takes a reference, released at cleanup, so pf stays as
+        // it was for everything else
+        let out = Command::new("pfctl").arg("-E").output().context("running pfctl")?;
+        let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+        self.pf_token = text.lines().find_map(|l| l.trim().strip_prefix("Token : ")).map(|t| t.trim().to_string());
+        Ok(())
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    fn cleanup(&mut self) {
+        run_quiet("pfctl", &["-a", PF_ANCHOR, "-F", "all"]);
+        if let Some(token) = self.pf_token.take() {
+            run_quiet("pfctl", &["-X", &token]);
+        }
+        if self.restore_forwarding {
+            run_quiet("sysctl", &["-w", "net.inet.ip.forwarding=0"]);
+            self.restore_forwarding = false;
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    fn install(&mut self) -> Result<()> {
+        bail!("forwarding for the mesh is not supported on this system")
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     fn cleanup(&mut self) {}
+}
+
+#[cfg(target_os = "macos")]
+const PF_ANCHOR: &str = "com.apple/retail";
+
+/// The interface macOS sends `ip` out of
+#[cfg(target_os = "macos")]
+fn macos_route_interface(ip: std::net::Ipv4Addr) -> Option<String> {
+    let out = Command::new("route").args(["-n", "get", &ip.to_string()]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let name = text.lines().find_map(|l| l.trim().strip_prefix("interface:"))?.trim().to_string();
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric())).then_some(name)
+}
+
+#[cfg(target_os = "macos")]
+fn run_with_input(program: &str, args: &[&str], input: &str) -> Result<()> {
+    use std::io::Write;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {program}"))?;
+    child.stdin.take().context("no stdin")?.write_all(input.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
 }
 
 impl Drop for Gateway {

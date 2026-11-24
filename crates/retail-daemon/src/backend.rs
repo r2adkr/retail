@@ -347,11 +347,7 @@ impl Backend {
             prefs.advertise_exit_node = on;
         }
         if let Some(routes) = &req.advertise_routes {
-            let routes = retail_proto::route::parse_routes(routes).map_err(anyhow::Error::msg)?;
-            if !routes.is_empty() && !cfg!(target_os = "linux") {
-                anyhow::bail!("routing networks for the mesh is supported on Linux only");
-            }
-            prefs.advertise_routes = routes;
+            prefs.advertise_routes = retail_proto::route::parse_routes(routes).map_err(anyhow::Error::msg)?;
         }
         if let Some(mb) = req.memory_limit_mb {
             prefs.memory_limit_mb = (mb > 0).then_some(mb);

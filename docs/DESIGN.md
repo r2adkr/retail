@@ -170,7 +170,7 @@ So that the server is reachable from any network with internet access, the contr
 A device can route networks it is on (its LAN) for the others.
 
 - Offering: `Prefs.advertise_routes` goes to the server in `ClientMessage::Hostinfo { routes }`. The server keeps offers in memory per connection and the administrator's approval per node (`NodeRec.routes`). A netmap lists, for each peer, the networks it both offers and has approved, while it is connected and its key is valid; when several devices route the same network, the oldest wins so the choice does not flap. Networks overlapping `100.64.0.0/10`, loopback, link-local, multicast or `0.0.0.0/0` are refused (`Ipv4Net::check_route`), and a device offers at most 16.
-- Router side (Linux): forwarding to the approved networks from the TUN device and MASQUERADE towards them, in the `Gateway` chains of 6.4, so hosts there need no route back. Packets from the mesh go out only to approved networks (and the internet while it is an exit node).
+- Router side: IP forwarding and NAT towards the approved networks, so hosts there need no route back. Linux: forwarding and MASQUERADE rules in the `Gateway` chains of 6.4. Windows: the same `New-NetNat` for `100.64.0.0/10` as an exit node. macOS: `net.inet.ip.forwarding` and a pf `nat on <interface>` rule per network in the anchor `com.apple/retail`, which the system's pf.conf loads; pf is enabled with a reference (`pfctl -E`/`-X`) so its state is restored afterwards. On every system the engine's destination check decides what reaches the system at all: only approved networks (and the internet while it is an exit node). The Windows and macOS paths have not been checked on real machines yet.
 - Using side: the engine looks up a destination's peer by mesh address, then by the longest matching route, then the exit node. A peer may send from addresses inside its routes (WireGuard's allowed-IPs rule). The system gets a route for each network into the TUN device (`SubnetRoutes`: `ip route` / `netsh` / `route`), except networks overlapping one the device is on itself, and WireGuard endpoints or server addresses inside a routed network are not used (the tunnel would carry itself).
 - Access rules: a peer reaches routed networks only with full access (`Accept::All`) to the router, since rules name devices, not hosts behind them.
 
@@ -307,7 +307,7 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 | Milestone | Content |
 |---|---|
 | Policy | Key rotation, admin approval of exit nodes, access rules for exit-node use and for hosts on routed networks |
-| Convenience | IPv6 inside the mesh, offering subnet routes on Windows and macOS, mobile |
+| Convenience | IPv6 inside the mesh, mobile |
 | Releases | Code signing, signed update metadata |
 | Performance | Measure the worker count (K) on real many-core hardware, the relay on lossy and high-latency lines (a UDP relay if needed), several relay servers, a faster first REALITY connection |
 | Verification | Exit node routing, NAT and firewall rules on real Windows and macOS machines. Proxy integrated authentication (Kerberos, NTLM) and PAC on a real corporate network |
@@ -323,5 +323,5 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 - Idle memory is 11.6–12.4 MiB, at most 14.9 MiB under load (within the 10–20 MB budget).
 - Integrated proxy authentication works on Windows only. Linux and macOS use Basic and SOCKS5 passwords only, and Linux reads the system proxy from environment variables only.
 - Losing the server certificate key without a backup means inviting every device again.
-- Offering subnet routes needs Linux. Access rules cannot single out hosts on a routed network: a peer reaches all of it or none.
+- Access rules cannot single out hosts on a routed network: a peer reaches all of it or none. Routing networks on Windows and macOS has not been checked on real machines yet.
 - **Other VPNs that use `100.64.0.0/10` conflict**: retail takes addresses from that range and UDP 41641. retaild moves to a random port if 41641 is taken, but the address ranges overlap, so do not run such a VPN on the same device at the same time.

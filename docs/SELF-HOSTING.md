@@ -152,7 +152,7 @@ Rules are enforced by each receiving device; the server only tells each device w
 
 ## Reaching a whole LAN: subnet routes
 
-A device can route its LAN for the others, so printers, NAS boxes and other things that cannot run retail are reachable from anywhere. On a Linux device in that LAN:
+A device can route its LAN for the others, so printers, NAS boxes and other things that cannot run retail are reachable from anywhere. On a device in that LAN (Linux, Windows or macOS):
 
 ```sh
 retail set --advertise-routes 192.168.1.0/24      # several: 192.168.1.0/24,10.0.0.0/24; none stops
@@ -162,7 +162,8 @@ Nothing changes until the server's administrator approves it, since a route send
 
 - A device on the routed LAN itself keeps using its own LAN directly.
 - Access rules: a device reaches routed networks only if it has full access (all ports) to the router device.
-- Offering routes needs Linux for now; every system can use them. `0.0.0.0/0` is what an exit node is for.
+- `0.0.0.0/0` is what an exit node is for.
+- The router device turns on IP forwarding and NAT for the approved networks: iptables on Linux, `New-NetNat` on Windows, pf (anchor `com.apple/retail`) on macOS.
 
 ## Lost devices and old devices
 

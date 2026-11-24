@@ -85,7 +85,7 @@ enum Cmd {
         auto_update: Option<bool>,
         /// Route these networks for the other devices (subnet router, e.g.
         /// 192.168.1.0/24,10.0.0.0/24), once the server's administrator
-        /// approves them; `none` stops. Linux only.
+        /// approves them; `none` stops.
         #[arg(long, value_name = "NETWORKS|none")]
         advertise_routes: Option<String>,
     },
