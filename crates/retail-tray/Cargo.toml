@@ -1,0 +1,32 @@
+[package]
+name = "retail-tray"
+description = "retail tray / menu-bar app with a custom-drawn popup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "retail-tray"
+path = "src/main.rs"
+
+# Everything is drawn on the CPU into a small framebuffer (tiny-skia +
+# fontdue + softbuffer): no native widgets, no web view, small footprint.
+[dependencies]
+retail-proto.workspace = true
+serde_json.workspace = true
+arboard = { version = "3.7.0", default-features = false }
+softbuffer = "0.4.8"
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd", "png-format"] }
+winit = "0.30.13"
+ab_glyph = "0.2.32"
+qrcode = { version = "0.14", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = "0.26.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Networking_WinHttp", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }

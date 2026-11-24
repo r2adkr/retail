@@ -1,0 +1,7 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+wintun.dll
+packaging/docker/.env
+vendor/*/target

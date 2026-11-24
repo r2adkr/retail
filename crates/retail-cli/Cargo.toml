@@ -1,0 +1,19 @@
+[package]
+name = "retail-cli"
+description = "retail command line client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "retail"
+path = "src/main.rs"
+
+[dependencies]
+retail-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+serde = { workspace = true, features = ["derive"] }

@@ -1,0 +1,517 @@
+//! Nodes and auth keys in one JSON file, rewritten atomically on every change
+//! that matters across restarts.
+//!
+//! The data is small and the hosting daemon is its only writer, so a database
+//! engine would only add code and memory. Endpoints and last-seen times change
+//! often and stay in memory. Nodes report endpoints again whenever they connect.
+
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::RngCore;
+use retail_proto::api::{RegisterRequest, RegisterResponse};
+use retail_proto::{Key, MESH_NETWORK, MESH_PREFIX_LEN};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const AUTH_KEY_PREFIX: &str = "rtl-auth-";
+
+#[derive(Clone)]
+pub struct Db {
+    inner: Arc<Mutex<Store>>,
+}
+
+struct Store {
+    path: PathBuf,
+    data: Data,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Data {
+    #[serde(default)]
+    next_id: i64,
+    #[serde(default)]
+    nodes: Vec<NodeRec>,
+    #[serde(default)]
+    keys: Vec<KeyRec>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NodeRec {
+    id: i64,
+    node_key: Key,
+    token_hash: String,
+    hostname: String,
+    os: String,
+    ip: Ipv4Addr,
+    created_at: i64,
+    #[serde(skip)]
+    endpoints: Vec<SocketAddr>,
+    #[serde(default)]
+    last_seen: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct KeyRec {
+    id: i64,
+    key_hash: String,
+    reusable: bool,
+    used: bool,
+    expires_at: i64,
+    created_at: i64,
+    /// Named invites are reusable, at most one live code per name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Kept in the clear for named invites only, so client downloads can
+    /// embed the code later. The data directory is admin-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
+    #[serde(default)]
+    uses: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeRow {
+    pub id: i64,
+    pub node_key: Key,
+    pub hostname: String,
+    pub os: String,
+    pub ip: Ipv4Addr,
+    pub endpoints: Vec<SocketAddr>,
+    pub last_seen: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PreauthRow {
+    pub id: i64,
+    pub reusable: bool,
+    pub used: bool,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub name: Option<String>,
+    pub uses: u64,
+}
+
+/// Expiry of invites that never expire
+pub const NEVER: i64 = i64::MAX;
+
+#[derive(Debug)]
+pub enum RegisterError {
+    InvalidAuthKey,
+    AddressSpaceExhausted,
+    Internal(anyhow::Error),
+}
+
+pub fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// Tokens and auth keys are 256-bit random values, so a fast unsalted hash is sufficient
+fn hash_secret(secret: &str) -> String {
+    Sha256::digest(secret.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn random_secret() -> String {
+    let mut b = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    URL_SAFE_NO_PAD.encode(b)
+}
+
+fn ip_range() -> (u32, u32) {
+    let base = u32::from(MESH_NETWORK);
+    let size = 1u32 << (32 - MESH_PREFIX_LEN);
+    (base + 1, base + size - 2)
+}
+
+impl Store {
+    fn next_id(&mut self) -> i64 {
+        self.data.next_id += 1;
+        self.data.next_id
+    }
+
+    /// Owner-only on Unix. On Windows the daemon restricts the directory instead.
+    fn save(&self) -> Result<()> {
+        use std::io::Write;
+        let tmp = self.path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec_pretty(&self.data)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &self.path).with_context(|| format!("replacing {}", self.path.display()))?;
+        Ok(())
+    }
+}
+
+impl Db {
+    pub async fn open(path: &Path) -> Result<Self> {
+        let data = match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Data::default(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let mut data: Data = data;
+        data.next_id = data.next_id.max(data.nodes.iter().map(|n| n.id).chain(data.keys.iter().map(|k| k.id)).max().unwrap_or(0));
+        Ok(Db { inner: Arc::new(Mutex::new(Store { path: path.to_path_buf(), data })) })
+    }
+
+    /// Only the hash of the returned key is stored
+    pub async fn create_preauth(&self, reusable: bool, ttl: Duration) -> Result<String> {
+        let key = format!("{AUTH_KEY_PREFIX}{}", random_secret());
+        let now = now_unix();
+        let mut s = self.inner.lock().unwrap();
+        // Prune expired keys, except used single-use ones within a week of expiry
+        s.data.keys.retain(|k| k.expires_at > now || (k.used && !k.reusable && k.expires_at > now - 7 * 86400));
+        let id = s.next_id();
+        s.data.keys.push(KeyRec {
+            id,
+            key_hash: hash_secret(&key),
+            reusable,
+            used: false,
+            expires_at: now + ttl.as_secs() as i64,
+            created_at: now,
+            name: None,
+            secret: None,
+            uses: 0,
+        });
+        s.save()?;
+        Ok(key)
+    }
+
+    /// Creates the named invite, or gives it a new code, which voids the old
+    /// one in the same write. Devices that already joined are unaffected.
+    pub async fn set_named(&self, name: &str, ttl: Option<Duration>) -> Result<(i64, String)> {
+        let key = format!("{AUTH_KEY_PREFIX}{}", random_secret());
+        let now = now_unix();
+        let mut s = self.inner.lock().unwrap();
+        s.data.keys.retain(|k| k.name.as_deref() != Some(name));
+        let id = s.next_id();
+        s.data.keys.push(KeyRec {
+            id,
+            key_hash: hash_secret(&key),
+            reusable: true,
+            used: false,
+            expires_at: ttl.map_or(NEVER, |t| now.saturating_add(t.as_secs() as i64)),
+            created_at: now,
+            name: Some(name.to_string()),
+            secret: Some(key.clone()),
+            uses: 0,
+        });
+        s.save()?;
+        Ok((id, key))
+    }
+
+    /// The live code of a named invite
+    pub async fn named_secret(&self, id: i64) -> Result<Option<String>> {
+        let now = now_unix();
+        let s = self.inner.lock().unwrap();
+        Ok(s.data.keys.iter().find(|k| k.id == id && k.expires_at > now).and_then(|k| k.secret.clone()))
+    }
+
+    pub async fn register(&self, req: &RegisterRequest) -> Result<RegisterResponse, RegisterError> {
+        let now = now_unix();
+        let mut s = self.inner.lock().unwrap();
+        let key_hash = hash_secret(req.auth_key.trim());
+        let key = s
+            .data
+            .keys
+            .iter_mut()
+            .find(|k| k.key_hash == key_hash && k.expires_at > now && (k.reusable || !k.used))
+            .ok_or(RegisterError::InvalidAuthKey)?;
+        key.used = true;
+        key.uses += 1;
+
+        let token = random_secret();
+        let token_hash = hash_secret(&token);
+        let hostname = sanitize_hostname(&req.hostname);
+        let (node_id, ip) = match s.data.nodes.iter_mut().find(|n| n.node_key == req.node_key) {
+            Some(n) => {
+                n.token_hash = token_hash;
+                n.hostname = hostname;
+                n.os = req.os.clone();
+                (n.id, n.ip)
+            }
+            None => {
+                let ip = allocate_ip(&s.data.nodes)?;
+                let id = s.next_id();
+                s.data.nodes.push(NodeRec {
+                    id,
+                    node_key: req.node_key,
+                    token_hash,
+                    hostname,
+                    os: req.os.clone(),
+                    ip,
+                    created_at: now,
+                    endpoints: Vec::new(),
+                    last_seen: None,
+                });
+                (id, ip)
+            }
+        };
+        s.save().map_err(RegisterError::Internal)?;
+        Ok(RegisterResponse { node_id, ip, prefix_len: MESH_PREFIX_LEN, token })
+    }
+
+    pub async fn list_preauth(&self) -> Result<Vec<PreauthRow>> {
+        let s = self.inner.lock().unwrap();
+        let mut rows: Vec<PreauthRow> = s
+            .data
+            .keys
+            .iter()
+            .map(|k| PreauthRow {
+                id: k.id,
+                reusable: k.reusable,
+                used: k.used,
+                expires_at: k.expires_at,
+                created_at: k.created_at,
+                name: k.name.clone(),
+                uses: k.uses,
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.id));
+        Ok(rows)
+    }
+
+    pub async fn delete_preauth(&self, id: i64) -> Result<bool> {
+        let mut s = self.inner.lock().unwrap();
+        let before = s.data.keys.len();
+        s.data.keys.retain(|k| k.id != id);
+        let deleted = s.data.keys.len() != before;
+        if deleted {
+            s.save()?;
+        }
+        Ok(deleted)
+    }
+
+    pub async fn node_id_by_token(&self, token: &str) -> Result<Option<i64>> {
+        let hash = hash_secret(token);
+        let s = self.inner.lock().unwrap();
+        Ok(s.data.nodes.iter().find(|n| n.token_hash == hash).map(|n| n.id))
+    }
+
+    pub async fn all_nodes(&self) -> Result<Vec<NodeRow>> {
+        let s = self.inner.lock().unwrap();
+        let mut rows: Vec<NodeRow> = s
+            .data
+            .nodes
+            .iter()
+            .map(|n| NodeRow {
+                id: n.id,
+                node_key: n.node_key,
+                hostname: n.hostname.clone(),
+                os: n.os.clone(),
+                ip: n.ip,
+                endpoints: n.endpoints.clone(),
+                last_seen: n.last_seen,
+            })
+            .collect();
+        rows.sort_by_key(|r| r.id);
+        Ok(rows)
+    }
+
+    pub async fn set_endpoints(&self, id: i64, endpoints: &[SocketAddr]) -> Result<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) {
+            n.endpoints = endpoints.to_vec();
+            n.last_seen = Some(now_unix());
+        }
+        Ok(())
+    }
+
+    pub async fn touch(&self, id: i64) -> Result<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) {
+            n.last_seen = Some(now_unix());
+        }
+        Ok(())
+    }
+
+    /// Persists last-seen times, which are not saved as they change
+    pub async fn close(&self) {
+        let s = self.inner.lock().unwrap();
+        if let Err(e) = s.save() {
+            tracing::warn!("saving the server state: {e:#}");
+        }
+    }
+
+    pub async fn delete_node(&self, id: i64) -> Result<bool> {
+        let mut s = self.inner.lock().unwrap();
+        let before = s.data.nodes.len();
+        s.data.nodes.retain(|n| n.id != id);
+        let deleted = s.data.nodes.len() != before;
+        if deleted {
+            s.save()?;
+        }
+        Ok(deleted)
+    }
+}
+
+fn allocate_ip(nodes: &[NodeRec]) -> Result<Ipv4Addr, RegisterError> {
+    let (first, last) = ip_range();
+    let mut used: Vec<u32> = nodes.iter().map(|n| u32::from(n.ip)).collect();
+    used.sort_unstable();
+    let mut candidate = first;
+    for ip in used {
+        if ip > candidate {
+            break;
+        }
+        if ip == candidate {
+            candidate += 1;
+        }
+    }
+    if candidate > last {
+        return Err(RegisterError::AddressSpaceExhausted);
+    }
+    Ok(Ipv4Addr::from(candidate))
+}
+
+fn sanitize_hostname(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .take(63)
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() { "node".into() } else { s }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn temp_db() -> (Db, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("retail-test-{}.json", random_secret()));
+        (Db::open(&path).await.unwrap(), path)
+    }
+
+    fn req(auth_key: &str, key_byte: u8) -> RegisterRequest {
+        RegisterRequest {
+            auth_key: auth_key.into(),
+            node_key: Key([key_byte; 32]),
+            hostname: "My Laptop".into(),
+            os: "linux".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_allocates_and_reuses_ips() {
+        let (db, path) = temp_db().await;
+        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+
+        let a = db.register(&req(&key, 1)).await.unwrap();
+        let b = db.register(&req(&key, 2)).await.unwrap();
+        assert_eq!(a.ip, Ipv4Addr::new(100, 64, 0, 1));
+        assert_eq!(b.ip, Ipv4Addr::new(100, 64, 0, 2));
+
+        let a2 = db.register(&req(&key, 1)).await.unwrap();
+        assert_eq!((a2.node_id, a2.ip), (a.node_id, a.ip));
+        assert_ne!(a2.token, a.token);
+        assert_eq!(db.node_id_by_token(&a.token).await.unwrap(), None);
+        assert_eq!(db.node_id_by_token(&a2.token).await.unwrap(), Some(a.node_id));
+
+        assert!(db.delete_node(a.node_id).await.unwrap());
+        let c = db.register(&req(&key, 3)).await.unwrap();
+        assert_eq!(c.ip, Ipv4Addr::new(100, 64, 0, 1));
+
+        let nodes = db.all_nodes().await.unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].hostname, "my-laptop");
+
+        // Everything but endpoints survives a restart
+        let reopened = Db::open(&path).await.unwrap();
+        assert_eq!(reopened.all_nodes().await.unwrap().len(), 2);
+        assert_eq!(reopened.node_id_by_token(&a2.token).await.unwrap(), None, "a was deleted");
+        let d = reopened.register(&req(&key, 4)).await.unwrap();
+        assert!(d.node_id > c.node_id, "ids are never reused");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn single_use_and_expired_keys() {
+        let (db, path) = temp_db().await;
+        let once = db.create_preauth(false, Duration::from_secs(60)).await.unwrap();
+        assert!(db.register(&req(&once, 1)).await.is_ok());
+        assert!(matches!(db.register(&req(&once, 2)).await, Err(RegisterError::InvalidAuthKey)));
+
+        let expired = db.create_preauth(true, Duration::from_secs(0)).await.unwrap();
+        assert!(matches!(db.register(&req(&expired, 3)).await, Err(RegisterError::InvalidAuthKey)));
+        assert!(matches!(db.register(&req("rtl-auth-bogus", 4)).await, Err(RegisterError::InvalidAuthKey)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_registrations_and_writes() {
+        let (db, path) = temp_db().await;
+        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let first = db.register(&req(&key, 200)).await.unwrap();
+
+        let writer = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                let ep: SocketAddr = "1.2.3.4:5".parse().unwrap();
+                for _ in 0..200 {
+                    db.set_endpoints(first.node_id, &[ep]).await.unwrap();
+                }
+            })
+        };
+        let mut regs = Vec::new();
+        for i in 0..32u8 {
+            let db = db.clone();
+            let key = key.clone();
+            regs.push(tokio::spawn(async move { db.register(&req(&key, i)).await }));
+        }
+        let mut ips = std::collections::HashSet::new();
+        for r in regs {
+            let resp = r.await.unwrap().expect("registration must not fail under contention");
+            assert!(ips.insert(resp.ip), "duplicate IP {}", resp.ip);
+        }
+        writer.await.unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn named_invites_regenerate_and_keep_devices() {
+        let (db, _dir) = temp_db().await;
+        let (id1, old) = db.set_named("family", None).await.unwrap();
+        assert!(db.register(&req(&old, 1)).await.is_ok());
+        assert!(db.register(&req(&old, 2)).await.is_ok(), "reusable");
+        let (id2, new) = db.set_named("family", Some(Duration::from_secs(3600))).await.unwrap();
+        assert!(matches!(db.register(&req(&old, 3)).await, Err(RegisterError::InvalidAuthKey)), "old code void");
+        assert!(db.register(&req(&new, 3)).await.is_ok());
+        assert_eq!(db.all_nodes().await.unwrap().len(), 3, "joined devices stay");
+        assert_eq!(db.named_secret(id1).await.unwrap(), None);
+        assert_eq!(db.named_secret(id2).await.unwrap(), Some(new.clone()));
+        let (_, work) = db.set_named("work", None).await.unwrap();
+        assert!(db.register(&req(&work, 4)).await.is_ok(), "several names coexist");
+        assert!(db.register(&req(&new, 5)).await.is_ok());
+        assert!(db.delete_preauth(id2).await.unwrap());
+        assert!(matches!(db.register(&req(&new, 6)).await, Err(RegisterError::InvalidAuthKey)), "revoked");
+        let rows = db.list_preauth().await.unwrap();
+        assert!(rows.iter().any(|r| r.name.as_deref() == Some("work") && r.uses == 1 && r.expires_at == NEVER));
+    }
+
+    #[test]
+    fn hostnames() {
+        assert_eq!(sanitize_hostname("DESKTOP_ABC.local"), "desktop-abc-local");
+        assert_eq!(sanitize_hostname("--"), "node");
+    }
+}

@@ -1,0 +1,53 @@
+[package]
+name = "retail-daemon"
+description = "retail node daemon: TUN device, WireGuard data plane, NAT traversal, local API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "retaild"
+path = "src/main.rs"
+
+# The daemon is meant to stay well under 10 MB resident, so dependencies are
+# trimmed to what it uses: one TLS backend (ring), no HTTP client stack, no
+# regex-based log filter, and only the axum pieces the local API needs.
+[dependencies]
+retail-proto.workspace = true
+retail-control = { path = "../retail-control" }
+retail-web = { path = "../retail-web" }
+anyhow.workspace = true
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base64.workspace = true
+boringtun = { version = "0.7.1", default-features = false }
+clap.workspace = true
+futures-util.workspace = true
+gethostname = "1"
+if-addrs = "0.13"
+quinn-udp = "0.6.3"
+rand.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde.workspace = true
+serde_json.workspace = true
+socket2 = { version = "0.6.5", features = ["all"] }
+tokio.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "fmt", "std"] }
+tun-rs = { version = "2.8.18", features = ["async"] }
+webpki-roots = "1"
+ring = "0.17"
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinHttp", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_System_ProcessStatus", "Win32_System_RemoteDesktop", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

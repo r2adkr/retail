@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+exclude = ["vendor"]
+members = [
+    "crates/retail-proto",
+    "crates/retail-control",
+    "crates/retail-daemon",
+    "crates/retail-cli", "crates/retail-tray",
+    "crates/retail-web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+retail-proto = { path = "crates/retail-proto" }
+anyhow = "1"
+axum = { version = "0.8.9", features = ["ws"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+rand = "0.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+# The data plane is CPU-bound (ChaCha20-Poly1305 per packet); whole-program
+# optimisation is worth the longer release builds.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+# Function names stay for profiles and backtraces; line tables would triple
+# the size of the client packages people download
+strip = "debuginfo"
+
+# `cargo build --profile profiling` for perf with source lines
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
+# Code off the packet path (control plane, hosting, CLI parsing, TLS
+# handshakes) is built for size: its pages count as resident memory
+[profile.release.package]
+"clap_builder".opt-level = "s"
+"clap".opt-level = "s"
+"axum".opt-level = "s"
+"axum-core".opt-level = "s"
+"hyper".opt-level = "s"
+"hyper-util".opt-level = "s"
+"http".opt-level = "s"
+"retail-control".opt-level = "s"
+"rcgen".opt-level = "s"
+"tungstenite".opt-level = "s"
+"tokio-tungstenite".opt-level = "s"
+"serde_json".opt-level = "s"
+"tracing-subscriber".opt-level = "s"
+"rustls".opt-level = "s"
+"rustls-webpki".opt-level = "s"
+"webpki-roots".opt-level = "s"
+"tower".opt-level = "s"
+"tower-http".opt-level = "s"
+"retail-proto".opt-level = "s"
+"retail-web".opt-level = "s"
+"if-addrs".opt-level = "s"
+"netlink-packet-route".opt-level = "s"
+"matchit".opt-level = "s"
+"yasna".opt-level = "s"
+
+[patch.crates-io]
+boringtun = { path = "vendor/boringtun" }

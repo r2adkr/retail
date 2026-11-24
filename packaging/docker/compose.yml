@@ -1,0 +1,40 @@
+# retail server (a network hosted on a VPS).
+#
+#   cp packaging/docker/example.env packaging/docker/.env   # then edit it
+#   docker compose -f packaging/docker/compose.yml up -d
+#   docker compose -f packaging/docker/compose.yml exec retail-server retail server invite
+#
+# Port 443/tcp must be reachable from the internet (under RETAIL_SERVE_DOMAIN
+# if you set one), and 3478/udp is the STUN service nodes use to find their
+# public address. 80/tcp carries tunnels from networks that only let plain
+# web traffic out.
+#
+# For a helper node instead (a server at home behind CGNAT), set RETAIL_HELPER=1
+# and RETAIL_SERVE=0 in .env; `retail helper status` prints the code.
+
+services:
+  retail-server:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    image: retail-server:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "443:443/tcp"
+      - "80:80/tcp"
+      - "3478:3478/udp"
+    volumes:
+      - retail-data:/data
+    # The image runs as an unprivileged user, so binding 443 inside the
+    # container needs this capability
+    cap_add:
+      - NET_BIND_SERVICE
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  retail-data:

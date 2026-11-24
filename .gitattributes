@@ -1,0 +1,6 @@
+# LF everywhere: the shell scripts run on Linux, and the Rust sources are
+# shared between Windows and Linux builds
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
