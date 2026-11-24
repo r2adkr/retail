@@ -1,0 +1,4 @@
+# The same compiler and lints locally and in CI
+[toolchain]
+channel = "1.96.1"
+components = ["clippy"]
