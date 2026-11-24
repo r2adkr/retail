@@ -412,9 +412,12 @@ impl Backend {
             return Ok(());
         }
         let own = self.host.local_url().await;
+        let pin = self.host.pin().await;
+        // Its own server at the same address may hold other data now (a
+        // restored backup): only the same certificate is the same network
         let joined = {
             let p = self.persisted.lock().await;
-            p.token.is_some() && own.is_some() && p.server == own
+            p.token.is_some() && own.is_some() && p.server == own && p.server_pin == pin
         };
         if joined {
             {

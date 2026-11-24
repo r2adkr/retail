@@ -30,6 +30,9 @@ pub struct Db {
 struct Store {
     path: PathBuf,
     data: Data,
+    /// When this server started: devices count as seen then at the latest,
+    /// so downtime or an old backup never makes them all look inactive
+    started_at: i64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -243,7 +246,7 @@ impl Db {
             }
         }
         data.next_id = data.next_id.max(data.nodes.iter().map(|n| n.id).chain(data.keys.iter().map(|k| k.id)).max().unwrap_or(0));
-        Ok(Db { inner: Arc::new(Mutex::new(Store { path: path.to_path_buf(), data })) })
+        Ok(Db { inner: Arc::new(Mutex::new(Store { path: path.to_path_buf(), data, started_at: now_unix() })) })
     }
 
     /// Only the hash of the returned key is stored
@@ -489,7 +492,9 @@ impl Db {
         let mut s = self.inner.lock().unwrap();
         if s.data.key_expiry_days != key_days {
             s.data.key_expiry_days = key_days;
-            for n in &mut s.data.nodes {
+            // Keys that expired stay expired until renewed: a new setting
+            // must not bring back a device that was cut off
+            for n in s.data.nodes.iter_mut().filter(|n| n.expires_at.is_none_or(|t| t > now)) {
                 n.expires_at = expiry(key_days, n.no_expiry, now);
             }
         }
@@ -549,11 +554,12 @@ impl Db {
         let mut s = self.inner.lock().unwrap();
         let Some(days) = s.data.remove_inactive_days else { return Ok(Vec::new()) };
         let cutoff = now - i64::from(days) * day_secs();
+        let started = s.started_at;
         let stale: Vec<i64> = s
             .data
             .nodes
             .iter()
-            .filter(|n| !n.no_expiry && !online(n.id) && n.last_seen.is_some_and(|t| t < cutoff))
+            .filter(|n| !n.no_expiry && !online(n.id) && n.last_seen.is_some_and(|t| t.max(started) < cutoff))
             .map(|n| n.id)
             .collect();
         if !stale.is_empty() {
@@ -862,6 +868,15 @@ mod tests {
         db.renew(a.node_id, false).unwrap();
         assert!(row(&db, a.node_id).await.expires_at.is_some());
         assert!(db.set_expiry_settings(Some(0), None).is_err());
+        // An expired key stays expired when the setting changes
+        db.inner.lock().unwrap().data.nodes.iter_mut().find(|n| n.id == a.node_id).unwrap().expires_at = Some(now - 10);
+        db.set_expiry_settings(Some(60), None).unwrap();
+        assert!(row(&db, a.node_id).await.expired(now_unix()), "a new setting revived an expired key");
+        db.set_expiry_settings(None, None).unwrap();
+        assert!(row(&db, a.node_id).await.expired(now_unix()), "turning expiry off revived an expired key");
+        db.renew(a.node_id, false).unwrap();
+        assert_eq!(row(&db, a.node_id).await.expires_at, None, "renewed with expiry off: never");
+        db.set_expiry_settings(Some(30), None).unwrap();
         // Inactive devices go, unless online, exempt or never seen
         let b = db.register(&req(&key, 3)).await.unwrap();
         db.set_expiry_settings(Some(30), Some(1)).unwrap();
@@ -871,6 +886,9 @@ mod tests {
                 n.last_seen = Some(now - 2 * day_secs());
             }
         }
+        // Not right after the server started, whatever the last-seen times say
+        assert!(db.remove_inactive(&|_| false).unwrap().is_empty(), "nothing goes at start");
+        db.inner.lock().unwrap().started_at = now - 3 * day_secs();
         assert_eq!(db.remove_inactive(&|id| id == b.node_id).unwrap(), vec![a.node_id]);
         assert_eq!(db.all_nodes().await.unwrap().len(), 2, "host and online b stay");
         // Routes are checked

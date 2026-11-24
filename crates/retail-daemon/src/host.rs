@@ -596,6 +596,12 @@ impl Host {
         Self::invite_code(r, key)
     }
 
+    /// The pin of the running server's certificate
+    pub async fn pin(&self) -> Option<String> {
+        let running = self.running.lock().await;
+        running.as_ref().and_then(|r| r.server.pin()).as_ref().map(encode_pin)
+    }
+
     pub async fn local_url(&self) -> Option<String> {
         let running = self.running.lock().await;
         running.as_ref().map(|r| format!("https://127.0.0.1:{}", r.server.port()))

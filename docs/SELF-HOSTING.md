@@ -167,8 +167,8 @@ Nothing changes until the server's administrator approves it, since a route send
 ## Lost devices and old devices
 
 - **Remove a device** (⋯ → **Remove device**, or `retail server remove <device>`) cuts it off at once: every other device drops it and it cannot reconnect. If it joined with a multi-device invite that still works, the page offers to expire that invite too (`--revoke-invite`), so whoever has the device cannot join again with it.
-- **Key expiry** (the **Device keys** card, or `retail server expiry --keys 180`): device keys then last that many days from joining. When one expires, the device is cut off from the others until it is renewed (⋯ → **Renew key**, `retail server renew <device>`) or joins again with an invite; its tray says so. Turning expiry on starts the clock for every device on that day. The server's own device and the helper node never expire, and ⋯ → **Key never expires** (`--never`) exempts others, such as a router at home.
-- **Removing inactive devices** (`retail server expiry --inactive 90`): devices not seen for that many days are removed. Devices that are online, or exempt from expiry, stay.
+- **Key expiry** (the **Device keys** card, or `retail server expiry --keys 180`): device keys then last that many days from joining. When one expires, the device is cut off from the others until it is renewed (⋯ → **Renew key**, `retail server renew <device>`) or joins again with an invite; its tray says so. Turning expiry on, or changing it, starts the clock for every device on that day; devices whose key already expired stay cut off until renewed. The server's own device and the helper node never expire, and ⋯ → **Key never expires** (`--never`) exempts others, such as a router at home.
+- **Removing inactive devices** (`retail server expiry --inactive 90`): devices not seen for that many days of the server running are removed. Devices that are online, or exempt from expiry, stay.
 
 ## Backups and moving the server
 
