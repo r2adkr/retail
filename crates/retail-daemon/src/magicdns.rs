@@ -205,6 +205,8 @@ impl Drop for SystemDns {
     }
 }
 
+/// macOS needs no programs, only a file
+#[cfg(not(target_os = "macos"))]
 fn run(program: &str, args: &[&str]) -> bool {
     std::process::Command::new(program)
         .args(args)
