@@ -1,0 +1,70 @@
+# Official clients, built when a version tag (v0.1.0, ...) is pushed. Servers
+# fetch these by name to make one-click client packages, so asset names are
+# `<program>-<os>-<arch>[.exe]`, plus `wintun-windows-x86_64.dll` and
+# `SHA256SUMS`.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            variant: linux-x86_64
+            ext: ""
+          - os: windows-latest
+            variant: windows-x86_64
+            ext: ".exe"
+          - os: macos-14
+            variant: macos-aarch64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the crate version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $version"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p retail-daemon -p retail-cli -p retail-tray
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir dist
+          for b in retail-tray retaild retail; do
+            cp "target/release/$b${{ matrix.ext }}" "dist/$b-${{ matrix.variant }}${{ matrix.ext }}"
+          done
+      - name: wintun.dll
+        if: matrix.variant == 'windows-x86_64'
+        shell: bash
+        run: |
+          curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          unzip -q wintun.zip
+          cp wintun/bin/amd64/wintun.dll dist/wintun-windows-x86_64.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
