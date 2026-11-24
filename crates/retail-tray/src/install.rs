@@ -270,6 +270,7 @@ fn uninstall(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn run_quiet(program: &str, args: &[&str]) -> Result<(), String> {
     let out = std::process::Command::new(program).args(args).output().map_err(|e| format!("{program}: {e}"))?;
     if out.status.success() {
