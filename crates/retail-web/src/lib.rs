@@ -50,6 +50,8 @@ pub trait Backend: Send + Sync + 'static {
     fn clients(&self) -> Vec<ClientSource>;
     /// Where uploaded files for a client variant go
     fn upload_dir(&self, variant: &str) -> Option<PathBuf>;
+    /// Fetches a client's missing files from the official release
+    fn fetch_client(&self, variant: &str) -> BoxFut<'_, Result<(), String>>;
 }
 
 /// Uploaded program files may be this large
@@ -122,6 +124,7 @@ impl WebAdmin {
             .route("/api/nodes/{id}/delete", post(delete_node))
             .route("/api/nodes/{id}/admin", post(set_admin))
             .route("/api/qr", post(qr))
+            .route("/api/clients/{variant}/fetch", post(fetch_client))
             .route(
                 "/api/clients/{variant}/{name}",
                 post(upload).layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD)),
@@ -249,6 +252,7 @@ struct ClientView {
     id: String,
     label: String,
     missing: Vec<String>,
+    fetchable: bool,
 }
 
 async fn status(State(ctx): State<Ctx>) -> Response {
@@ -258,7 +262,11 @@ async fn status(State(ctx): State<Ctx>) -> Response {
         server: b.status().await,
         admins: b.admins(),
         own_ip,
-        clients: b.clients().into_iter().map(|c| ClientView { id: c.id, label: c.label, missing: c.missing }).collect(),
+        clients: b
+            .clients()
+            .into_iter()
+            .map(|c| ClientView { id: c.id, label: c.label, missing: c.missing, fetchable: c.fetchable })
+            .collect(),
         mesh_url: own_ip.map(|ip| format!("http://{ip}:{}", ctx.web.port)),
     };
     Json(view).into_response()
@@ -403,12 +411,27 @@ async fn qr(Json(req): Json<QrReq>) -> Response {
     ([(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, "no-store")], svg).into_response()
 }
 
-/// A client for one OS with the named invite's current code inside
+async fn fetch_client(State(ctx): State<Ctx>, Path(variant): Path<String>) -> Response {
+    done(ctx.web.backend.fetch_client(&variant).await)
+}
+
+/// A client for one OS with the named invite's current code inside. Missing
+/// program files come from the official release first, when possible.
 async fn download(State(ctx): State<Ctx>, Path((invite, variant)): Path<(i64, String)>) -> Response {
     let b = &ctx.web.backend;
-    let Some(source) = b.clients().into_iter().find(|c| c.id == variant) else {
+    let find = || b.clients().into_iter().find(|c| c.id == variant);
+    let Some(mut source) = find() else {
         return deny(StatusCode::NOT_FOUND, "no such client");
     };
+    if !source.missing.is_empty() && source.fetchable {
+        if let Err(e) = b.fetch_client(&variant).await {
+            return deny(StatusCode::BAD_GATEWAY, &e);
+        }
+        match find() {
+            Some(s) => source = s,
+            None => return deny(StatusCode::NOT_FOUND, "no such client"),
+        }
+    }
     if !source.missing.is_empty() {
         return deny(StatusCode::NOT_FOUND, &format!("files missing for this client: {}", source.missing.join(", ")));
     }

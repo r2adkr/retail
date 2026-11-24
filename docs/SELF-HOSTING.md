@@ -36,7 +36,7 @@ retail server stop             # 중지 (기기 등록은 남아 있다가 다�
   - 이름 붙은 초대는 나중에 설치 파일을 다시 만들 수 있도록 코드 원문을 서버 데이터 폴더(관리자만 읽을 수 있음)에 저장합니다. 1회용 초대는 지금처럼 해시만 저장합니다.
 - **설치 파일 받기**: 여러 기기용 초대마다 **받기 ▾** 메뉴에 Windows·Linux·macOS가 있습니다. 받은 파일 하나를 상대에게 전달하면, 상대는 실행만 하면 됩니다. 관리자 권한을 한 번 묻고, 프로그램을 설치하고, 부팅 때 데몬이 뜨도록 등록하고(Windows 작업 스케줄러, Linux systemd, macOS launchd), 그 초대로 참여한 뒤 트레이 앱을 켭니다.
   - 파일은 서버가 미리 빌드된 클라이언트 끝에 초대 코드를 덧붙여 즉석에서 만듭니다. 컴파일은 없습니다.
-  - 서버와 같은 OS용은 서버에 설치된 프로그램으로 만듭니다(Windows는 `wintun.dll`도 같은 폴더에 있어야 합니다). 다른 OS용(macOS 등)은 받기 메뉴의 **파일 올리기…**로 그 OS용 `retail-tray`, `retaild`, `retail`(Windows는 `.exe`와 `wintun.dll`)을 올리면 됩니다. 서버는 그 OS의 실행 파일 형식(PE, ELF, Mach-O)인지 확인합니다. 직접 넣으려면 retaild 상태 폴더의 `clients/<os>-<arch>/`(Linux `/var/lib/retail/clients/windows-x86_64/`, Windows `C:\ProgramData\retail\clients\linux-x86_64\` 등)에 같은 파일을 두면 됩니다.
+  - 서버와 같은 OS용은 서버에 설치된 프로그램으로 만듭니다(Windows는 `wintun.dll`도 같은 폴더에 있어야 합니다). 다른 OS용은 서버가 [GitHub Releases](https://github.com/r2adkr/retail/releases)에서 자기와 같은 버전의 공식 클라이언트를 처음 한 번 받아 `SHA256SUMS`와 대조한 뒤 보관해 둡니다(`RETAIL_RELEASES`로 주소를 바꾸거나, 빈 값으로 끌 수 있습니다). GitHub에 닿지 못하는 서버라면 받기 메뉴의 **파일 올리기…**로 그 OS용 `retail-tray`, `retaild`, `retail`(Windows는 `.exe`와 `wintun.dll`)을 올리면 됩니다. 서버는 그 OS의 실행 파일 형식(PE, ELF, Mach-O)인지 확인합니다. 직접 넣으려면 retaild 상태 폴더의 `clients/<os>-<arch>/`(Linux `/var/lib/retail/clients/windows-x86_64/`, Windows `C:\ProgramData\retail\clients\linux-x86_64\` 등)에 같은 파일을 두면 됩니다.
   - 설치 파일에는 재사용 초대가 들어 있으니 아무에게나 넘기지 마세요. 유출되면 그 초대의 ⋯ → **새 코드 만들기**를 누르면 됩니다.
   - 지금 retail은 코드 서명이 없어서 Windows SmartScreen이나 macOS Gatekeeper 경고가 뜰 수 있습니다.
   - 이미 다른 네트워크에 참여한 기기에서 실행하면 바꾸지 않고 안내만 합니다. 제거: 설치된 `retail-tray --uninstall`(관리자 권한).

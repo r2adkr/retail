@@ -63,6 +63,9 @@ impl Backend for Fake {
     fn upload_dir(&self, _: &str) -> Option<PathBuf> {
         None
     }
+    fn fetch_client(&self, _: &str) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Err("offline".into()) })
+    }
 }
 
 async fn request(port: u16, raw: String) -> (u16, String) {

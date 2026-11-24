@@ -65,6 +65,19 @@ impl retail_web::Backend for Glue {
     fn upload_dir(&self, variant: &str) -> Option<PathBuf> {
         STANDARD.contains(&variant).then(|| retail_web::clients_dir(&self.state_dir).join(variant))
     }
+    fn fetch_client(&self, variant: &str) -> BoxFut<'_, Result<(), String>> {
+        let variant = variant.to_string();
+        Box::pin(async move {
+            if !STANDARD.contains(&variant.as_str()) {
+                return Err("no official build of that client".into());
+            }
+            let (os, _) = variant.split_once('-').unwrap_or_default();
+            // The whole set goes to the clients folder, which wins over this
+            // device's own programs when those lack a file
+            let dir = retail_web::clients_dir(&self.state_dir).join(&variant);
+            crate::releases::fetch(&variant, &wanted(os), &dir).await.map_err(text)
+        })
+    }
 }
 
 fn exe(name: &str, os: &str) -> String {
@@ -81,17 +94,13 @@ fn source(id: &str, dir: &Path) -> Option<ClientSource> {
         _ => return None,
     };
     let label = if arch == "x86_64" || (os == "macos" && arch == "aarch64") { label.to_string() } else { format!("{label} {arch}") };
-    let mut wanted = vec![exe("retaild", os), exe("retail", os)];
-    if os == "windows" {
-        wanted.push("wintun.dll".to_string());
-    }
     let tray = dir.join(exe("retail-tray", os));
     let mut missing = Vec::new();
     if !tray.is_file() {
         missing.push(exe("retail-tray", os));
     }
     let mut files = Vec::new();
-    for name in wanted {
+    for name in wanted(os).into_iter().skip(1) {
         let path = dir.join(&name);
         if path.is_file() {
             files.push((name, path));
@@ -99,7 +108,17 @@ fn source(id: &str, dir: &Path) -> Option<ClientSource> {
             missing.push(name);
         }
     }
-    Some(ClientSource { id: id.to_string(), label, os: os.to_string(), tray, files, missing })
+    let fetchable = STANDARD.contains(&id) && crate::releases::base().is_some();
+    Some(ClientSource { id: id.to_string(), label, os: os.to_string(), tray, files, missing, fetchable })
+}
+
+/// The tray first, then what installs next to it
+fn wanted(os: &str) -> Vec<String> {
+    let mut w = vec![exe("retail-tray", os), exe("retaild", os), exe("retail", os)];
+    if os == "windows" {
+        w.push("wintun.dll".to_string());
+    }
+    w
 }
 
 /// Always offered, so the page can ask for the files of a missing one

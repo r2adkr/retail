@@ -90,7 +90,7 @@ dialog h3{margin:0 0 4px;font-size:17px}
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let view=null,invites=[],nodes=[];
-function toast(t){const e=$("#toast");e.textContent=t;e.classList.add("show");clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove("show"),2400)}
+function toast(t,ms=2400){const e=$("#toast");e.textContent=t;e.classList.add("show");clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove("show"),ms)}
 async function api(path,body){
   const r=await fetch(path,body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json","X-Retail-Web":"1"},body:JSON.stringify(body)});
   if(r.headers.get("content-type")?.includes("svg"))return r.text();
@@ -136,7 +136,9 @@ function render(){
       return`<div class="item"><div class="main"><div class="name">${kind} <span class="pill">#${i.id}</span></div><div class="meta">${i.reusable?i.uses+"대 참여":"아직 쓰이지 않음"} · ${expires(i.expires_at)} · 코드는 만들 때만 볼 수 있음</div></div>
       <div class="side">${menu("⋯",`<button class="danger" onclick="revoke(${k})">만료</button>`,"icon")}</div></div>`;
     }
-    const dl=clients.map(c=>c.missing.length?`<button class="sub" onclick="openUpload('${esc(c.id)}')">${esc(c.label)}: 파일 올리기…</button>`:`<a href="/download/${i.id}/${encodeURIComponent(c.id)}" onclick="closeMenus();toast('설치 파일을 만드는 중입니다')">${esc(c.label)}용</a>`).join("");
+    const dl=clients.map(c=>!c.missing.length?`<a href="/download/${i.id}/${encodeURIComponent(c.id)}" onclick="closeMenus();toast('설치 파일을 만드는 중입니다')">${esc(c.label)}용</a>`
+      :c.fetchable?`<button onclick="getClient(${i.id},'${esc(c.id)}')">${esc(c.label)}용</button>`
+      :`<button class="sub" onclick="openUpload('${esc(c.id)}')">${esc(c.label)}: 파일 올리기…</button>`).join("");
     return`<div class="item"><div class="main"><div class="name">${esc(i.name)}</div><div class="meta">여러 기기용 · ${i.uses}대 참여 · ${expires(i.expires_at)}</div></div>
     <div class="side">${menu("받기 ▾",dl)}${menu("⋯",`<button onclick="codeOf(${k},'qr')">코드·QR 보기</button><button onclick="codeOf(${k},'copy')">코드 복사</button><button onclick="regen(${k})">새 코드 만들기</button><button class="danger" onclick="revoke(${k})">만료</button>`,"icon")}</div></div>`}).join(""):`<div class="empty">아직 초대가 없습니다. <b>초대 만들기</b>로 시작하세요.</div>`;
 
@@ -179,6 +181,14 @@ async function create(){
     await load(true);
     $("#createBody").innerHTML=`<h3>${multi?`'${esc(name)}' 초대를 만들었습니다`:"1회용 초대를 만들었습니다"}</h3><p class="muted small" style="margin:0 0 14px">${multi?"설치 파일은 목록의 <b>받기</b>에서 받을 수 있습니다. ":"이 코드는 지금만 볼 수 있습니다. "}휴대폰으로 찍거나 코드를 복사해 전달하세요.</p><div class="share">${await shareBlock(j.code)}</div><div class="actions"><button class="primary" onclick="$('#createDlg').close()">완료</button></div>`;
   }catch(e){toast(e.message)}
+}
+
+// A client this server has no programs for: fetched from the official
+// release, or uploaded by hand if that fails
+async function getClient(invite,id){
+  closeMenus();toast("GitHub에서 공식 클라이언트를 받는 중입니다. 처음 한 번만 걸립니다…",120000);
+  try{await api(`/api/clients/${encodeURIComponent(id)}/fetch`,{});toast("설치 파일을 만드는 중입니다");location.href=`/download/${invite}/${encodeURIComponent(id)}`;load(true)}
+  catch(e){toast("GitHub에서 받지 못했습니다: "+e.message,6000);openUpload(id)}
 }
 
 // Program files for a client this server lacks (a macOS build, say)

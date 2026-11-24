@@ -17,6 +17,7 @@ mod memory;
 mod portmap;
 mod proxy;
 mod reality;
+mod releases;
 mod sspi;
 mod state;
 mod transport;

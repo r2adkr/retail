@@ -20,8 +20,10 @@ pub struct ClientSource {
     pub tray: PathBuf,
     /// Installed next to it: daemon, CLI, and on Windows `wintun.dll`
     pub files: Vec<(String, PathBuf)>,
-    /// Required files that are not there; such a client is not offered
+    /// Required files that are not there
     pub missing: Vec<String>,
+    /// The missing files can be fetched from the official release
+    pub fetchable: bool,
 }
 
 /// The package's length and a stream of its bytes

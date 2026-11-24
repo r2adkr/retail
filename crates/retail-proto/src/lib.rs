@@ -21,6 +21,8 @@ pub const DEFAULT_STUN_PORT: u16 = 3478;
 pub const DEFAULT_WG_PORT: u16 = 41641;
 /// Web admin page of a hosting device
 pub const WEB_ADMIN_PORT: u16 = 41180;
+/// Official client builds, under `v<version>/`
+pub const RELEASES: &str = "https://github.com/r2adkr/retail/releases/download";
 pub const LOCAL_API_ADDR: &str = "127.0.0.1:41112";
 pub const TUN_MTU: u16 = 1280;
 
