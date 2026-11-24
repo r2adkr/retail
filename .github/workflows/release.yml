@@ -58,7 +58,15 @@ jobs:
         shell: bash
         run: |
           programs="${{ matrix.programs || 'retail-tray retaild retail' }}"
-          packages=$(for b in $programs; do case $b in retaild) echo -n "-p retail-daemon ";; retail) echo -n "-p retail-cli ";; retail-tray) echo -n "-p retail-tray ";; esac; done)
+          # No `case` inside $(...): macOS's bash 3.2 cannot parse it
+          packages=""
+          for b in $programs; do
+            case $b in
+              retaild) packages="$packages -p retail-daemon" ;;
+              retail) packages="$packages -p retail-cli" ;;
+              retail-tray) packages="$packages -p retail-tray" ;;
+            esac
+          done
           target="${{ matrix.target }}"
           cargo build --release --locked $packages ${target:+--target $target}
       - name: Collect
