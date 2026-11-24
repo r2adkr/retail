@@ -60,7 +60,7 @@ struct Args {
     memory_limit: Option<u32>,
     /// Host a network from startup without joining it (a server, e.g. in a
     /// container). Same as `retail server start --no-join`, which also persists.
-    #[arg(long, env = "RETAIL_SERVE")]
+    #[arg(long, env = "RETAIL_SERVE", value_parser = clap::builder::FalseyValueParser::new())]
     serve: bool,
     /// Port of the hosted server
     #[arg(long, env = "RETAIL_SERVE_PORT", requires = "serve")]
@@ -83,7 +83,7 @@ struct Args {
     web_port: u16,
     /// Be a helper node from startup, for a server that other networks cannot
     /// reach. Same as `retail helper start`, which also persists.
-    #[arg(long, env = "RETAIL_HELPER")]
+    #[arg(long, env = "RETAIL_HELPER", value_parser = clap::builder::FalseyValueParser::new())]
     helper: bool,
     /// Public host name or address put in the helper code
     #[arg(long, env = "RETAIL_HELPER_PUBLIC", requires = "helper")]
@@ -243,5 +243,22 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    #[test]
+    fn serve_flag_from_the_environment() {
+        // Containers set these as 1 / 0 as often as true / false
+        for (value, want) in [("1", true), ("true", true), ("yes", true), ("0", false), ("false", false), ("no", false)] {
+            // SAFETY: the only test that touches this variable
+            unsafe { std::env::set_var("RETAIL_SERVE", value) };
+            let args = super::Args::try_parse_from(["retaild"]).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert_eq!(args.serve, want, "{value}");
+        }
+        unsafe { std::env::remove_var("RETAIL_SERVE") };
     }
 }

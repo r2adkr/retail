@@ -117,7 +117,12 @@ fn source(id: &str, dir: &Path) -> Option<ClientSource> {
         "macos" => "macOS",
         _ => return None,
     };
-    let label = if arch == "x86_64" || (os == "macos" && arch == "aarch64") { label.to_string() } else { format!("{label} {arch}") };
+    let label = match (os, arch) {
+        ("macos", "aarch64") => "macOS (Apple silicon)".to_string(),
+        ("macos", "x86_64") => "macOS (Intel)".to_string(),
+        (_, "x86_64") => label.to_string(),
+        _ => format!("{label} {arch}"),
+    };
     let tray = dir.join(exe("retail-tray", os));
     let mut missing = Vec::new();
     if !tray.is_file() {
@@ -146,7 +151,7 @@ fn wanted(os: &str) -> Vec<String> {
 }
 
 /// Always offered, so the page can ask for the files of a missing one
-const STANDARD: [&str; 4] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64"];
+const STANDARD: [&str; 5] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64"];
 
 /// This device's own programs, then any in `<state>/clients/<os>-<arch>/`
 fn clients(state_dir: &Path) -> Vec<ClientSource> {

@@ -66,7 +66,14 @@ sudo retaild uninstall                      # removes the service and programs (
 
 On a machine with less than 1 GB of memory the daemon picks its smallest buffers by itself (about 9 MB); `retail set --memory-limit` overrides it. The web admin page is on the server's loopback: `ssh -L 41180:127.0.0.1:41180 server`, then open the link `retail server web --print` prints there.
 
-Docker:
+Docker: every release publishes a server image for 64-bit Intel and ARM, `ghcr.io/r2adkr/retail` (tags `latest` and the version, such as `1.0.0`).
+
+```sh
+docker run -d --name retail-server --restart unless-stopped   -p 443:443/tcp -p 80:80/tcp -p 3478:3478/udp   -v retail-data:/data --cap-drop ALL --cap-add NET_BIND_SERVICE   ghcr.io/r2adkr/retail
+docker exec retail-server retail server invite
+```
+
+Or with Compose, which also takes settings from an `.env` file (domain, CDN, helper):
 
 ```sh
 cp packaging/docker/example.env packaging/docker/.env
@@ -74,7 +81,7 @@ docker compose -f packaging/docker/compose.yml up -d
 docker compose -f packaging/docker/compose.yml exec retail-server retail server invite
 ```
 
-Ports to open: TCP 443 (registration, control, relay), UDP 3478 (STUN).
+Ports to open: TCP 443 (registration, control, relay), TCP 80 (tunnels from networks that allow only web traffic), UDP 3478 (STUN). `packaging/docker/Dockerfile` builds the same image from source.
 
 ## REALITY for networks that block the server
 

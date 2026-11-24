@@ -21,7 +21,7 @@ const FIRST_CHECK: Duration = Duration::from_secs(60);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// Systems with official builds
-const OFFICIAL: [&str; 5] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "linux-arm", "macos-aarch64"];
+const OFFICIAL: [&str; 6] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "linux-arm", "macos-aarch64", "macos-x86_64"];
 
 pub struct Updater {
     status: Mutex<UpdateStatus>,

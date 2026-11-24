@@ -20,8 +20,9 @@ jobs:
           - os: ubuntu-22.04
             variant: linux-x86_64
             ext: ""
-          # Raspberry Pi 3/4/5 and other 64-bit ARM boards, built natively
-          - os: ubuntu-24.04-arm
+          # Raspberry Pi 3/4/5 and other 64-bit ARM boards, built natively.
+          # On 22.04 so the programs need no newer glibc than Debian 12 has
+          - os: ubuntu-22.04-arm
             variant: linux-aarch64
             ext: ""
           # 32-bit ARM (Raspberry Pi Zero 2 / 2 / 3 on a 32-bit OS, routers):
@@ -36,6 +37,9 @@ jobs:
             ext: ".exe"
           - os: macos-15
             variant: macos-aarch64
+            ext: ""
+          - os: macos-15-intel
+            variant: macos-x86_64
             ext: ""
     runs-on: ${{ matrix.os }}
     steps:
@@ -90,6 +94,46 @@ jobs:
         with:
           name: ${{ matrix.variant }}
           path: dist/*
+
+  # The server image (retaild and retail, no tunnel of its own) for
+  # 64-bit Intel and ARM, from the same programs as the release
+  image:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Programs by Docker platform
+        run: |
+          for pair in amd64:x86_64 arm64:aarch64; do
+            platform=${pair%%:*}; arch=${pair##*:}
+            mkdir -p "image/$platform"
+            for b in retaild retail; do cp "dist/$b-linux-$arch" "image/$platform/$b"; done
+          done
+          chmod 755 image/*/*
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:latest
 
   publish:
     needs: build

@@ -22,7 +22,7 @@ A self-hosted mesh VPN. Your devices reach each other directly over WireGuard, f
 - **Encrypted server backups** to restore or move the server; devices keep their addresses and names.
 - **Exit nodes**, several saved networks per device, and automatic updates.
 - **Small and fast**: about 12 MB of memory, faster than wireguard-go in our [measurements](docs/DESIGN.md), and builds for Raspberry Pi and other ARM machines.
-- Desktop app for Windows, macOS and Linux in English, Korean, Japanese, Chinese and Spanish, plus a CLI and a terminal UI.
+- Desktop app for Windows, macOS (Apple silicon and Intel) and Linux in English, Korean, Japanese, Chinese and Spanish, plus a CLI and a terminal UI.
 
 ## Install
 
@@ -42,7 +42,13 @@ Download the programs for your system from [Releases](https://github.com/r2adkr/
 sudo ./retaild install --server
 ```
 
-This installs `retaild` and `retail`, starts them at boot, starts the server and prints the first invite. Docker works too; see [Self-hosting](docs/SELF-HOSTING.md).
+This installs `retaild` and `retail`, starts them at boot, starts the server and prints the first invite. Or run the server image:
+
+```sh
+docker run -d -p 443:443 -p 80:80 -p 3478:3478/udp -v retail-data:/data ghcr.io/r2adkr/retail
+```
+
+See [Self-hosting](docs/SELF-HOSTING.md) for both.
 
 ## Quick start
 

@@ -11,7 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest, macos-15]
+        # macOS on Intel: Apple silicon runners are often too busy to take
+        # the job at all; the code is the same for both
+        os: [ubuntu-22.04, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -27,7 +29,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
           - os: ubuntu-22.04
             target: armv7-unknown-linux-gnueabihf
     runs-on: ${{ matrix.os }}

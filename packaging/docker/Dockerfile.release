@@ -1,0 +1,18 @@
+# The published server image (ghcr.io/r2adkr/retail): the release's own Linux
+# programs, put in place by the release workflow under image/<platform>/.
+# To build from source instead, use the Dockerfile next to this one.
+
+# distroless/cc: glibc + CA certificates, no shell
+FROM gcr.io/distroless/cc-debian12:nonroot
+ARG TARGETARCH
+LABEL org.opencontainers.image.source="https://github.com/r2adkr/retail" \
+      org.opencontainers.image.description="retail server: a self-hosted mesh VPN's coordination server" \
+      org.opencontainers.image.licenses="Apache-2.0"
+COPY image/${TARGETARCH}/retaild /usr/local/bin/retaild
+COPY image/${TARGETARCH}/retail /usr/local/bin/retail
+ENV RETAIL_STATE_DIR=/data \
+    RETAIL_SERVE=1 \
+    RETAIL_NO_PORTMAP=1
+VOLUME ["/data"]
+EXPOSE 443/tcp 80/tcp 3478/udp
+ENTRYPOINT ["/usr/local/bin/retaild"]

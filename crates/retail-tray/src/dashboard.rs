@@ -24,7 +24,7 @@ const MAX_INVITES: usize = 4;
 const FIELD_H: f32 = 36.0;
 const MENU_ITEM_H: f32 = 34.0;
 /// Systems an installer can be made for: (`<os>-<arch>`, label)
-pub const CLIENTS: [(&str, &str); 4] = [("windows-x86_64", "Windows"), ("linux-x86_64", "Linux"), ("linux-aarch64", "Linux ARM64"), ("macos-aarch64", "macOS")];
+pub const CLIENTS: [(&str, &str); 5] = [("windows-x86_64", "Windows"), ("linux-x86_64", "Linux"), ("linux-aarch64", "Linux ARM64"), ("macos-aarch64", "macOS (Apple silicon)"), ("macos-x86_64", "macOS (Intel)")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DashAction {

@@ -14,10 +14,10 @@
 
 services:
   retail-server:
-    build:
-      context: ../..
-      dockerfile: packaging/docker/Dockerfile
-    image: retail-server:latest
+    # Published with each release (64-bit Intel and ARM). To build from
+    # source instead, replace this line with:
+    #   build: { context: ../.., dockerfile: packaging/docker/Dockerfile }
+    image: ghcr.io/r2adkr/retail:latest
     restart: unless-stopped
     env_file: .env
     ports:
