@@ -1,14 +1,15 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>retail 서버 관리</title>
+<title>retail server</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--text:#1f2328;--dim:#646c76;--line:#e6e8ec;--accent:#2563eb;--accent-soft:#eef3fe;--ok:#1a7f37;--warn:#9a6700;--warn-soft:#fff8e5;--bad:#cf222e;--chip:#f0f2f5;--pop:#fff;--shadow:0 6px 24px #0002}
 @media(prefers-color-scheme:dark){:root{--bg:#16181d;--card:#1f2228;--text:#e6e8eb;--dim:#9aa1aa;--line:#2e333b;--accent:#3b82f6;--accent-soft:#1d2a44;--ok:#3fb950;--warn:#d29922;--warn-soft:#2b2412;--bad:#f85149;--chip:#2a2e36;--pop:#262a31;--shadow:0 6px 24px #0008}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;word-break:keep-all}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo","Yu Gothic UI","Hiragino Sans","Microsoft YaHei UI","PingFang SC",sans-serif}
+html[lang=ko] body{word-break:keep-all}
 main{max-width:820px;margin:0 auto;padding:24px 16px 56px}
 header{display:flex;align-items:center;gap:10px;margin-bottom:18px}
 h1{font-size:20px;margin:0;font-weight:650}
@@ -70,60 +71,175 @@ dialog h3{margin:0 0 4px;font-size:17px}
 </head>
 <body>
 <main>
-<header><h1>retail 서버 관리</h1><span id="state" class="pill">…</span></header>
+<header><h1 data-t>retail server</h1><span id="state" class="pill">…</span></header>
 <section id="server"></section>
 <div id="networked" hidden>
-<div class="head"><h2>초대</h2><button class="primary" onclick="openCreate()">초대 만들기</button></div>
+<div class="head"><h2 data-t>Invites</h2><button class="primary" onclick="openCreate()" data-t>Create invite</button></div>
 <div class="card"><div id="invites"></div></div>
-<div class="head"><h2>기기</h2><span id="count" class="muted small"></span></div>
+<div class="head"><h2 data-t>Devices</h2><span id="count" class="muted small"></span></div>
 <div class="card"><div id="nodes"></div></div>
 <p id="meshNote" class="muted small" style="margin:10px 4px 0"></p>
 </div>
 </main>
 
 <dialog id="createDlg"><div id="createBody"></div></dialog>
-<dialog id="shareDlg"><h3 id="shareTitle"></h3><p class="muted small" style="margin:0 0 14px">휴대폰으로 찍거나, 코드를 복사해 상대 기기의 retail 설정에 붙여 넣으세요.</p><div class="share" id="shareBody"></div><div class="actions"><button onclick="$('#shareDlg').close()">닫기</button></div></dialog>
+<dialog id="shareDlg"><h3 id="shareTitle"></h3><p class="muted small" style="margin:0 0 14px" data-t>Scan it with a phone, or copy the code and paste it into retail settings on the other device.</p><div class="share" id="shareBody"></div><div class="actions"><button onclick="$('#shareDlg').close()" data-t>Close</button></div></dialog>
 <dialog id="uploadDlg"><div id="uploadBody"></div></dialog>
 <div id="toast" class="toast" role="status"></div>
 
 <script>
+// Translations, keyed by the English text: [한국어, 日本語, 简体中文, Español].
+// The page follows the browser's language and falls back to English.
+const TR={
+"retail server":["retail 서버 관리","retail サーバー管理","retail 服务器管理","Servidor retail"],
+"Invites":["초대","招待","邀请","Invitaciones"],
+"Create invite":["초대 만들기","招待を作成","创建邀请","Crear invitación"],
+"Devices":["기기","デバイス","设备","Dispositivos"],
+"Scan it with a phone, or copy the code and paste it into retail settings on the other device.":["휴대폰으로 찍거나, 코드를 복사해 상대 기기의 retail 설정에 붙여 넣으세요.","スマートフォンで読み取るか、コードをコピーして相手のデバイスの retail 設定に貼り付けてください。","用手机扫码，或复制代码并粘贴到对方设备的 retail 设置中。","Escanéalo con el móvil o copia el código y pégalo en los ajustes de retail del otro dispositivo."],
+"Close":["닫기","閉じる","关闭","Cerrar"],
+"Error {status}":["오류 {status}","エラー {status}","错误 {status}","Error {status}"],
+"Copied":["복사했습니다","コピーしました","已复制","Copiado"],
+"Copy this":["복사하세요","コピーしてください","请复制","Cópialo"],
+"More":["더 보기","その他","更多","Más"],
+"Never expires":["만료 없음","期限なし","永不过期","No caduca"],
+"Expired":["만료됨","期限切れ","已过期","Caducada"],
+"Expires in {n} h":["{n}시간 뒤 만료","{n} 時間後に期限切れ","{n} 小时后过期","Caduca en {n} h"],
+"Expires in {n} d":["{n}일 뒤 만료","{n} 日後に期限切れ","{n} 天后过期","Caduca en {n} d"],
+"Never connected":["접속 기록 없음","接続履歴なし","从未连接","Nunca conectado"],
+"Seen just now":["방금 접속","たった今接続","刚刚在线","Visto ahora mismo"],
+"Seen {n} min ago":["{n}분 전 접속","{n} 分前に接続","{n} 分钟前在线","Visto hace {n} min"],
+"Seen {n} h ago":["{n}시간 전 접속","{n} 時間前に接続","{n} 小时前在线","Visto hace {n} h"],
+"Seen {n} d ago":["{n}일 전 접속","{n} 日前に接続","{n} 天前在线","Visto hace {n} d"],
+"Automatic opening is off":["자동 열기 꺼짐","自動開放はオフ","自动打开已关闭","Apertura automática desactivada"],
+"Opened with {method} (TCP {tcp}, UDP {udp})":["{method}로 열림 (TCP {tcp}, UDP {udp})","{method} で開放 (TCP {tcp}, UDP {udp})","已通过 {method} 打开 (TCP {tcp}, UDP {udp})","Abiertos con {method} (TCP {tcp}, UDP {udp})"],
+"Could not open automatically":["자동으로 열지 못함","自動で開放できませんでした","无法自动打开","No se pudieron abrir automáticamente"],
+"The router's external address ({ip}) is private (CGNAT). Devices on other networks can't reach this server without a helper node; devices on the same network can still join.":["공유기의 외부 주소({ip})가 사설 주소입니다(CGNAT). 다른 네트워크의 기기는 보조 노드 없이 이 서버에 접속할 수 없고, 같은 네트워크의 기기는 참여할 수 있습니다.","ルーターの外部アドレス（{ip}）はプライベートアドレスです（CGNAT）。他のネットワークのデバイスは補助ノードなしではこのサーバーに接続できません。同じネットワークのデバイスは参加できます。","路由器的外部地址（{ip}）是私有地址（CGNAT）。其他网络中的设备需要辅助节点才能连接到此服务器；同一网络中的设备仍可加入。","La dirección externa del router ({ip}) es privada (CGNAT). Los dispositivos de otras redes no pueden llegar a este servidor sin un nodo auxiliar; los de la misma red sí pueden unirse."],
+"The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.":["공유기가 포트를 자동으로 열지 않았습니다. 다른 네트워크의 기기가 접속하려면 공유기에서 TCP {tcp}와 UDP {udp}를 이 컴퓨터로 포트포워딩하거나 도메인을 지정하세요.","ルーターがポートを自動で開放しませんでした。他のネットワークのデバイスから接続するには、ルーターで TCP {tcp} と UDP {udp} をこのコンピューターに転送するか、ドメインを設定してください。","路由器未自动打开端口。要让其他网络中的设备连接，请在路由器上将 TCP {tcp} 和 UDP {udp} 转发到这台电脑，或设置域名。","El router no abrió los puertos automáticamente. Para que se conecten dispositivos de otras redes, redirige TCP {tcp} y UDP {udp} a este equipo en el router o configura un dominio."],
+"Copy code":["코드 복사","コードをコピー","复制代码","Copiar código"],
+"Running":["실행 중","実行中","运行中","En marcha"],
+"Off":["꺼짐","オフ","已关闭","Apagado"],
+"The network server on this device is off. Turn it on to make this device the server and invite other devices.":["이 기기에서 네트워크 서버가 꺼져 있습니다. 켜면 이 기기가 서버가 되고, 초대로 다른 기기를 들일 수 있습니다.","このデバイスのネットワークサーバーはオフです。オンにするとこのデバイスがサーバーになり、他のデバイスを招待できます。","本设备上的网络服务器已关闭。开启后本设备将成为服务器，并可邀请其他设备。","El servidor de red de este dispositivo está apagado. Enciéndelo para que este dispositivo sea el servidor e invitar a otros."],
+"Turn on server":["서버 켜기","サーバーをオン","开启服务器","Encender servidor"],
+"Server turned on":["서버를 켰습니다","サーバーをオンにしました","服务器已开启","Servidor encendido"],
+"Address from outside":["밖에서 접속할 주소","外部からのアドレス","外部访问地址","Dirección desde fuera"],
+"Not reachable from other networks":["다른 네트워크에서는 접속할 수 없음","他のネットワークからは接続できません","其他网络无法访问","No accesible desde otras redes"],
+"This network":["이 네트워크","このネットワーク","本地网络","Esta red"],
+"Router ports":["공유기 포트","ルーターのポート","路由器端口","Puertos del router"],
+"On · looks like {site}":["켜짐 · {site}처럼 보임","オン · {site} のように見えます","开启 · 伪装为 {site}","Activado · parece {site}"],
+"Helper node":["보조 노드","補助ノード","辅助节点","Nodo auxiliar"],
+"Connected":["연결됨","接続済み","已连接","Conectado"],
+"Not connected":["연결 안 됨","未接続","未连接","Sin conexión"],
+"Turning the server off disconnects every device. Their registrations stay, so they reconnect when it is back on.":["서버를 끄면 모든 기기의 연결이 끊깁니다. 기기 등록은 남아서, 다시 켜면 이어집니다.","サーバーをオフにするとすべてのデバイスが切断されます。登録は残るので、再びオンにすると再接続します。","关闭服务器会断开所有设备。设备注册会保留，重新开启后即可恢复连接。","Al apagar el servidor se desconectan todos los dispositivos. Sus registros se conservan y vuelven a conectarse al encenderlo."],
+"Server turned off":["서버를 껐습니다","サーバーをオフにしました","服务器已关闭","Servidor apagado"],
+"Turn off server":["서버 끄기","サーバーをオフ","关闭服务器","Apagar servidor"],
+"Reusable invite":["재사용 초대","再利用できる招待","可重复使用的邀请","Invitación reutilizable"],
+"One-time invite":["1회용 초대","1 回限りの招待","一次性邀请","Invitación de un solo uso"],
+"{n} joined":["{n}대 참여","{n} 台が参加","{n} 台已加入","{n} unidos"],
+"Not used yet":["아직 쓰이지 않음","未使用","尚未使用","Sin usar"],
+"the code was shown only when created":["코드는 만들 때만 볼 수 있음","コードは作成時のみ表示","代码仅在创建时显示","el código solo se mostró al crearla"],
+"Expire":["만료","期限切れにする","使其过期","Caducar"],
+"Preparing the installer…":["설치 파일을 만드는 중입니다…","インストーラーを準備中…","正在准备安装程序…","Preparando el instalador…"],
+"For {os}":["{os}용","{os} 用","适用于 {os}","Para {os}"],
+"{os}: upload files…":["{os}: 파일 올리기…","{os}: ファイルをアップロード…","{os}：上传文件…","{os}: subir archivos…"],
+"Multi-device":["여러 기기용","複数デバイス用","多设备","Varios dispositivos"],
+"Download ▾":["받기 ▾","ダウンロード ▾","下载 ▾","Descargar ▾"],
+"Show code and QR":["코드·QR 보기","コードと QR を表示","显示代码和二维码","Ver código y QR"],
+"New code":["새 코드 만들기","新しいコード","生成新代码","Código nuevo"],
+"No invites yet. Start with {button}.":["아직 초대가 없습니다. {button}로 시작하세요.","まだ招待はありません。{button} から始めましょう。","还没有邀请。点击 {button} 开始。","Aún no hay invitaciones. Empieza con {button}."],
+"{online} of {total} connected":["{total}대 중 {online}대 연결","{total} 台中 {online} 台が接続中","{online}/{total} 台已连接","{online} de {total} conectados"],
+"This device":["이 기기","このデバイス","本设备","Este dispositivo"],
+"Can manage":["관리 허용","管理可","可管理","Puede gestionar"],
+"Stop allowing management":["관리 허용 끄기","管理の許可をやめる","取消管理权限","Dejar de permitir la gestión"],
+"Allow managing from this device":["이 기기에서 관리 허용","このデバイスからの管理を許可","允许从此设备管理","Permitir gestionar desde este dispositivo"],
+"Remove device":["기기 제거","デバイスを削除","移除设备","Quitar dispositivo"],
+"No devices have joined yet.":["아직 참여한 기기가 없습니다.","まだ参加したデバイスはありません。","还没有设备加入。","Aún no se ha unido ningún dispositivo."],
+"Devices allowed to manage can open this page at {url} while connected to retail.":["관리를 허용한 기기는 retail에 연결된 상태에서 {url} 로 이 페이지를 열 수 있습니다.","管理を許可したデバイスは、retail に接続中に {url} でこのページを開けます。","获准管理的设备在连接 retail 时可通过 {url} 打开此页面。","Los dispositivos con permiso pueden abrir esta página en {url} mientras estén conectados a retail."],
+"Invite '{name}'":["'{name}' 초대","招待「{name}」","邀请“{name}”","Invitación «{name}»"],
+"Make a new code for '{name}'? The old code and installers that contain it stop working; devices that already joined stay.":["'{name}' 초대의 새 코드를 만듭니다. 이전 코드와 그 코드가 든 설치 파일은 더 이상 쓸 수 없고, 이미 참여한 기기는 그대로입니다.","「{name}」の新しいコードを作成しますか？以前のコードとそれを含むインストーラーは使えなくなります。参加済みのデバイスはそのままです。","要为“{name}”生成新代码吗？旧代码和包含它的安装程序将失效；已加入的设备不受影响。","¿Crear un código nuevo para «{name}»? El código anterior y los instaladores que lo contienen dejarán de funcionar; los dispositivos ya unidos se quedan."],
+"New code made":["새 코드를 만들었습니다","新しいコードを作成しました","已生成新代码","Código nuevo creado"],
+"Expire the invite '{name}'? Devices that already joined stay.":["'{name}' 초대를 만료합니다. 이미 참여한 기기는 그대로입니다.","招待「{name}」を期限切れにしますか？参加済みのデバイスはそのままです。","要让邀请“{name}”过期吗？已加入的设备不受影响。","¿Caducar la invitación «{name}»? Los dispositivos ya unidos se quedan."],
+"Expire this invite? Devices that already joined stay.":["이 초대를 만료합니다. 이미 참여한 기기는 그대로입니다.","この招待を期限切れにしますか？参加済みのデバイスはそのままです。","要让此邀请过期吗？已加入的设备不受影响。","¿Caducar esta invitación? Los dispositivos ya unidos se quedan."],
+"Invite expired":["만료했습니다","期限切れにしました","邀请已过期","Invitación caducada"],
+"{host} can open this page now":["{host}에서 이 페이지를 열 수 있습니다","{host} からこのページを開けるようになりました","{host} 现在可以打开此页面","{host} ya puede abrir esta página"],
+"Management turned off":["관리 허용을 껐습니다","管理の許可をやめました","已取消管理权限","Gestión desactivada"],
+"Remove {host} from the network? It will need an invite to come back.":["{host}을(를) 네트워크에서 제거합니다. 다시 들어오려면 초대가 필요합니다.","{host} をネットワークから削除しますか？戻るには招待が必要です。","要将 {host} 从网络中移除吗？它需要邀请才能重新加入。","¿Quitar {host} de la red? Necesitará una invitación para volver."],
+"Device removed":["기기를 제거했습니다","デバイスを削除しました","设备已移除","Dispositivo quitado"],
+"No expiry":["만료 없음","期限なし","不过期","Sin caducidad"],
+"7 days":["7일","7 日","7 天","7 días"],
+"30 days":["30일","30 日","30 天","30 días"],
+"Named and shared by many devices. You can download installers or make a new code later.":["이름을 붙여 여러 기기가 같이 씁니다. 나중에 설치 파일을 받거나 코드를 새로 만들 수 있습니다.","名前を付けて複数のデバイスで共有します。あとからインストーラーのダウンロードやコードの再作成ができます。","命名后可由多台设备共用。之后可以下载安装程序或生成新代码。","Con nombre y compartida por varios dispositivos. Después puedes descargar instaladores o crear un código nuevo."],
+"One device can join once within 24 hours.":["기기 하나가 24시간 안에 한 번 참여할 수 있습니다.","1 台のデバイスが 24 時間以内に 1 回参加できます。","一台设备可在 24 小时内加入一次。","Un dispositivo puede unirse una vez en 24 horas."],
+"One-time":["1회용","1 回限り","一次性","Un solo uso"],
+"Name":["이름","名前","名称","Nombre"],
+"e.g. Family":["예: 가족","例: 家族","例如：家人","p. ej. Familia"],
+"Expires":["만료","有効期限","有效期","Caduca"],
+"Cancel":["취소","キャンセル","取消","Cancelar"],
+"Create":["만들기","作成","创建","Crear"],
+"Enter a name":["이름을 입력하세요","名前を入力してください","请输入名称","Escribe un nombre"],
+"An invite named '{name}' already exists. A new code makes the old one unusable.":["'{name}' 초대가 이미 있습니다. 새 코드를 만들면 이전 코드는 쓸 수 없게 됩니다.","「{name}」という招待はすでにあります。新しいコードを作ると以前のコードは使えなくなります。","名为“{name}”的邀请已存在。生成新代码后旧代码将失效。","Ya existe una invitación llamada «{name}». Un código nuevo inutiliza el anterior."],
+"Invite '{name}' created":["'{name}' 초대를 만들었습니다","招待「{name}」を作成しました","已创建邀请“{name}”","Invitación «{name}» creada"],
+"One-time invite created":["1회용 초대를 만들었습니다","1 回限りの招待を作成しました","已创建一次性邀请","Invitación de un solo uso creada"],
+"Installers are under {button} in the list.":["설치 파일은 목록의 {button}에서 받을 수 있습니다.","インストーラーは一覧の {button} から入手できます。","可在列表的 {button} 中获取安装程序。","Los instaladores están en {button} en la lista."],
+"This code is shown only now.":["이 코드는 지금만 볼 수 있습니다.","このコードは今だけ表示されます。","此代码仅显示这一次。","Este código solo se muestra ahora."],
+"Scan it with a phone or copy the code to share it.":["휴대폰으로 찍거나 코드를 복사해 전달하세요.","スマートフォンで読み取るか、コードをコピーして共有してください。","用手机扫码或复制代码分享。","Escanéalo con el móvil o copia el código para compartirlo."],
+"Done":["완료","完了","完成","Listo"],
+"Fetching the official client from GitHub. Only the first time takes a while…":["GitHub에서 공식 클라이언트를 받는 중입니다. 처음 한 번만 걸립니다…","GitHub から公式クライアントを取得中です。時間がかかるのは初回だけです…","正在从 GitHub 获取官方客户端，仅首次需要等待…","Descargando el cliente oficial de GitHub. Solo la primera vez tarda…"],
+"Couldn't fetch from GitHub: {error}":["GitHub에서 받지 못했습니다: {error}","GitHub から取得できませんでした: {error}","无法从 GitHub 获取：{error}","No se pudo descargar de GitHub: {error}"],
+"Choose file":["파일 선택","ファイルを選択","选择文件","Elegir archivo"],
+"Installer files for {os}":["{os}용 설치 파일 준비","{os} 用のインストーラーファイル","{os} 安装程序文件","Archivos del instalador para {os}"],
+"This server has no retail programs for {os}. Upload the files below, built on {os} or taken from a release, and from then on this server makes {os} installers.":["이 서버에는 {os}용 retail 프로그램이 없습니다. {os}에서 빌드했거나 배포판에서 받은 아래 파일을 올리면, 이후로는 이 서버가 {os}용 설치 파일을 만들어 줍니다.","このサーバーには {os} 用の retail プログラムがありません。{os} でビルドしたかリリースから入手した以下のファイルをアップロードすると、以後このサーバーが {os} 用インストーラーを作成します。","此服务器没有适用于 {os} 的 retail 程序。上传下列文件（在 {os} 上构建或从发布版获取）后，此服务器即可生成 {os} 安装程序。","Este servidor no tiene programas de retail para {os}. Sube los archivos de abajo, compilados en {os} o tomados de una versión publicada, y desde entonces este servidor creará instaladores para {os}."],
+"All files are ready.":["모든 파일이 준비됐습니다.","すべてのファイルが揃いました。","所有文件均已就绪。","Todos los archivos están listos."],
+"Uploading {name}…":["{name} 올리는 중…","{name} をアップロード中…","正在上传 {name}…","Subiendo {name}…"],
+"Uploaded {name}":["{name}을(를) 올렸습니다","{name} をアップロードしました","已上传 {name}","{name} subido"],
+};
+const LANGS=["ko","ja","zh","es"];
+const LANG=(navigator.languages||[navigator.language]).map(l=>String(l).slice(0,2).toLowerCase()).find(l=>l==="en"||LANGS.includes(l))||"en";
+const COL=LANGS.indexOf(LANG);
+// t("Seen {n} min ago",{n:5}): the text in the page's language, placeholders filled in
+function t(en,vars){let s=(COL>=0&&TR[en]?.[COL])||en;for(const k in vars||{})s=s.split("{"+k+"}").join(vars[k]);return s}
+document.documentElement.lang=LANG;
+document.querySelectorAll("[data-t]").forEach(e=>e.textContent=t(e.textContent));
+document.title=t("retail server");
+
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let view=null,invites=[],nodes=[];
-function toast(t,ms=2400){const e=$("#toast");e.textContent=t;e.classList.add("show");clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove("show"),ms)}
+function toast(m,ms=2400){const e=$("#toast");e.textContent=m;e.classList.add("show");clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove("show"),ms)}
 async function api(path,body){
   const r=await fetch(path,body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json","X-Retail-Web":"1"},body:JSON.stringify(body)});
   if(r.headers.get("content-type")?.includes("svg"))return r.text();
   const j=await r.json().catch(()=>({}));
-  if(!r.ok)throw new Error(j.error||("오류 "+r.status));
+  if(!r.ok)throw new Error(j.error||t("Error {status}",{status:r.status}));
   return j;
 }
 async function act(path,body,msg){closeMenus();try{const j=await api(path,body??{});if(msg)toast(msg);await load(true);return j}catch(e){toast(e.message)}}
-function copy(t){navigator.clipboard?.writeText(t).then(()=>toast("복사했습니다"),()=>prompt("복사하세요",t))}
+function copy(text){navigator.clipboard?.writeText(text).then(()=>toast(t("Copied")),()=>prompt(t("Copy this"),text))}
 function closeMenus(except){document.querySelectorAll("details.menu[open]").forEach(d=>{if(d!==except)d.open=false})}
 document.addEventListener("click",e=>{if(!e.target.closest("details.menu"))closeMenus()});
 document.addEventListener("toggle",e=>{if(e.target.matches?.("details.menu")&&e.target.open)closeMenus(e.target)},true);
-const menu=(label,items,cls="")=>`<details class="menu"><summary class="btn ${cls}" aria-label="${label==="⋯"?"더 보기":esc(label)}">${label}</summary><div class="pop">${items}</div></details>`;
-function expires(t){if(t>=9e18)return"만료 없음";const h=Math.round((t-Date.now()/1000)/3600);return h<=0?"만료됨":h<48?h+"시간 뒤 만료":Math.round(h/24)+"일 뒤 만료"}
-function ago(t){if(!t)return"접속 기록 없음";const m=Math.floor((Date.now()/1000-t)/60);return m<1?"방금 접속":m<60?m+"분 전 접속":m<1440?Math.floor(m/60)+"시간 전 접속":Math.floor(m/1440)+"일 전 접속"}
-function routerText(r){if(!r)return"자동 열기 꺼짐";return r.kind==="opened"?`${r.method}로 열림 (TCP ${r.tcp}, UDP ${r.udp})`:"자동으로 열지 못함"}
-function noticeText(n){if(!n)return"";if(n.kind==="cgnat")return`공유기의 외부 주소(${n.router_ip})가 사설 주소입니다(CGNAT). 다른 네트워크의 기기는 보조 노드 없이 이 서버에 접속할 수 없고, 같은 네트워크의 기기는 참여할 수 있습니다.`;return`공유기가 포트를 자동으로 열지 않았습니다. 다른 네트워크의 기기가 접속하려면 공유기에서 TCP ${n.tcp}와 UDP ${n.udp}를 이 컴퓨터로 포트포워딩하거나 도메인을 지정하세요.`}
-async function shareBlock(code){let svg="";try{svg=await api("/api/qr",{text:code})}catch{}return`<div class="qr">${svg}</div><div class="text"><div class="code">${esc(code)}</div><div><button onclick="copy(this.closest('.text').querySelector('.code').textContent)">코드 복사</button></div></div>`}
+const menu=(label,items,cls="")=>`<details class="menu"><summary class="btn ${cls}" aria-label="${label==="⋯"?esc(t("More")):esc(label)}">${esc(label)}</summary><div class="pop">${items}</div></details>`;
+function expires(at){if(at>=9e18)return t("Never expires");const h=Math.round((at-Date.now()/1000)/3600);return h<=0?t("Expired"):h<48?t("Expires in {n} h",{n:h}):t("Expires in {n} d",{n:Math.round(h/24)})}
+function ago(at){if(!at)return t("Never connected");const m=Math.floor((Date.now()/1000-at)/60);return m<1?t("Seen just now"):m<60?t("Seen {n} min ago",{n:m}):m<1440?t("Seen {n} h ago",{n:Math.floor(m/60)}):t("Seen {n} d ago",{n:Math.floor(m/1440)})}
+function routerText(r){if(!r)return t("Automatic opening is off");return r.kind==="opened"?t("Opened with {method} (TCP {tcp}, UDP {udp})",r):t("Could not open automatically")}
+function noticeText(n){if(!n)return"";if(n.kind==="cgnat")return t("The router's external address ({ip}) is private (CGNAT). Devices on other networks can't reach this server without a helper node; devices on the same network can still join.",{ip:n.router_ip});return t("The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",n)}
+async function shareBlock(code){let svg="";try{svg=await api("/api/qr",{text:code})}catch{}return`<div class="qr">${svg}</div><div class="text"><div class="code">${esc(code)}</div><div><button onclick="copy(this.closest('.text').querySelector('.code').textContent)">${esc(t("Copy code"))}</button></div></div>`}
 async function showShare(title,code){closeMenus();$("#shareTitle").textContent=title;$("#shareBody").innerHTML=await shareBlock(code);$("#shareDlg").showModal()}
+// A translated string with one bolded label in it
+const withButton=(en,label)=>esc(t(en,{button:"\u0000"})).replace("\u0000",`<b>${esc(t(label))}</b>`);
 
 function render(){
   const s=view.server;
-  $("#state").textContent=s.running?"실행 중":"꺼짐";$("#state").className="pill"+(s.running?" on":"");
+  $("#state").textContent=t(s.running?"Running":"Off");$("#state").className="pill"+(s.running?" on":"");
   if(!s.running){
-    $("#server").innerHTML=`<div class="card pad"><p style="margin-top:0">이 기기에서 네트워크 서버가 꺼져 있습니다. 켜면 이 기기가 서버가 되고, 초대로 다른 기기를 들일 수 있습니다.</p>${s.last_error?`<div class="notice">${esc(s.last_error)}</div>`:""}<button class="primary" onclick="act('/api/server/start',{},'서버를 켰습니다')">서버 켜기</button></div>`;
+    $("#server").innerHTML=`<div class="card pad"><p style="margin-top:0">${esc(t("The network server on this device is off. Turn it on to make this device the server and invite other devices."))}</p>${s.last_error?`<div class="notice">${esc(s.last_error)}</div>`:""}<button class="primary" onclick="act('/api/server/start',{},t('Server turned on'))">${esc(t("Turn on server"))}</button></div>`;
     $("#networked").hidden=true;return;
   }
-  const rows=[["밖에서 접속할 주소",s.public||"다른 네트워크에서는 접속할 수 없음"],["이 네트워크",(s.lan||[]).slice(0,3).join(", ")||"-"],["공유기 포트",routerText(s.router)]];
-  if(s.reality)rows.push(["REALITY",`켜짐 · ${s.reality}처럼 보임`]);
-  if(s.helper)rows.push(["보조 노드",`${s.helper} · ${s.helper_linked?"연결됨":"연결 안 됨"}`]);
+  const rows=[[t("Address from outside"),s.public||t("Not reachable from other networks")],[t("This network"),(s.lan||[]).slice(0,3).join(", ")||"-"],[t("Router ports"),routerText(s.router)]];
+  if(s.reality)rows.push(["REALITY",t("On · looks like {site}",{site:s.reality})]);
+  if(s.helper)rows.push([t("Helper node"),`${s.helper} · ${t(s.helper_linked?"Connected":"Not connected")}`]);
   if((s.fronts||[]).length)rows.push(["CDN",s.fronts.join(", ")]);
   const notice=noticeText(s.notice);
-  $("#server").innerHTML=`<div class="card pad"><dl class="rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${notice?`<div class="notice">${esc(notice)}</div>`:""}<button class="danger" onclick="if(confirm('서버를 끄면 모든 기기의 연결이 끊깁니다. 기기 등록은 남아서, 다시 켜면 이어집니다.'))act('/api/server/stop',{},'서버를 껐습니다')">서버 끄기</button></div>`;
+  $("#server").innerHTML=`<div class="card pad"><dl class="rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${notice?`<div class="notice">${esc(notice)}</div>`:""}<button class="danger" onclick="stopServer()">${esc(t("Turn off server"))}</button></div>`;
   $("#networked").hidden=false;
 
   // Named invites first, then single-use ones still open, newest first
@@ -132,63 +248,65 @@ function render(){
   const clients=view.clients||[];
   $("#invites").innerHTML=invites.length?invites.map((i,k)=>{
     if(!i.name){
-      const kind=i.reusable?"재사용 초대":"1회용 초대";
-      return`<div class="item"><div class="main"><div class="name">${kind} <span class="pill">#${i.id}</span></div><div class="meta">${i.reusable?i.uses+"대 참여":"아직 쓰이지 않음"} · ${expires(i.expires_at)} · 코드는 만들 때만 볼 수 있음</div></div>
-      <div class="side">${menu("⋯",`<button class="danger" onclick="revoke(${k})">만료</button>`,"icon")}</div></div>`;
+      const kind=t(i.reusable?"Reusable invite":"One-time invite");
+      return`<div class="item"><div class="main"><div class="name">${esc(kind)} <span class="pill">#${i.id}</span></div><div class="meta">${esc(i.reusable?t("{n} joined",{n:i.uses}):t("Not used yet"))} · ${esc(expires(i.expires_at))} · ${esc(t("the code was shown only when created"))}</div></div>
+      <div class="side">${menu("⋯",`<button class="danger" onclick="revoke(${k})">${esc(t("Expire"))}</button>`,"icon")}</div></div>`;
     }
-    const dl=clients.map(c=>!c.missing.length?`<a href="/download/${i.id}/${encodeURIComponent(c.id)}" onclick="closeMenus();toast('설치 파일을 만드는 중입니다')">${esc(c.label)}용</a>`
-      :c.fetchable?`<button onclick="getClient(${i.id},'${esc(c.id)}')">${esc(c.label)}용</button>`
-      :`<button class="sub" onclick="openUpload('${esc(c.id)}')">${esc(c.label)}: 파일 올리기…</button>`).join("");
-    return`<div class="item"><div class="main"><div class="name">${esc(i.name)}</div><div class="meta">여러 기기용 · ${i.uses}대 참여 · ${expires(i.expires_at)}</div></div>
-    <div class="side">${menu("받기 ▾",dl)}${menu("⋯",`<button onclick="codeOf(${k},'qr')">코드·QR 보기</button><button onclick="codeOf(${k},'copy')">코드 복사</button><button onclick="regen(${k})">새 코드 만들기</button><button class="danger" onclick="revoke(${k})">만료</button>`,"icon")}</div></div>`}).join(""):`<div class="empty">아직 초대가 없습니다. <b>초대 만들기</b>로 시작하세요.</div>`;
+    const dl=clients.map(c=>!c.missing.length?`<a href="/download/${i.id}/${encodeURIComponent(c.id)}" onclick="closeMenus();toast(t('Preparing the installer…'))">${esc(t("For {os}",{os:c.label}))}</a>`
+      :c.fetchable?`<button onclick="getClient(${i.id},'${esc(c.id)}')">${esc(t("For {os}",{os:c.label}))}</button>`
+      :`<button class="sub" onclick="openUpload('${esc(c.id)}')">${esc(t("{os}: upload files…",{os:c.label}))}</button>`).join("");
+    return`<div class="item"><div class="main"><div class="name">${esc(i.name)}</div><div class="meta">${esc(t("Multi-device"))} · ${esc(t("{n} joined",{n:i.uses}))} · ${esc(expires(i.expires_at))}</div></div>
+    <div class="side">${menu(t("Download ▾"),dl)}${menu("⋯",`<button onclick="codeOf(${k},'qr')">${esc(t("Show code and QR"))}</button><button onclick="codeOf(${k},'copy')">${esc(t("Copy code"))}</button><button onclick="regen(${k})">${esc(t("New code"))}</button><button class="danger" onclick="revoke(${k})">${esc(t("Expire"))}</button>`,"icon")}</div></div>`}).join(""):`<div class="empty">${withButton("No invites yet. Start with {button}.","Create invite")}</div>`;
 
   nodes=(s.nodes||[]).slice().sort((a,b)=>(view.own_ip===b.ip)-(view.own_ip===a.ip)||b.online-a.online||a.hostname.localeCompare(b.hostname));
   const online=nodes.filter(n=>n.online).length;
-  $("#count").textContent=nodes.length?`${nodes.length}대 중 ${online}대 연결`:"";
+  $("#count").textContent=nodes.length?t("{online} of {total} connected",{online,total:nodes.length}):"";
   $("#nodes").innerHTML=nodes.length?nodes.map((n,k)=>{const self=view.own_ip===n.ip;const allowed=view.admins.includes(n.id);
-    return`<div class="item"><div class="main"><div class="name"><span class="dot${n.online?" on":""}"></span>${esc(n.hostname)}${self?'<span class="pill">이 기기</span>':""}${n.exit_node?'<span class="pill">Exit node</span>':""}${allowed&&!self?'<span class="pill on">관리 허용</span>':""}</div>
-    <div class="meta">${esc(n.ip)} · ${esc(n.os)} · ${n.online?"연결됨":ago(n.last_seen)}</div></div>
-    ${self?"":`<div class="side">${menu("⋯",`<button onclick="setAdmin(${k},${!allowed})">${allowed?"관리 허용 끄기":"이 기기에서 관리 허용"}</button><button class="danger" onclick="removeNode(${k})">기기 제거</button>`,"icon")}</div>`}</div>`}).join(""):`<div class="empty">아직 참여한 기기가 없습니다.</div>`;
-  $("#meshNote").textContent=view.mesh_url?`관리를 허용한 기기는 retail에 연결된 상태에서 ${view.mesh_url} 로 이 페이지를 열 수 있습니다.`:"";
+    return`<div class="item"><div class="main"><div class="name"><span class="dot${n.online?" on":""}"></span>${esc(n.hostname)}${self?`<span class="pill">${esc(t("This device"))}</span>`:""}${n.exit_node?'<span class="pill">Exit node</span>':""}${allowed&&!self?`<span class="pill on">${esc(t("Can manage"))}</span>`:""}</div>
+    <div class="meta">${esc(n.ip)} · ${esc(n.os)} · ${esc(n.online?t("Connected"):ago(n.last_seen))}</div></div>
+    ${self?"":`<div class="side">${menu("⋯",`<button onclick="setAdmin(${k},${!allowed})">${esc(t(allowed?"Stop allowing management":"Allow managing from this device"))}</button><button class="danger" onclick="removeNode(${k})">${esc(t("Remove device"))}</button>`,"icon")}</div>`}</div>`}).join(""):`<div class="empty">${esc(t("No devices have joined yet."))}</div>`;
+  $("#meshNote").textContent=view.mesh_url?t("Devices allowed to manage can open this page at {url} while connected to retail.",{url:view.mesh_url}):"";
 }
 async function load(force){if(!force&&(document.querySelector("details.menu[open]")||document.querySelector("dialog[open]")))return;
   try{view=await api("/api/status");render()}catch(e){$("#server").innerHTML=`<div class="card pad"><div class="notice">${esc(e.message)}</div></div>`}}
 
-async function codeOf(k,how){closeMenus();const i=invites[k];try{const j=await api(`/api/invites/${i.id}/code`,{});how==="qr"?showShare(`${i.name} 초대`,j.code):copy(j.code)}catch(e){toast(e.message)}}
-function regen(k){const i=invites[k];if(confirm(`'${i.name}' 초대의 새 코드를 만듭니다. 이전 코드와 그 코드가 든 설치 파일은 더 이상 쓸 수 없고, 이미 참여한 기기는 그대로입니다.`))act("/api/invites",{name:i.name},"새 코드를 만들었습니다")}
-function revoke(k){const i=invites[k];if(confirm(`${i.name?`'${i.name}'`:"이"} 초대를 만료합니다. 이미 참여한 기기는 그대로입니다.`))act(`/api/invites/${i.id}/revoke`,{},"만료했습니다")}
-function setAdmin(k,allowed){const n=nodes[k];act(`/api/nodes/${n.id}/admin`,{allowed},allowed?`${n.hostname}에서 이 페이지를 열 수 있습니다`:"관리 허용을 껐습니다")}
-function removeNode(k){const n=nodes[k];if(confirm(`${n.hostname}을(를) 네트워크에서 제거합니다. 다시 들어오려면 초대가 필요합니다.`))act(`/api/nodes/${n.id}/delete`,{},"기기를 제거했습니다")}
+function stopServer(){if(confirm(t("Turning the server off disconnects every device. Their registrations stay, so they reconnect when it is back on.")))act("/api/server/stop",{},t("Server turned off"))}
+async function codeOf(k,how){closeMenus();const i=invites[k];try{const j=await api(`/api/invites/${i.id}/code`,{});how==="qr"?showShare(t("Invite '{name}'",{name:i.name}),j.code):copy(j.code)}catch(e){toast(e.message)}}
+function regen(k){const i=invites[k];if(confirm(t("Make a new code for '{name}'? The old code and installers that contain it stop working; devices that already joined stay.",{name:i.name})))act("/api/invites",{name:i.name},t("New code made"))}
+function revoke(k){const i=invites[k];if(confirm(i.name?t("Expire the invite '{name}'? Devices that already joined stay.",{name:i.name}):t("Expire this invite? Devices that already joined stay.")))act(`/api/invites/${i.id}/revoke`,{},t("Invite expired"))}
+function setAdmin(k,allowed){const n=nodes[k];act(`/api/nodes/${n.id}/admin`,{allowed},allowed?t("{host} can open this page now",{host:n.hostname}):t("Management turned off"))}
+function removeNode(k){const n=nodes[k];if(confirm(t("Remove {host} from the network? It will need an invite to come back.",{host:n.hostname})))act(`/api/nodes/${n.id}/delete`,{},t("Device removed"))}
 
 // Creating an invite: one dialog for both kinds
 let draft={kind:"multi",ttl:null};
 function openCreate(){draft={kind:"multi",ttl:null};drawCreate();$("#createDlg").showModal();setTimeout(()=>$("#cName")?.focus(),50)}
 function drawCreate(){
   const multi=draft.kind==="multi";
-  const ttls=[[null,"만료 없음"],[168,"7일"],[720,"30일"]];
-  $("#createBody").innerHTML=`<h3>초대 만들기</h3><p class="muted small" style="margin:0 0 14px">${multi?"이름을 붙여 여러 기기가 같이 씁니다. 나중에 설치 파일을 받거나 코드를 새로 만들 수 있습니다.":"기기 하나가 24시간 안에 한 번 참여할 수 있습니다."}</p>
-  <div class="seg"><button class="${multi?"on":""}" onclick="draft.kind='multi';drawCreate()">여러 기기용</button><button class="${multi?"":"on"}" onclick="draft.kind='once';drawCreate()">1회용</button></div>
-  ${multi?`<div class="field"><label for="cName">이름</label><input id="cName" maxlength="40" placeholder="예: 가족" value="${esc(draft.name||"")}" oninput="draft.name=this.value" onkeydown="if(event.key==='Enter')create()"></div>
-  <div class="field"><label>만료</label><div class="seg">${ttls.map(([v,l])=>`<button class="${draft.ttl===v?"on":""}" onclick="draft.ttl=${v};drawCreate()">${l}</button>`).join("")}</div></div>`:""}
-  <div class="actions"><button onclick="$('#createDlg').close()">취소</button><button class="primary" onclick="create()">만들기</button></div>`;
+  const ttls=[[null,"No expiry"],[168,"7 days"],[720,"30 days"]];
+  $("#createBody").innerHTML=`<h3>${esc(t("Create invite"))}</h3><p class="muted small" style="margin:0 0 14px">${esc(t(multi?"Named and shared by many devices. You can download installers or make a new code later.":"One device can join once within 24 hours."))}</p>
+  <div class="seg"><button class="${multi?"on":""}" onclick="draft.kind='multi';drawCreate()">${esc(t("Multi-device"))}</button><button class="${multi?"":"on"}" onclick="draft.kind='once';drawCreate()">${esc(t("One-time"))}</button></div>
+  ${multi?`<div class="field"><label for="cName">${esc(t("Name"))}</label><input id="cName" maxlength="40" placeholder="${esc(t("e.g. Family"))}" value="${esc(draft.name||"")}" oninput="draft.name=this.value" onkeydown="if(event.key==='Enter')create()"></div>
+  <div class="field"><label>${esc(t("Expires"))}</label><div class="seg">${ttls.map(([v,l])=>`<button class="${draft.ttl===v?"on":""}" onclick="draft.ttl=${v};drawCreate()">${esc(t(l))}</button>`).join("")}</div></div>`:""}
+  <div class="actions"><button onclick="$('#createDlg').close()">${esc(t("Cancel"))}</button><button class="primary" onclick="create()">${esc(t("Create"))}</button></div>`;
 }
 async function create(){
   const multi=draft.kind==="multi";const name=(draft.name||"").trim();
-  if(multi&&!name)return toast("이름을 입력하세요");
-  if(multi&&(view.server.invites||[]).some(i=>i.name===name)&&!confirm(`'${name}' 초대가 이미 있습니다. 새 코드를 만들면 이전 코드는 쓸 수 없게 됩니다.`))return;
+  if(multi&&!name)return toast(t("Enter a name"));
+  if(multi&&(view.server.invites||[]).some(i=>i.name===name)&&!confirm(t("An invite named '{name}' already exists. A new code makes the old one unusable.",{name})))return;
   try{
     const j=await api("/api/invites",multi?{name,ttl_hours:draft.ttl}:{reusable:false});
     await load(true);
-    $("#createBody").innerHTML=`<h3>${multi?`'${esc(name)}' 초대를 만들었습니다`:"1회용 초대를 만들었습니다"}</h3><p class="muted small" style="margin:0 0 14px">${multi?"설치 파일은 목록의 <b>받기</b>에서 받을 수 있습니다. ":"이 코드는 지금만 볼 수 있습니다. "}휴대폰으로 찍거나 코드를 복사해 전달하세요.</p><div class="share">${await shareBlock(j.code)}</div><div class="actions"><button class="primary" onclick="$('#createDlg').close()">완료</button></div>`;
+    const lead=multi?withButton("Installers are under {button} in the list.","Download ▾"):esc(t("This code is shown only now."));
+    $("#createBody").innerHTML=`<h3>${esc(multi?t("Invite '{name}' created",{name}):t("One-time invite created"))}</h3><p class="muted small" style="margin:0 0 14px">${lead} ${esc(t("Scan it with a phone or copy the code to share it."))}</p><div class="share">${await shareBlock(j.code)}</div><div class="actions"><button class="primary" onclick="$('#createDlg').close()">${esc(t("Done"))}</button></div>`;
   }catch(e){toast(e.message)}
 }
 
 // A client this server has no programs for: fetched from the official
 // release, or uploaded by hand if that fails
 async function getClient(invite,id){
-  closeMenus();toast("GitHub에서 공식 클라이언트를 받는 중입니다. 처음 한 번만 걸립니다…",120000);
-  try{await api(`/api/clients/${encodeURIComponent(id)}/fetch`,{});toast("설치 파일을 만드는 중입니다");location.href=`/download/${invite}/${encodeURIComponent(id)}`;load(true)}
-  catch(e){toast("GitHub에서 받지 못했습니다: "+e.message,6000);openUpload(id)}
+  closeMenus();toast(t("Fetching the official client from GitHub. Only the first time takes a while…"),120000);
+  try{await api(`/api/clients/${encodeURIComponent(id)}/fetch`,{});toast(t("Preparing the installer…"));location.href=`/download/${invite}/${encodeURIComponent(id)}`;load(true)}
+  catch(e){toast(t("Couldn't fetch from GitHub: {error}",{error:e.message}),6000);openUpload(id)}
 }
 
 // Program files for a client this server lacks (a macOS build, say)
@@ -196,16 +314,16 @@ let target=null;
 function openUpload(id){closeMenus();target=(view.clients||[]).find(c=>c.id===id);drawUpload();$("#uploadDlg").showModal()}
 function drawUpload(){
   const c=target;if(!c)return;
-  const files=c.missing.map(f=>`<div class="file"><span>${esc(f)}</span><button onclick="pick('${esc(f)}')">파일 선택</button></div>`).join("");
-  $("#uploadBody").innerHTML=`<h3>${esc(c.label)}용 설치 파일 준비</h3><p class="muted small" style="margin:0">이 서버에는 ${esc(c.label)}용 retail 프로그램이 없습니다. ${esc(c.label)}에서 빌드했거나 배포판에서 받은 아래 파일을 올리면, 이후로는 이 서버가 ${esc(c.label)}용 설치 파일을 만들어 줍니다.</p>
-  ${c.missing.length?`<div class="files">${files}</div>`:`<p>모든 파일이 준비됐습니다.</p>`}<div class="actions"><button onclick="$('#uploadDlg').close()">${c.missing.length?"닫기":"완료"}</button></div>`;
+  const files=c.missing.map(f=>`<div class="file"><span>${esc(f)}</span><button onclick="pick('${esc(f)}')">${esc(t("Choose file"))}</button></div>`).join("");
+  $("#uploadBody").innerHTML=`<h3>${esc(t("Installer files for {os}",{os:c.label}))}</h3><p class="muted small" style="margin:0">${esc(t("This server has no retail programs for {os}. Upload the files below, built on {os} or taken from a release, and from then on this server makes {os} installers.",{os:c.label}))}</p>
+  ${c.missing.length?`<div class="files">${files}</div>`:`<p>${esc(t("All files are ready."))}</p>`}<div class="actions"><button onclick="$('#uploadDlg').close()">${esc(t(c.missing.length?"Close":"Done"))}</button></div>`;
 }
 function pick(name){const inp=document.createElement("input");inp.type="file";inp.onchange=()=>inp.files[0]&&send(name,inp.files[0]);inp.click()}
 async function send(name,file){
-  toast(`${name} 올리는 중…`);
+  toast(t("Uploading {name}…",{name}));
   try{const r=await fetch(`/api/clients/${encodeURIComponent(target.id)}/${encodeURIComponent(name)}`,{method:"POST",headers:{"X-Retail-Web":"1","Content-Type":"application/octet-stream"},body:file});
-    const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||("오류 "+r.status));
-    toast(`${name}을(를) 올렸습니다`);await load(true);target=(view.clients||[]).find(c=>c.id===target.id);drawUpload();
+    const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||t("Error {status}",{status:r.status}));
+    toast(t("Uploaded {name}",{name}));await load(true);target=(view.clients||[]).find(c=>c.id===target.id);drawUpload();
   }catch(e){toast(e.message)}
 }
 load(true);setInterval(load,5000);

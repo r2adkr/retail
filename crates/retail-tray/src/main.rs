@@ -2,7 +2,7 @@
 //! windows (no native widgets, no web view), all talking to retaild over the
 //! local API.
 //!
-//! `retail-tray --preview out.png [--settings | --server] [--dark] [--state <name>]`
+//! `retail-tray --preview out.png [--settings | --server] [--dark] [--lang <en|ko|ja|zh|es>] [--state <name>]`
 //! renders a window to a PNG without opening it. Popup states are `connected`,
 //! `stopped`, `login`, `offline`, `many`, `exit` and `exit-menu`. Settings
 //! adds `change`, and the server window takes `idle` or `running`.
@@ -14,6 +14,7 @@ mod api;
 mod config;
 mod dashboard;
 mod draw;
+mod i18n;
 mod icon;
 mod input;
 mod install;
@@ -43,6 +44,7 @@ use crate::api::{ActionKind, ApiEvent, Command, Origin, ServerCommand};
 use crate::dashboard::{DashAction, Dashboard};
 use crate::config::{Config, ThemePref};
 use crate::settings::{AUTH_KEY, DEVICE, SERVER, Settings, SettingsAction};
+use crate::i18n::{LangPref, tr, trf};
 use crate::text::Fonts;
 use crate::tray::{Anchor, Tray};
 use crate::ui::{Action, Ui, View};
@@ -231,7 +233,7 @@ impl App {
             Action::Copy(text) => {
                 self.ui.menu = None;
                 let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.clone())).is_ok();
-                let msg = if ok { format!("{text} 복사함") } else { "클립보드를 쓸 수 없습니다".into() };
+                let msg = if ok { trf("Copied {text}", &[("text", &text)]) } else { tr("Can't use the clipboard").into() };
                 self.ui.toast = Some((msg, Instant::now()));
             }
             Action::OpenSettings => {
@@ -306,6 +308,8 @@ impl App {
         self.settings.focus = None;
         self.settings.cursor = None;
         self.settings.changing = false;
+        self.settings.adding = false;
+        self.settings.server_menu = None;
         self.settings.confirm_logout = None;
         self.settings.inputs[AUTH_KEY].clear();
         self.update_poll_rate();
@@ -411,9 +415,9 @@ impl App {
                 if let Some(inv) = &d.invite {
                     let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(inv.code.clone())).is_ok();
                     d.message = Some(if ok {
-                        ("초대 코드를 복사했습니다.".into(), false)
+                        (tr("Invite code copied.").into(), false)
                     } else {
-                        ("클립보드를 쓸 수 없습니다".into(), true)
+                        (tr("Can't use the clipboard").into(), true)
                     });
                 }
             }
@@ -442,16 +446,40 @@ impl App {
             SettingsAction::Connect => self.connect(),
             SettingsAction::StartChange => {
                 st.changing = true;
+                st.adding = false;
                 st.message = None;
-                st.inputs[AUTH_KEY].clear();
-                st.prefill();
-                st.inputs[SERVER].select_all();
-                st.focus = Some(SERVER);
             }
             SettingsAction::Cancel => {
-                st.changing = false;
+                // From the form back to the list, from the list back to the account
+                if st.adding && (st.logged_in() || !st.servers().is_empty()) {
+                    st.adding = false;
+                } else {
+                    st.changing = false;
+                    st.adding = false;
+                }
                 st.message = None;
                 st.focus = None;
+            }
+            SettingsAction::AddServer => {
+                st.adding = true;
+                st.message = None;
+                st.inputs[SERVER].clear();
+                st.inputs[AUTH_KEY].clear();
+                st.prefill();
+                st.focus = Some(SERVER);
+            }
+            SettingsAction::SwitchServer(server) => {
+                if !st.is_busy() {
+                    st.busy = Some(Instant::now());
+                    st.message = None;
+                    let _ = self.commands.send(Command::Switch(server));
+                }
+            }
+            SettingsAction::ServerMenu(_) => {}
+            SettingsAction::ForgetServer(server) => {
+                st.busy = Some(Instant::now());
+                st.message = None;
+                let _ = self.commands.send(Command::Forget(server));
             }
             SettingsAction::Logout => {
                 if st.logout_armed() {
@@ -467,6 +495,14 @@ impl App {
                 self.config.theme = pref;
                 self.config.save();
                 self.apply_theme();
+            }
+            SettingsAction::LangMenu => {}
+            SettingsAction::Lang(pref) => {
+                self.config.language = pref;
+                self.config.save();
+                i18n::set(pref);
+                self.settings.lang = pref;
+                self.redraw_all();
             }
             SettingsAction::AdvertiseExit(on) => {
                 let req = retail_proto::api::PrefsRequest { advertise_exit_node: Some(on), ..Default::default() };
@@ -494,12 +530,12 @@ impl App {
             return;
         }
         if !(server.starts_with("https://") || server.starts_with("http://")) {
-            st.message = Some(("초대 코드(retail1.…)나 https://로 시작하는 서버 주소를 붙여 넣으세요".into(), true));
+            st.message = Some((tr("Paste an invite code (retail1.…) or a server address starting with https://").into(), true));
             st.focus = Some(SERVER);
             return;
         }
         if auth_key.is_empty() {
-            st.message = Some(("서버에서 받은 인증 키를 입력하세요".into(), true));
+            st.message = Some((tr("Enter the auth key from the server").into(), true));
             st.focus = Some(AUTH_KEY);
             return;
         }
@@ -516,6 +552,9 @@ impl App {
         let st = &mut self.settings;
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
+                if std::mem::take(&mut st.lang_open) || st.server_menu.take().is_some() {
+                    return;
+                }
                 if st.focus.take().is_none() {
                     st.changing = false;
                 }
@@ -596,11 +635,15 @@ impl App {
                 let st = &mut self.settings;
                 st.busy = None;
                 st.message = Some(match kind {
-                    ActionKind::Logout => ("로그아웃했습니다. 이 기기의 키를 지웠습니다.".into(), false),
-                    ActionKind::Prefs => ("저장했습니다.".into(), false),
-                    _ => (format!("{}에 연결했습니다", s.server.as_deref().unwrap_or("서버")), false),
+                    ActionKind::Logout => (tr("Logged out. This device's keys were deleted.").into(), false),
+                    ActionKind::Prefs => (tr("Saved.").into(), false),
+                    ActionKind::Forget => (tr("Removed from the list.").into(), false),
+                    _ => (trf("Connected to {server}", &[("server", &s.server.as_deref().map_or(tr("the server").to_string(), settings::server_label))]), false),
                 });
-                st.changing = false;
+                if kind != ActionKind::Forget {
+                    st.changing = false;
+                }
+                st.adding = false;
                 st.inputs[AUTH_KEY].clear();
                 self.on_status(Ok(s));
             }
@@ -755,7 +798,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                     let action = self.settings.cursor.and_then(|(x, y)| self.settings.action_at(x, y));
+                    // Any click closes the language list; its own button toggles it
+                    let was_open = std::mem::take(&mut self.settings.lang_open);
+                    let menu = self.settings.server_menu.take();
                     match action {
+                        Some(SettingsAction::LangMenu) => self.settings.lang_open = !was_open,
+                        Some(SettingsAction::ServerMenu(i)) => self.settings.server_menu = (menu != Some(i)).then_some(i),
                         Some(a) => self.run_settings_action(a),
                         None => self.settings.focus = None,
                     }
@@ -764,6 +812,16 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                     self.settings_key(&event);
                     self.redraw_settings();
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let rows = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y / 40.0) as i32,
+                    };
+                    let over = self.settings.cursor.is_some_and(|(x, y)| self.settings.over_server_list(x, y));
+                    if rows != 0 && over && self.settings.scroll_servers(rows) {
+                        self.redraw_settings();
+                    }
                 }
                 WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => self.redraw_settings(),
                 _ => {}
@@ -888,6 +946,8 @@ fn main() {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "retail-tray-preview.png".into());
         let state = args.iter().position(|a| a == "--state").and_then(|i| args.get(i + 1)).map_or("connected", |s| s.as_str());
         let dark = args.iter().any(|a| a == "--dark");
+        let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).and_then(|l| LangPref::parse(l));
+        i18n::set(lang.unwrap_or(LangPref::En));
         let result = if args.iter().any(|a| a == "--settings") {
             preview::render_settings(&out, state, dark)
         } else if args.iter().any(|a| a == "--server") {
@@ -932,11 +992,12 @@ fn main() {
     });
 
     let config = Config::load();
+    i18n::set(config.language);
     let mut app = App {
         proxy,
         fonts,
         ui: Ui::new(false),
-        settings: Settings::new(false, config.theme),
+        settings: Settings::new(false, config.theme, config.language),
         config,
         popup: None,
         settings_win: None,
@@ -1023,6 +1084,16 @@ mod preview {
             },
             memory_peak: Some(9_437_184),
             control_via: None,
+            servers: if backend == BackendState::NeedsLogin {
+                vec![]
+            } else {
+                let saved = |server: &str, last: u8, current| retail_proto::api::SavedServer {
+                    server: server.into(),
+                    ip: Some(std::net::Ipv4Addr::new(100, 64, 0, last)),
+                    current,
+                };
+                vec![saved("https://vpn.example.com", 1, true), saved("https://home.example.net:8443", 7, false), saved("https://203.0.113.24", 3, false)]
+            },
         }))
     }
 
@@ -1047,8 +1118,26 @@ mod preview {
     /// a server error. `--state change` shows "Change server".
     pub fn render_settings(out: &str, state: &str, dark: bool) -> Result<(), String> {
         let fonts = Fonts::load()?;
-        let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System });
-        st.view = sample(if state == "change" { "connected" } else { state });
+        let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System }, crate::LangPref::System);
+        st.view = sample(if matches!(state, "change" | "server-menu" | "many-servers" | "language") { "connected" } else { state });
+        st.lang_open = state == "language";
+        if state == "many-servers" {
+            st.changing = true;
+            st.server_scroll = 2;
+            if let View::Status(s) = &mut st.view {
+                for (i, host) in ["office.example.org", "lab.example.edu", "198.51.100.7", "cabin.example.net"].iter().enumerate() {
+                    s.servers.push(retail_proto::api::SavedServer {
+                        server: format!("https://{host}"),
+                        ip: Some(std::net::Ipv4Addr::new(100, 64, 1, i as u8 + 1)),
+                        current: false,
+                    });
+                }
+            }
+        }
+        if state == "server-menu" {
+            st.changing = true;
+            st.server_menu = Some(1);
+        }
         if state == "login" || state == "change" {
             st.changing = state == "change";
             st.inputs[SERVER].set("https://vpn.example.com");

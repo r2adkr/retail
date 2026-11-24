@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum::extract::Path;
 use retail_proto::api::{
-    ApiError, HelperStartRequest, InviteRequest, PrefsRequest, ServerStartRequest, SystemProxy, UpRequest,
+    ApiError, HelperStartRequest, InviteRequest, PrefsRequest, ServerSelect, ServerStartRequest, SystemProxy, UpRequest,
 };
 
 use crate::backend::Backend;
@@ -27,6 +27,8 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
         .route("/up", post(up))
         .route("/down", post(down))
         .route("/logout", post(logout))
+        .route("/servers/switch", post(switch_server))
+        .route("/servers/forget", post(forget_server))
         .route("/prefs", post(prefs))
         .route("/server", get(server_status))
         .route("/server/start", post(server_start))
@@ -96,6 +98,20 @@ async fn down(State(b): State<Arc<Backend>>) -> Response {
 
 async fn logout(State(b): State<Arc<Backend>>) -> Response {
     match b.logout().await {
+        Ok(()) => Json(b.status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn switch_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSelect>) -> Response {
+    match b.switch_server(&req.server).await {
+        Ok(()) => Json(b.status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn forget_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSelect>) -> Response {
+    match b.forget_server(&req.server).await {
         Ok(()) => Json(b.status().await).into_response(),
         Err(e) => failed(e),
     }

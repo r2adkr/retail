@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use retail_proto::LOCAL_API_ADDR;
 use retail_proto::api::{
-    ApiError, BackendState, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerStartRequest, ServerStatus,
+    ApiError, BackendState, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
     StatusResponse, UpRequest,
 };
 
@@ -35,8 +35,20 @@ enum Cmd {
     },
     /// Disconnect, keeping the registration
     Down,
-    /// Disconnect and forget this node's key and registration
+    /// Disconnect and forget this node's key and registration with the current server
     Logout,
+    /// List the servers this device has joined
+    Servers,
+    /// Leave the current server (it stays saved) and connect to a saved one
+    Switch {
+        /// The server's URL, or a unique part of it
+        server: String,
+    },
+    /// Remove a saved server (logs out if it is the current one)
+    Forget {
+        /// The server's URL, or a unique part of it
+        server: String,
+    },
     /// Show connection state and peers
     Status {
         /// Print raw JSON
@@ -217,6 +229,26 @@ async fn main() -> Result<()> {
             client.post::<(), StatusResponse>("/logout", None).await?;
             println!("logged out");
         }
+        Cmd::Servers => {
+            let st: StatusResponse = client.get("/status").await?;
+            if st.servers.is_empty() {
+                println!("no saved servers");
+            }
+            for s in &st.servers {
+                let ip = s.ip.map(|ip| ip.to_string()).unwrap_or_default();
+                println!("{} {:<40} {ip}", if s.current { "*" } else { " " }, s.server);
+            }
+        }
+        Cmd::Switch { server } => {
+            let server = saved_server(&client, &server).await?;
+            let st: StatusResponse = client.post("/servers/switch", Some(&ServerSelect { server })).await?;
+            print_status(&st);
+        }
+        Cmd::Forget { server } => {
+            let server = saved_server(&client, &server).await?;
+            client.post::<_, StatusResponse>("/servers/forget", Some(&ServerSelect { server: server.clone() })).await?;
+            println!("forgot {server}");
+        }
         Cmd::Status { json } => {
             let st: StatusResponse = client.get("/status").await?;
             if json {
@@ -389,6 +421,20 @@ fn human_bytes(n: u64) -> String {
         i += 1;
     }
     if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[i]) }
+}
+
+/// The saved server `name` means: its exact URL, or the one URL containing it
+async fn saved_server(client: &Client, name: &str) -> Result<String> {
+    let st: StatusResponse = client.get("/status").await?;
+    if st.servers.iter().any(|s| s.server == name) {
+        return Ok(name.to_string());
+    }
+    let matches: Vec<&str> = st.servers.iter().map(|s| s.server.as_str()).filter(|s| s.contains(name)).collect();
+    match matches[..] {
+        [one] => Ok(one.to_string()),
+        [] => anyhow::bail!("no saved server matches {name} (see `retail servers`)"),
+        _ => anyhow::bail!("{name} matches several saved servers: {}", matches.join(", ")),
+    }
 }
 
 fn print_status(st: &StatusResponse) {

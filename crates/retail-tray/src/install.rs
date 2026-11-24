@@ -4,8 +4,12 @@
 //! start at boot (Windows Task Scheduler, systemd, launchd), joins with the
 //! invite inside, then registers and starts the tray app for the user.
 //!
-//! Flags: `--install` (the raised step), `--uninstall`, `--package-info`,
-//! and for tests `--prefix DIR` (install under DIR), `--no-service` (start
+//! On a device already in another network it asks whether to switch; the
+//! daemon then leaves that network (keeping it among the saved servers) and
+//! joins this one.
+//!
+//! Flags: `--install` (the raised step), `--switch` (it may leave another
+//! network), `--uninstall`, `--package-info`, and for tests `--prefix DIR` (install under DIR), `--no-service` (start
 //! the daemon directly instead of registering it), `--no-autostart`.
 
 use std::fs::File;
@@ -14,7 +18,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use retail_proto::api::BackendState;
 use retail_proto::package::{Manifest, read_manifest, safe_name};
+
+use crate::i18n::{tr, trf};
 
 const API_WAIT: Duration = Duration::from_secs(30);
 
@@ -22,12 +29,19 @@ struct Opts {
     prefix: Option<PathBuf>,
     service: bool,
     autostart: bool,
+    /// The user agreed to leave the network this device is in
+    switch: bool,
 }
 
 impl Opts {
     fn parse(args: &[String]) -> Self {
         let prefix = args.iter().position(|a| a == "--prefix").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-        Opts { prefix, service: !args.iter().any(|a| a == "--no-service"), autostart: !args.iter().any(|a| a == "--no-autostart") }
+        Opts {
+            prefix,
+            service: !args.iter().any(|a| a == "--no-service"),
+            autostart: !args.iter().any(|a| a == "--no-autostart"),
+            switch: args.iter().any(|a| a == "--switch"),
+        }
     }
 
     /// Hands the same test flags to the raised step
@@ -39,6 +53,9 @@ impl Opts {
         }
         if !self.service {
             out.push("--no-service".into());
+        }
+        if self.switch {
+            out.push("--switch".into());
         }
         out
     }
@@ -70,7 +87,7 @@ fn api_addr() -> SocketAddr {
 /// Handles the installer flags, or this executable being a package. Returns
 /// the exit code when it did; `None` means start the tray app as usual.
 pub fn run(args: &[String]) -> Option<i32> {
-    let opts = Opts::parse(args);
+    let mut opts = Opts::parse(args);
     let me = std::env::current_exe().ok()?;
     if args.iter().any(|a| a == "--uninstall") {
         return Some(report(uninstall(&opts)));
@@ -84,17 +101,40 @@ pub fn run(args: &[String]) -> Option<i32> {
         return Some(0);
     }
     let manifest = manifest?;
-    if retail_proto::invite::Invite::decode(&manifest.invite).is_err() {
-        message("retail", "This installer is damaged: its invite code is unreadable.");
+    crate::i18n::set(crate::config::Config::load().language);
+    let Ok(invite) = retail_proto::invite::Invite::decode(&manifest.invite) else {
+        message("retail", tr("This installer is damaged: its invite code is unreadable."));
         return Some(2);
-    }
+    };
     if args.iter().any(|a| a == "--install") {
         return Some(report(privileged(&me, &manifest, &opts)));
     }
-    let network = if manifest.network.is_empty() { "a retail network".to_string() } else { format!("the retail network \"{}\"", manifest.network) };
-    if !confirm("retail", &format!("Install retail on this computer and join {network}?")) {
+    let network = if manifest.network.is_empty() {
+        tr("a retail network").to_string()
+    } else {
+        trf("the retail network \"{name}\"", &[("name", &manifest.network)])
+    };
+    // retail already here and in another network: switch rather than install
+    let target = format!("https://{}", invite.addrs[0]);
+    let current = crate::api::status_blocking(api_addr())
+        .ok()
+        .filter(|s| s.state != BackendState::NeedsLogin)
+        .and_then(|s| s.server)
+        .filter(|s| *s != target);
+    let (question, yes) = match &current {
+        Some(cur) => (
+            trf(
+                "This computer is connected to {current}. Leave it and switch to {network}? You can switch back in retail's settings.",
+                &[("current", &crate::settings::server_label(cur)), ("network", &network)],
+            ),
+            tr("Switch"),
+        ),
+        None => (trf("Install retail on this computer and join {network}?", &[("network", &network)]), tr("Install")),
+    };
+    if !confirm("retail", &question, yes) {
         return Some(1);
     }
+    opts.switch = current.is_some();
     let code = if is_admin() {
         report(privileged(&me, &manifest, &opts))
     } else {
@@ -112,7 +152,12 @@ pub fn run(args: &[String]) -> Option<i32> {
     {
         eprintln!("retail: could not start the tray app at sign-in: {e}");
     }
-    message("retail", &format!("retail is installed and this computer joined {network}."));
+    let done = if opts.switch {
+        trf("This computer switched to {network}.", &[("network", &network)])
+    } else {
+        trf("retail is installed and this computer joined {network}.", &[("network", &network)])
+    };
+    message("retail", &done);
     if opts.autostart {
         let _ = std::process::Command::new(&tray).spawn();
     }
@@ -156,7 +201,7 @@ fn privileged(me: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
         cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         cmd.spawn().map_err(|e| format!("starting retaild: {e}"))?;
     }
-    join(&m.invite)
+    join(&m.invite, o.switch)
 }
 
 /// Writes `len` bytes from `offset` to `dest`, replacing it atomically
@@ -176,33 +221,33 @@ fn copy_range(src: &mut File, offset: u64, len: u64, dest: &Path) -> Result<(), 
     std::fs::rename(&tmp, dest).map_err(err)
 }
 
-/// Waits for the daemon, then joins unless this device already belongs to
-/// a network: that one is kept, and the user is told how to switch.
-fn join(invite: &str) -> Result<(), String> {
+/// Waits for the daemon, then joins. A device in another network leaves it
+/// only if the user agreed (`switch`); the daemon keeps it as a saved server.
+fn join(invite: &str, switch: bool) -> Result<(), String> {
     let addr = api_addr();
     let start = Instant::now();
     let status = loop {
         match crate::api::status_blocking(addr) {
             Ok(s) => break s,
             Err(_) if start.elapsed() < API_WAIT => std::thread::sleep(Duration::from_millis(300)),
-            Err(e) => return Err(format!("retaild did not start: {e}")),
+            Err(e) => return Err(trf("retaild did not start: {error}", &[("error", &e)])),
         }
     };
     let code = retail_proto::invite::Invite::decode(invite).map_err(|e| e.to_string())?;
     let target = format!("https://{}", code.addrs[0]);
     match status.server {
-        Some(s) if status.state != retail_proto::api::BackendState::NeedsLogin && s != target => {
-            return Err(format!(
-                "retail is installed, but this computer already belongs to another network ({s}). \
-                 To switch, sign out in retail's Settings (or run `retail logout`) and run this installer again."
+        Some(s) if !switch && status.state != BackendState::NeedsLogin && s != target => {
+            return Err(trf(
+                "retail is installed, but this computer already belongs to another network ({current}). To switch, run this installer again and choose to switch.",
+                &[("current", &crate::settings::server_label(&s))],
             ));
         }
-        Some(s) if s == target && status.state == retail_proto::api::BackendState::Running => return Ok(()),
+        Some(s) if s == target && status.state == BackendState::Running => return Ok(()),
         _ => {}
     }
     let body = serde_json::to_string(&retail_proto::api::UpRequest { invite: Some(invite.to_string()), ..Default::default() })
         .map_err(|e| e.to_string())?;
-    crate::api::post_blocking_timeout(addr, "/up", &body, Duration::from_secs(60)).map_err(|e| format!("joining failed: {e}"))
+    crate::api::post_blocking_timeout(addr, "/up", &body, Duration::from_secs(60)).map_err(|e| trf("Joining failed: {error}", &[("error", &e)]))
 }
 
 fn uninstall(o: &Opts) -> Result<(), String> {
@@ -474,7 +519,7 @@ fn message(title: &str, text: &str) {
 }
 
 #[cfg(windows)]
-fn confirm(title: &str, text: &str) -> bool {
+fn confirm(title: &str, text: &str, _yes: &str) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide(title).as_ptr(), MB_YESNO | MB_ICONQUESTION) == IDYES }
@@ -487,8 +532,12 @@ fn message(title: &str, text: &str) {
 }
 
 #[cfg(target_os = "macos")]
-fn confirm(title: &str, text: &str) -> bool {
-    let script = format!("display dialog \"{}\" with title \"{title}\" buttons {{\"Cancel\", \"Install\"}} default button 2", text.replace('"', "'"));
+fn confirm(title: &str, text: &str, yes: &str) -> bool {
+    let script = format!(
+        "display dialog \"{}\" with title \"{title}\" buttons {{\"{}\", \"{yes}\"}} default button 2 cancel button 1",
+        text.replace('"', "'"),
+        tr("Cancel")
+    );
     std::process::Command::new("osascript").args(["-e", &script]).status().is_ok_and(|s| s.success())
 }
 
@@ -501,11 +550,11 @@ fn message(title: &str, text: &str) {
 }
 
 #[cfg(target_os = "linux")]
-fn confirm(title: &str, text: &str) -> bool {
+fn confirm(title: &str, text: &str, yes: &str) -> bool {
     if std::env::var_os("RETAIL_INSTALL_YES").is_some() {
         return true;
     }
-    if let Ok(s) = std::process::Command::new("zenity").args(["--question", "--title", title, "--text", text]).status() {
+    if let Ok(s) = std::process::Command::new("zenity").args(["--question", "--title", title, "--text", text, "--ok-label", yes, "--cancel-label", tr("Cancel")]).status() {
         return s.success();
     }
     print!("{text} [y/N] ");

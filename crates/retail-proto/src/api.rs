@@ -246,6 +246,26 @@ pub struct StatusResponse {
     /// "REALITY via proxy"
     #[serde(default)]
     pub control_via: Option<String>,
+    /// Servers this device has joined, the current one included
+    #[serde(default)]
+    pub servers: Vec<SavedServer>,
+}
+
+/// A server this device has joined and can switch back to without an invite
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedServer {
+    /// Base URL, which also identifies it
+    pub server: String,
+    /// This device's address in that network
+    pub ip: Option<Ipv4Addr>,
+    /// The one in use
+    pub current: bool,
+}
+
+/// `POST /servers/switch` and `POST /servers/forget`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerSelect {
+    pub server: String,
 }
 
 /// Persisted daemon settings

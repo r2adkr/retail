@@ -467,11 +467,17 @@ pub fn clients_dir(state_dir: &std::path::Path) -> PathBuf {
 
 const PAGE: &str = include_str!("page.html");
 
-const SIGN_IN_PAGE: &str = r#"<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+const SIGN_IN_PAGE: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>retail</title><style>body{font:15px system-ui,sans-serif;background:#f6f7f9;color:#1f2328;display:grid;place-items:center;min-height:100vh;margin:0}
 main{background:#fff;border-radius:14px;padding:28px 32px;max-width:420px;box-shadow:0 1px 3px #0001}h1{font-size:18px;margin:0 0 10px}code{background:#eef2ff;padding:2px 6px;border-radius:6px}
 @media(prefers-color-scheme:dark){body{background:#16181d;color:#e6e8eb}main{background:#1f2228}code{background:#24304a}}</style>
-<main><h1>로그인이 필요합니다</h1><p>트레이의 서버 창에서 <b>웹에서 열기</b>를 누르거나, 이 PC에서 <code>retail server web</code>을 실행하세요. 링크는 2분 동안 한 번만 쓸 수 있습니다.</p></main></html>"#;
+<main><h1>Sign-in needed</h1><p>Click <b>Manage on the web</b> in the tray's server window, or run <code>retail server web</code> on this computer. A link works once, within 2 minutes.</p></main>
+<script>const T={ko:["로그인이 필요합니다","트레이의 서버 창에서 <b>웹에서 관리</b>를 누르거나, 이 컴퓨터에서 <code>retail server web</code>을 실행하세요. 링크는 2분 안에 한 번만 쓸 수 있습니다."],
+ja:["ログインが必要です","トレイのサーバー画面で <b>Web で管理</b> を押すか、このコンピューターで <code>retail server web</code> を実行してください。リンクは 2 分以内に 1 回だけ使えます。"],
+zh:["需要登录","请在托盘的服务器窗口中点击 <b>在网页中管理</b>，或在这台电脑上运行 <code>retail server web</code>。链接只能在 2 分钟内使用一次。"],
+es:["Hay que iniciar sesión","Pulsa <b>Gestionar en la web</b> en la ventana del servidor de la bandeja, o ejecuta <code>retail server web</code> en este equipo. Un enlace sirve una vez, en 2 minutos."]};
+const l=(navigator.languages||[navigator.language]).map(x=>String(x).slice(0,2).toLowerCase()).find(x=>T[x]||x==="en");
+if(T[l]){document.documentElement.lang=l;document.querySelector("h1").textContent=T[l][0];document.querySelector("p").innerHTML=T[l][1]}</script></html>"#;
 
 #[cfg(test)]
 mod tests;

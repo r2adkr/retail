@@ -8,6 +8,7 @@ use retail_proto::api::{BackendState, PeerStatus, StatusResponse};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::draw::{Canvas, Theme, contains, shade, with_alpha};
+use crate::i18n::{tr, trf};
 use crate::text::{Fonts, Weight};
 
 pub const WIDTH: f32 = 340.0;
@@ -172,28 +173,28 @@ impl Ui {
         self.header(&mut c, &t);
         let mut y = HEADER_H;
         match self.view.clone() {
-            View::Loading => self.message(&mut c, &t, y, "retaild에 연결하는 중…", "", None),
+            View::Loading => self.message(&mut c, &t, y, tr("Connecting to retaild…"), "", None),
             View::Offline => self.message(
                 &mut c,
                 &t,
                 y,
                 "retaild is not running",
-                if cfg!(windows) { "retaild.exe를 관리자 권한으로 실행하세요." } else { "sudo retaild로 실행하세요." },
+                if cfg!(windows) { tr("Run retaild.exe as administrator.") } else { tr("Run it with sudo retaild.") },
                 None,
             ),
             View::Status(s) if s.state == BackendState::NeedsLogin => self.message(
                 &mut c,
                 &t,
                 y,
-                "이 기기는 아직 로그인하지 않았습니다",
-                "초대 코드로 연결하면 네트워크에 참여합니다.",
-                Some("로그인…"),
+                tr("This device hasn't logged in yet"),
+                tr("Connect with an invite code to join the network."),
+                Some(tr("Log in…")),
             ),
             View::Status(s) if s.state == BackendState::Stopped => {
                 y = self.device_card(&mut c, &t, &s, y + 4.0);
-                c.text("연결이 꺼져 있습니다", PAD, y + 36.0, 14.0, Weight::Semibold, t.text, None);
+                c.text(tr("The connection is off"), PAD, y + 36.0, 14.0, Weight::Semibold, t.text, None);
                 c.text(
-                    "retail을 켜면 다른 기기에 연결됩니다.",
+                    tr("Turn on retail to connect to your other devices."),
                     PAD,
                     y + 57.0,
                     12.5,
@@ -228,22 +229,22 @@ impl Ui {
 
         c.text("retail", lx + 40.0, 35.0, 16.0, Weight::Semibold, t.text, None);
         let (label, color) = match &self.view {
-            View::Loading => ("시작하는 중…", t.gray),
-            View::Offline => ("retaild가 꺼져 있음", t.red),
+            View::Loading => (tr("Starting…"), t.gray),
+            View::Offline => (tr("retaild is not running"), t.red),
             View::Status(s) => match (s.state, s.control_connected) {
-                (BackendState::NeedsLogin, _) => ("로그인 필요", t.amber),
-                (BackendState::Stopped, _) => ("연결 꺼짐", t.gray),
+                (BackendState::NeedsLogin, _) => (tr("Login needed"), t.amber),
+                (BackendState::Stopped, _) => (tr("Disconnected"), t.gray),
                 (BackendState::Running, true) => match exit_in_use(s) {
-                    Some((_, false)) => ("연결됨 · Exit node로 인터넷 사용", t.accent),
-                    Some((_, true)) => ("Exit node 꺼짐 · 인터넷 차단됨", t.red),
-                    None => ("연결됨", t.accent),
+                    Some((_, false)) => (tr("Connected · internet via exit node"), t.accent),
+                    Some((_, true)) => (tr("Exit node offline · internet blocked"), t.red),
+                    None => (tr("Connected"), t.accent),
                 },
-                (BackendState::Running, false) => ("연결됨 · 서버에 닿지 않음", t.amber),
+                (BackendState::Running, false) => (tr("Connected · can't reach the server"), t.amber),
             },
         };
         let label = match self.pending {
-            Some((true, at)) if at.elapsed() < Duration::from_secs(8) && !self.is_running() => "연결하는 중…",
-            Some((false, at)) if at.elapsed() < Duration::from_secs(8) && self.is_running() => "끊는 중…",
+            Some((true, at)) if at.elapsed() < Duration::from_secs(8) && !self.is_running() => tr("Connecting…"),
+            Some((false, at)) if at.elapsed() < Duration::from_secs(8) && self.is_running() => tr("Disconnecting…"),
             _ => label,
         };
         c.circle(lx + 44.0, 50.0, 3.5, color);
@@ -279,13 +280,13 @@ impl Ui {
         let r = Rect::from_xywh(x, y + 8.0, w, CARD_H - 8.0).unwrap();
         let hover = self.hovered(&r);
         c.fill_rrect(x, y + 8.0, w, CARD_H - 8.0, 10.0, if hover { t.hover } else { t.surface });
-        c.text("이 기기", x + 14.0, y + 27.0, 10.0, Weight::Semibold, t.dim, None);
+        c.text(tr("This device"), x + 14.0, y + 27.0, 10.0, Weight::Semibold, t.dim, None);
         c.text(&me.hostname, x + 14.0, y + 47.0, 14.0, Weight::Semibold, t.text, Some(w - 140.0));
         let ip = me.ip.to_string();
         let ipw = c.measure(&ip, 13.0, Weight::Regular);
         c.text(&ip, x + w - 14.0 - ipw, y + 47.0, 13.0, Weight::Regular, t.dim, None);
         if hover {
-            let hint = "눌러서 복사";
+            let hint = tr("Click to copy");
             let hw = c.measure(hint, 10.0, Weight::Regular);
             c.text(hint, x + w - 14.0 - hw, y + 27.0, 10.0, Weight::Regular, t.dim, None);
         }
@@ -295,14 +296,14 @@ impl Ui {
 
     fn devices(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, y: f32) -> f32 {
         let online = s.peers.iter().filter(|p| p.online).count();
-        c.text("기기", PAD, y + 22.0, 10.0, Weight::Semibold, t.dim, None);
-        let count = format!("{}대 중 {online}대 연결", s.peers.len());
+        c.text(tr("Devices"), PAD, y + 22.0, 10.0, Weight::Semibold, t.dim, None);
+        let count = trf("{online} of {total} connected", &[("online", &online), ("total", &s.peers.len())]);
         let cw = c.measure(&count, 11.0, Weight::Regular);
         c.text(&count, WIDTH - PAD - cw, y + 22.0, 11.0, Weight::Regular, t.dim, None);
         let mut y = y + SECTION_H;
 
         if s.peers.is_empty() {
-            c.text("아직 다른 기기가 없습니다.", PAD, y + 30.0, 13.0, Weight::Regular, t.dim, None);
+            c.text(tr("No other devices yet."), PAD, y + 30.0, 13.0, Weight::Regular, t.dim, None);
             return y + ROW_H;
         }
         let visible: Vec<&PeerStatus> = s.peers.iter().skip(self.scroll).take(MAX_ROWS).collect();
@@ -314,10 +315,10 @@ impl Ui {
             }
             let relayed = p.path.as_deref() == Some("relay");
             let (dot, path) = match (p.online, p.endpoint) {
-                (_, Some(_)) => (t.accent, "직접".to_string()),
-                (_, None) if relayed => (t.accent, "릴레이".to_string()),
-                (true, None) => (t.amber, "연결하는 중…".to_string()),
-                (false, None) => (t.gray, "꺼짐".to_string()),
+                (_, Some(_)) => (t.accent, tr("Direct").to_string()),
+                (_, None) if relayed => (t.accent, tr("Relay").to_string()),
+                (true, None) => (t.amber, tr("Connecting…").to_string()),
+                (false, None) => (t.gray, tr("Offline").to_string()),
             };
             c.circle(PAD + 5.0, y + ROW_H / 2.0, 4.5, dot);
             c.text(&p.hostname, PAD + 20.0, y + 23.0, 14.0, Weight::Regular, t.text, Some(WIDTH - 2.0 * PAD - 120.0));
@@ -327,9 +328,9 @@ impl Ui {
             };
             let in_use = s.prefs.exit_node == Some(p.node_key);
             let (detail, detail_color) = match (in_use, p.online && p.exit_node) {
-                (true, true) => (format!("{detail} · Exit node로 사용 중"), t.accent),
-                (true, false) => ("Exit node 꺼짐 · 인터넷 차단됨".to_string(), t.red),
-                (false, _) if p.exit_node => (format!("{detail} · Exit node 가능"), t.dim),
+                (true, true) => (trf("{detail} · used as exit node", &[("detail", &detail)]), t.accent),
+                (true, false) => (tr("Exit node offline · internet blocked").to_string(), t.red),
+                (false, _) if p.exit_node => (trf("{detail} · can be an exit node", &[("detail", &detail)]), t.dim),
                 _ => (detail, t.dim),
             };
             c.text(&detail, PAD + 20.0, y + 40.0, 11.5, Weight::Regular, detail_color, Some(WIDTH - 2.0 * PAD - 120.0));
@@ -365,12 +366,12 @@ impl Ui {
 
     /// The "⋯" menu of a device, under its button (or above it near the bottom)
     fn device_menu(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, p: &PeerStatus, top: f32) {
-        let mut items = vec![MenuItem { label: "IP 주소 복사".into(), action: Action::Copy(p.ip.to_string()) }];
+        let mut items = vec![MenuItem { label: tr("Copy IP address").into(), action: Action::Copy(p.ip.to_string()) }];
         let in_use = s.prefs.exit_node == Some(p.node_key);
         if in_use {
-            items.push(MenuItem { label: "Exit node 사용 중지".into(), action: Action::SetExit(String::new()) });
+            items.push(MenuItem { label: tr("Stop using exit node").into(), action: Action::SetExit(String::new()) });
         } else if p.exit_node && p.online {
-            items.push(MenuItem { label: "Exit node로 사용".into(), action: Action::SetExit(p.node_key.to_base64()) });
+            items.push(MenuItem { label: tr("Use as exit node").into(), action: Action::SetExit(p.node_key.to_base64()) });
         }
         let h = items.len() as f32 * MENU_ITEM_H + 8.0;
         let x = WIDTH - PAD - MENU_W;
@@ -431,7 +432,7 @@ impl Ui {
 
     /// Opens upwards from the gear
     fn gear_menu(&mut self, c: &mut Canvas, t: &Theme, footer_y: f32) {
-        let items = [("서버 관리", Action::OpenServer), ("설정", Action::OpenSettings), ("종료", Action::Quit)];
+        let items = [(tr("Manage server"), Action::OpenServer), (tr("Settings"), Action::OpenSettings), (tr("Quit"), Action::Quit)];
         let h = items.len() as f32 * MENU_ITEM_H + 8.0;
         let x = WIDTH - PAD - MENU_W;
         let y = footer_y - h + 4.0;
@@ -464,9 +465,9 @@ fn exit_in_use(s: &StatusResponse) -> Option<(String, bool)> {
 
 fn ago(secs: u64) -> String {
     match secs {
-        0..=59 => format!("{secs}초 전"),
-        60..=3599 => format!("{}분 전", secs / 60),
-        _ => format!("{}시간 전", secs / 3600),
+        0..=59 => trf("{n} s ago", &[("n", &secs)]),
+        60..=3599 => trf("{n} min ago", &[("n", &(secs / 60))]),
+        _ => trf("{n} h ago", &[("n", &(secs / 3600))]),
     }
 }
 

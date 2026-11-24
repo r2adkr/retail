@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Throughput comparison over the double-NAT namespace topology of e2e-netns.sh.
+# Throughput comparison over the double-NAT namespace topology of lib-netns.sh.
 # Each tunnel gets a 1-stream, reverse and 4-stream iperf3 run from hA to hB.
 #
 #   underlay          plain TCP from hA through its NAT, no tunnel
 #   retail            also peak RSS, offload and batching stats from the logs
-#   wireguard-go      Tailscale's userspace engine with GSO/GRO (needs
+#   wireguard-go      the official userspace WireGuard, with GSO/GRO (needs
 #                     wireguard-go and wireguard-tools)
 #   kernel WireGuard  in-kernel reference (needs wireguard-tools)
 #
@@ -12,56 +12,46 @@
 #   SECONDS_IPERF=10   duration of each iperf3 run
 #   WGGO=0             skip the wireguard-go reference
 #   KERNEL=0           skip the kernel WireGuard reference
+#   RUNS=3             run it all 3 times and print the averages too, to see
+#                      past run-to-run variance
 set -euo pipefail
+
+if [ "${RUNS:-1}" -gt 1 ]; then
+    out=$(mktemp)
+    for i in $(seq "$RUNS"); do
+        echo "--- run $i"
+        RUNS=1 bash "$0" "$@" 2>&1 | tee -a "$out"
+    done
+    echo "--- average of $RUNS runs (Mbit/s)"
+    grep -E '^(retail|wireguard-go|kernel WireGuard) ' "$out" | awk '
+        {
+            name = ($1 == "kernel") ? "kernel WireGuard" : $1
+            for (i = 1; i <= NF; i++) {
+                if ($i == "stream")  one[name] += $(i+1)
+                if ($i == "reverse") rev[name] += $(i+1)
+                if ($i == "streams") four[name] += $(i+1)
+            }
+            n[name]++
+        }
+        END { for (k in n) printf "%-16s 1 stream %6.0f | reverse %6.0f | 4 streams %6.0f\n", k, one[k]/n[k], rev[k]/n[k], four[k]/n[k] }'
+    rm -f "$out"
+    exit 0
+fi
 
 BIN="$(cd "${1:-target/release}" && pwd)"
 WORK=/tmp/retail-bench
 T="${SECONDS_IPERF:-10}"
 
-nsx() { local ns=$1; shift; ip netns exec "$ns" "$@"; }
-cli() { local s=$1; shift; ip netns exec "h$s" env RETAIL_API_TOKEN_FILE="$WORK/$s.token" "$BIN/retail" "$@"; }
-
+. "$(dirname "$0")/lib-netns.sh"
 cleanup() {
-    pkill -f "$BIN/retaild" 2>/dev/null || true
-    pkill -x iperf3 2>/dev/null || true
-    for _ in $(seq 50); do pgrep -f "$BIN/retaild" >/dev/null || break; sleep 0.1; done
-    for ns in hA hB rA rB; do ip netns del "$ns" 2>/dev/null || true; done
-    ip link del inetA 2>/dev/null || true
-    ip link del inetB 2>/dev/null || true
-    iptables -D FORWARD -i inetA -o inetB -j ACCEPT 2>/dev/null || true
-    iptables -D FORWARD -i inetB -o inetA -j ACCEPT 2>/dev/null || true
+    server_kill 2>/dev/null || true
+    pkill -f "wireguard-go wggo" 2>/dev/null || true
+    teardown
 }
 trap cleanup EXIT
 cleanup
 rm -rf "$WORK" && mkdir -p "$WORK"
-
-for ns in hA hB rA rB; do ip netns add "$ns"; nsx "$ns" ip link set lo up; done
-sysctl -qw net.ipv4.ip_forward=1
-setup_site() {
-    local s=$1 wan=$2 lan=$3
-    ip link add "inet$s" type veth peer name "wan$s"
-    ip link set "wan$s" netns "r$s"
-    ip addr add "$wan.1/24" dev "inet$s" && ip link set "inet$s" up
-    nsx "r$s" ip addr add "$wan.2/24" dev "wan$s"
-    nsx "r$s" ip link set "wan$s" up
-    nsx "r$s" ip route add default via "$wan.1"
-    ip link add "lan$s" netns "r$s" type veth peer name eth0 netns "h$s"
-    nsx "r$s" ip addr add "$lan.1/24" dev "lan$s"
-    nsx "r$s" ip link set "lan$s" up
-    nsx "h$s" ip addr add "$lan.10/24" dev eth0
-    nsx "h$s" ip link set eth0 up
-    nsx "h$s" ip route add default via "$lan.1"
-    nsx "r$s" sysctl -qw net.ipv4.ip_forward=1
-    nsx "r$s" iptables -t nat -A POSTROUTING -o "wan$s" -j MASQUERADE
-    for chain in FORWARD INPUT; do
-        nsx "r$s" iptables -A "$chain" -i "wan$s" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-        nsx "r$s" iptables -A "$chain" -i "wan$s" -j DROP
-    done
-}
-setup_site A 198.51.100 192.168.1
-setup_site B 198.51.101 192.168.2
-iptables -I FORWARD 1 -i inetA -o inetB -j ACCEPT
-iptables -I FORWARD 1 -i inetB -o inetA -j ACCEPT
+topology_up
 
 # Prints received Mbit/s of one iperf3 run from hA, or ERR after two failed attempts
 bw() {  # target [iperf args...]
@@ -122,7 +112,6 @@ cpu_busy() {
     echo $(( 100 * busy / (busy + idle) ))
 }
 
-. "$(dirname "$0")/lib-server.sh"
 server_start 443
 INVITE=$(server_invite)
 declare -A PID
@@ -145,8 +134,8 @@ run_suite "retail" "$IP_B" "${PID[A]}" "${PID[B]}"
 mem() { awk '/^VmHWM/ { printf "%.1f MiB", $2/1024 }' "/proc/$1/status"; }
 echo "    peak RSS: A $(mem "${PID[A]}"), B $(mem "${PID[B]}"); threads: $(ls /proc/"${PID[A]}"/task | wc -l)"
 echo "    offload: $(grep -hoE '(tso|uso|gso_segments|gro_segments)=[a-z0-9]+' "$WORK/nodeA.log" | sort -u | tr '\n' ' ')"
-for s in A B; do grep -h 'batching:' "$WORK/node$s.log" | head -2 | sed "s/.*batching:/    $s batching:/"; done
-for s in A B; do grep -h 'stages:' "$WORK/node$s.log" | head -2 | sed "s/.*stages:/    $s stages:/"; done
+for s in A B; do grep -h 'batching:' "$WORK/node$s.log" | head -2 | sed "s/.*batching:/    $s batching:/" || true; done
+for s in A B; do grep -h 'stages:' "$WORK/node$s.log" | head -2 | sed "s/.*stages:/    $s stages:/" || true; done
 kill "${PID[A]}" "${PID[B]}"; server_kill
 for _ in $(seq 50); do pgrep -f "$BIN/retaild" >/dev/null || break; sleep 0.1; done
 

@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Connectivity fallback scenarios on a double-NAT namespace topology.
+# End-to-end tests on Linux network namespaces: every way retail connects, falls
+# back and recovers, on the double-NAT topology of lib-netns.sh.
 #
-#   hA -- rA [NAT, firewall] --+-- root ns "internet" --+-- rB [NAT, firewall] -- hB
-#                                control server :443 (TCP), STUN :3478 (UDP)
-#
-# Usage: sudo scripts/fallback-netns.sh [BIN_DIR] [SCENARIO|all]
+# Usage: sudo scripts/netns-test.sh [BIN_DIR] [SCENARIO|all]
 #   KEEP=1              leave namespaces and processes running afterwards
-#   CONNECT_TIMEOUT=5   seconds A gets to reach B (40 for reality)
+#   DEBUG=1             KEEP=1, and print what each node knows (endpoints,
+#                       candidates, path) and its interesting log lines
+#   CONNECT_TIMEOUT=5   seconds A gets to reach B (more for slow ways)
+#   SOAK_SECONDS=240    length of the rekey scenario's transfer
 #
 # Scenarios (filters on both routers unless noted):
-#   direct        plain home-router NAT                      -> direct path, and
-#                 the local API refuses changes without its token
+#   direct        plain home-router NAT                      -> direct path. Also:
+#                 the local API refuses changes without its token, B's daemon
+#                 stops on SIGTERM and the tunnel comes back after a restart,
+#                 and the tunnel outlives the server going down while both
+#                 nodes reconnect once it is back
 #   udp-blocked   all outbound UDP dropped                   -> relay over TCP 443
 #   symmetric     symmetric NAT (MASQUERADE --random-fully)  -> relay
 #   tcp443-only   everything but TCP 443 dropped             -> relay over TCP 443
@@ -49,89 +53,56 @@
 #   helper        B hosts the network behind a router that opens nothing; a
 #                 helper node on the internet makes it reachable, and A joins
 #                 through it
+#   switch        a second server in its own namespace: A and B join it with
+#                 an invite, then switch back to the first without one and get
+#                 their old addresses back; a forgotten server leaves the list
+#   install       a client package from the server's web admin page installs
+#                 under a temporary prefix and joins; after the invite gets a
+#                 new code the old package is refused and the member stays
+#   rekey         (not in `all`) a long transfer across WireGuard's rekey points
+#                 (new handshake after ~120 s, old keys dropped after ~180 s),
+#                 sampling throughput, handshake age and peak memory
 #
 # Each scenario passes if A reaches B within CONNECT_TIMEOUT, the reported path
 # matches the expectation, a short iperf3 runs, idle RSS stays below 20 MiB
-# and peak RSS below 20 MiB (the user's budget). Except in host-*, the
-# server is a retaild hosting the network in the root namespace (HTTPS with its
-# own certificate), and nodes join with an invite code.
+# and peak RSS below 20 MiB (the user's budget). Except in host-* and helper,
+# the server is a retaild hosting the network in the root namespace (HTTPS
+# with its own certificate), and nodes join with an invite code.
 set -u
 
 BIN="$(cd "${1:-target/release}" && pwd)"
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 WHICH="${2:-all}"
-WORK=/tmp/retail-fallback
+WORK=/tmp/retail-netns
+[ "${DEBUG:-0}" = 1 ] && KEEP=1
+SOAK_SECONDS="${SOAK_SECONDS:-240}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-5}"
 IDLE_LIMIT_KB=$((20 * 1024))
 PEAK_LIMIT_KB=$((20 * 1024))
-. "$(dirname "$0")/lib-server.sh"
-
-nsx() { local ns=$1; shift; ip netns exec "$ns" "$@"; }
-cli() { local s=$1; shift; ip netns exec "h$s" env RETAIL_API_TOKEN_FILE="$WORK/$s.token" "$BIN/retail" "$@"; }
+. "$SCRIPTS/lib-netns.sh"
 
 cleanup() {
-    pkill -f "$BIN/retaild" 2>/dev/null || true
-    pkill -x iperf3 2>/dev/null || true
     pkill -x miniupnpd 2>/dev/null || true
     pkill -f "s_server -accept 203.0.113.81:8443" 2>/dev/null || true
     pkill -x tinyproxy 2>/dev/null || true
     pkill -x tayga 2>/dev/null || true
     pkill -f "scripts/netns/" 2>/dev/null || true
+    pkill -f "http.server 8080 --bind 203.0.113.80" 2>/dev/null || true
+    pkill -f "$WORK/" 2>/dev/null || true
+    server_kill 2>/dev/null || true
+    ip link del web0 2>/dev/null || true
     ip link del web1 2>/dev/null || true
     ip link del web2 2>/dev/null || true
     rm -rf /etc/netns/hA /etc/netns/hB
-    pkill -f "http.server 8080 --bind 203.0.113.80" 2>/dev/null || true
-    for _ in $(seq 50); do pgrep -f "$BIN/retaild" >/dev/null || break; sleep 0.1; done
-    for ns in hA hB rA rB; do ip netns del "$ns" 2>/dev/null || true; done
-    ip link del inetA 2>/dev/null || true
-    ip link del inetB 2>/dev/null || true
-    iptables -D FORWARD -i inetA -o inetB -j ACCEPT 2>/dev/null || true
-    iptables -D FORWARD -i inetB -o inetA -j ACCEPT 2>/dev/null || true
-    ip6tables -D FORWARD -i inetA -o inetB -j ACCEPT 2>/dev/null || true
-    ip6tables -D FORWARD -i inetB -o inetA -j ACCEPT 2>/dev/null || true
-    ip link del web0 2>/dev/null || true
-}
-
-# site wan4 lan4 wan6 lan6 masquerade-options
-setup_site() {
-    local s=$1 wan=$2 lan=$3 wan6=$4 lan6=$5 masq=$6
-    ip link add "inet$s" type veth peer name "wan$s"
-    ip link set "wan$s" netns "r$s"
-    ip addr add "$wan.1/24" dev "inet$s"
-    ip -6 addr add "$wan6::1/64" dev "inet$s" nodad
-    ip link set "inet$s" up
-    nsx "r$s" ip addr add "$wan.2/24" dev "wan$s"
-    nsx "r$s" ip -6 addr add "$wan6::2/64" dev "wan$s" nodad
-    nsx "r$s" ip link set "wan$s" up
-    nsx "r$s" ip route add default via "$wan.1"
-    nsx "r$s" ip -6 route add default via "$wan6::1"
-    ip -6 route add "$lan6::/64" via "$wan6::2"
-
-    ip link add "lan$s" netns "r$s" type veth peer name eth0 netns "h$s"
-    nsx "r$s" ip addr add "$lan.1/24" dev "lan$s"
-    nsx "r$s" ip -6 addr add "$lan6::1/64" dev "lan$s" nodad
-    nsx "r$s" ip link set "lan$s" up
-    [ "${NAT64:-0}" = 1 ] || nsx "h$s" ip addr add "$lan.10/24" dev eth0
-    # Hosts get global IPv6 only in the ipv6 scenario, since elsewhere it would
-    # bypass the IPv4 NAT/firewall under test
-    [ "${HOST_V6:-0}" = 1 ] && nsx "h$s" ip -6 addr add "$lan6::10/64" dev eth0 nodad
-    nsx "h$s" ip link set eth0 up
-    [ "${NAT64:-0}" = 1 ] || nsx "h$s" ip route add default via "$lan.1"
-    [ "${HOST_V6:-0}" = 1 ] && nsx "h$s" ip -6 route add default via "$lan6::1"
-
-    nsx "r$s" sysctl -qw net.ipv4.ip_forward=1
-    nsx "r$s" sysctl -qw net.ipv6.conf.all.forwarding=1
-    # shellcheck disable=SC2086
-    nsx "r$s" iptables -t nat -A POSTROUTING -o "wan$s" -j MASQUERADE $masq
-    # Home-router firewall: nothing unsolicited from the WAN side, v4 and v6,
-    # except ICMPv6 to the router itself (neighbour discovery, as on real routers)
-    nsx "r$s" ip6tables -A INPUT -i "wan$s" -p ipv6-icmp -j ACCEPT
-    for t in iptables ip6tables; do
-        for chain in FORWARD INPUT; do
-            nsx "r$s" $t -A "$chain" -i "wan$s" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-            nsx "r$s" $t -A "$chain" -i "wan$s" -j DROP
-        done
-    done
+    for ns in hC hD s2; do ip netns del "$ns" 2>/dev/null || true; done
+    ip link del vS2 2>/dev/null || true
+    iptables -D FORWARD -i vS2 -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -o vS2 -j ACCEPT 2>/dev/null || true
+    ip link del vC 2>/dev/null || true
+    ip link del vD 2>/dev/null || true
+    iptables -D FORWARD -i vC -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i vD -j ACCEPT 2>/dev/null || true
+    teardown
 }
 
 # Outbound filters on both routers (LAN -> WAN), inserted ahead of everything
@@ -435,6 +406,169 @@ invite_first_addr() {
     python3 -c 'import sys,json,base64; c=sys.argv[1].split(".",1)[1]; print(json.loads(base64.urlsafe_b64decode(c+"="*(-len(c)%4)))["a"][0])' "$1"
 }
 
+# B's daemon restarts; the server goes away and comes back
+lifecycle_checks() {  # ip_b
+    local ip_b=$1 took
+    kill -TERM "${pid[B]}"
+    for _ in $(seq 50); do kill -0 "${pid[B]}" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "${pid[B]}" 2>/dev/null; then echo "  retaild ignored SIGTERM"; return 1; fi
+    start_node B
+    pid[B]=$NODE_PID
+    took=$(wait_ping "$ip_b" 60) || { echo "  tunnel did not come back after B restarted"; return 1; }
+    echo "  B stopped on SIGTERM; tunnel back ${took}s after it started again"
+
+    server_kill
+    sleep 1
+    nsx hA ping -c10 -i0.1 -q "$ip_b" | grep -q " 0% packet loss" \
+        || { echo "  tunnel broke while the server was down"; return 1; }
+    server_run
+    local t0 i
+    t0=$(date +%s.%N)
+    for i in $(seq 400); do
+        [ "$(cli A status --json | jq -r .control_connected)" = true ] \
+            && [ "$(cli B status --json | jq -r .control_connected)" = true ] && break
+        sleep 0.1
+    done
+    [ "$i" -lt 400 ] || { echo "  nodes did not reconnect to the server"; return 1; }
+    echo "  tunnel kept up without the server; both reconnected $(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN{printf "%.1f", b-a}')s after it came back"
+}
+
+# A second network, then back to the first without an invite
+switch_checks() {  # ip_b
+    local ip_a ip_b=$1 first second invite2 n
+    ip_a=$(cli A ip)
+    first=$(cli A status --json | jq -r .server)
+    # The second server: a server-only retaild in namespace s2, on the "internet"
+    ip netns add s2; nsx s2 ip link set lo up
+    ip link add vS2 type veth peer name eth0 netns s2
+    ip addr add 10.88.0.1/24 dev vS2; ip link set vS2 up
+    nsx s2 ip addr add 10.88.0.2/24 dev eth0; nsx s2 ip link set eth0 up
+    nsx s2 ip route add default via 10.88.0.1
+    iptables -I FORWARD 1 -i vS2 -j ACCEPT
+    iptables -I FORWARD 1 -o vS2 -j ACCEPT
+    s2() { nsx s2 env RETAIL_API_TOKEN_FILE="$WORK/s2.token" "$BIN/retail" "$@"; }
+    nsx s2 env RETAIL_API_TOKEN_FILE="$WORK/s2.token" RETAIL_NO_PORTMAP=1 RUST_LOG=retail_control=info \
+        "$BIN/retaild" --state-dir "$WORK/server2" --port 41690 >"$WORK/control2.log" 2>&1 &
+    for _ in $(seq 50); do s2 server status >/dev/null 2>&1 && break; sleep 0.1; done
+    s2 server start --no-join --port 443 >/dev/null || { echo "  second server did not start"; return 1; }
+    invite2=$(s2 server invite --reusable 2>/dev/null)
+
+    for s in A B; do
+        cli "$s" up --invite "$invite2" >/dev/null || { echo "  $s could not join the second server"; return 1; }
+    done
+    second=$(cli A status --json | jq -r .server)
+    n=$(cli A servers | wc -l)
+    echo "  joined $second; A lists $n servers"
+    [ "$n" = 2 ] && [ "$second" != "$first" ] || return 1
+    local ip_b2
+    ip_b2=$(cli B ip)
+    wait_ping "$ip_b2" 15 >/dev/null || { echo "  no ping to B in the second network"; return 1; }
+    [ "$(s2 server status --json | jq '.nodes | length')" = 2 ] || { echo "  the second server does not have both"; return 1; }
+
+    for s in A B; do
+        cli "$s" switch "$first" >/dev/null || { echo "  $s could not switch back"; return 1; }
+    done
+    [ "$(cli A ip)" = "$ip_a" ] && [ "$(cli B ip)" = "$ip_b" ] || { echo "  addresses changed: A $(cli A ip), B $(cli B ip)"; return 1; }
+    local took
+    took=$(wait_ping "$ip_b" 15) || { echo "  no ping after switching back"; return 1; }
+    echo "  switched back without an invite, same addresses, B answers after ${took}s"
+
+    cli A forget "$second" >/dev/null || { echo "  forget failed"; return 1; }
+    [ "$(cli A servers | wc -l)" = 1 ] || { echo "  the forgotten server is still listed"; return 1; }
+    echo "  the second server is forgotten"
+}
+
+# A long transfer across WireGuard's rekey points
+soak() {  # ip_b
+    local ip_b=$1
+    hs() { cli "$1" status --json | jq -r '.peers[0].last_handshake_secs // "none"'; }
+    hwm() { awk '/^VmHWM/ { printf "%.1f", $2/1024 }' "/proc/$1/status"; }
+    nsx hB iperf3 -s -D -B "$ip_b" >/dev/null; sleep 0.3
+    nsx hA iperf3 -c "$ip_b" -t "$SOAK_SECONDS" -i 10 -f m --forceflush >"$WORK/soak.txt" 2>&1 &
+    local iperf=$!
+    echo "    t(s)  handshake age A/B (s)  peak RSS A/B (MiB)"
+    for t in $(seq 10 10 "$SOAK_SECONDS"); do
+        sleep 10
+        printf "  %6s  %8s / %-8s     %s / %s\n" "$t" "$(hs A)" "$(hs B)" "$(hwm "${pid[A]}")" "$(hwm "${pid[B]}")"
+    done
+    wait "$iperf"
+    grep -E "^\[ *[0-9]+\] +[0-9.]+-[0-9.]+ +sec" "$WORK/soak.txt" | grep -vE "sender|receiver" \
+        | awk '{ printf "    %s s: %s %s, %s retransmits\n", $3, $7, $8, $9 }'
+    grep -E "sender|receiver" "$WORK/soak.txt" | sed 's/^/  /'
+    pkill -x iperf3 || true
+    # Every 10 s interval must have moved data
+    ! grep -E "^\[ *[0-9]+\] +[0-9.]+-[0-9.]+ +sec +0\.00 Bytes" "$WORK/soak.txt" | grep -q . \
+        || { echo "  the transfer stalled"; return 1; }
+}
+
+# The client package handed out by the web admin page. Its own topology: two
+# hosts straight on the "internet", hC installs and joins, hD gets refused
+install_test() {
+    host() {  # name veth subnet
+        ip netns add "$1"; nsx "$1" ip link set lo up
+        ip link add "$2" type veth peer name eth0 netns "$1"
+        ip addr add "$3.1/24" dev "$2"; ip link set "$2" up
+        nsx "$1" ip addr add "$3.10/24" dev eth0; nsx "$1" ip link set eth0 up
+        nsx "$1" ip route add default via "$3.1"
+        iptables -I FORWARD 1 -i "$2" -j ACCEPT
+    }
+    host hC vC 10.77.1
+    host hD vD 10.77.2
+    sysctl -qw net.ipv4.ip_forward=1
+
+    local ok=1 link port W jar id rc st state nodes
+    server_start 443
+    # The server's own web admin page, signed in from this machine
+    link=$(srv server web --print 2>/dev/null)
+    port=$(echo "$link" | sed -E 's#http://127.0.0.1:([0-9]+)/.*#\1#')
+    W="http://127.0.0.1:$port"
+    jar="$WORK/jar"
+    curl -s -m 3 -c "$jar" -o /dev/null "$link"
+    post() { curl -s -m 10 -b "$jar" -H 'X-Retail-Web: 1' -H 'Content-Type: application/json' -d "$2" "$W$1"; }
+    post /api/invites '{"name":"office"}' >/dev/null
+    id=$(curl -s -m 3 -b "$jar" "$W/api/status" | jq -r '.server.invites[] | select(.name=="office") | .id')
+    echo "  clients offered: $(curl -s -m 3 -b "$jar" "$W/api/status" | jq -r '[.clients[] | "\(.id) missing=\(.missing|join(","))"] | join("; ")')"
+    curl -s -m 60 -b "$jar" -o "$WORK/pkg-old" "$W/download/$id/linux-x86_64"
+    chmod +x "$WORK/pkg-old"
+    echo "  package: $(( $(stat -c %s "$WORK/pkg-old") / 1048576 )) MiB"
+
+    # hC runs the package: install under a prefix, start retaild, join
+    local t0
+    t0=$(date +%s.%N)
+    nsx hC env RETAIL_INSTALL_YES=1 RETAIL_API_TOKEN_FILE="$WORK/hC.token" \
+        "$WORK/pkg-old" --prefix "$WORK/hC" --no-service --no-autostart >"$WORK/install-hC.log" 2>&1
+    rc=$?
+    st=$(nsx hC env RETAIL_API_TOKEN_FILE="$WORK/hC.token" "$WORK/hC/bin/retail" status --json 2>/dev/null)
+    state=$(echo "$st" | jq -r .state)
+    echo "  hC: installer exit $rc, state $state after $(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN{printf "%.1f", b-a}')s; installed: $(ls "$WORK/hC/bin" | tr '\n' ' ')"
+    [ "$rc" = 0 ] && [ "$state" = running ] || { ok=0; cat "$WORK/install-hC.log"; }
+    cmp -s "$WORK/hC/bin/retail-tray" "$BIN/retail-tray" || { echo "  installed tray differs from the original"; ok=0; }
+
+    # A new code for the invite: the old package cannot join anymore
+    post /api/invites '{"name":"office"}' >/dev/null
+    nsx hD env RETAIL_INSTALL_YES=1 RETAIL_API_TOKEN_FILE="$WORK/hD.token" \
+        "$WORK/pkg-old" --prefix "$WORK/hD" --no-service --no-autostart >"$WORK/install-hD.log" 2>&1
+    rc=$?
+    if [ "$rc" != 0 ] && grep -qE "invalid, used or expired|wrong, already used, or expired" "$WORK/install-hD.log"; then
+        echo "  the old package no longer joins after a new code"
+    else
+        echo "  the old package still joined (exit $rc)"; cat "$WORK/install-hD.log"; ok=0
+    fi
+    nodes=$(curl -s -m 3 -b "$jar" "$W/api/status" | jq '[.server.nodes[]] | length')
+    [ "$nodes" = 1 ] && echo "  hC is still a member" || { echo "  members: $nodes"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
+# What each node knows, for DEBUG=1
+debug_dump() {
+    for s in A B; do
+        echo "--- node $s"
+        cli "$s" status --json 2>/dev/null \
+            | jq -c '{self: .self_node.endpoints, peer_candidates: .peers[0].candidates, endpoint: .peers[0].endpoint, path: .peers[0].path, hs: .peers[0].last_handshake_secs}'
+        grep -hE "STUN|dual_stack|endpoint|WARN|ERROR|relay|path" "$WORK/node$s.log" 2>/dev/null | sed 's/^.\{28\}//' | cut -c1-170 | head -12
+    done
+}
+
 run_scenario() {
     local sc=$1 masq="" expect="direct"
     case $sc in
@@ -448,27 +582,10 @@ run_scenario() {
     esac
     cleanup
     rm -rf "$WORK" && mkdir -p "$WORK"
-    for ns in hA hB rA rB; do ip netns add "$ns"; nsx "$ns" ip link set lo up; done
-    sysctl -qw net.ipv4.ip_forward=1
-    sysctl -qw net.ipv6.conf.all.forwarding=1
+    [ "$sc" = install ] && { install_test; return; }
     HOST_V6=0; [ "$sc" = ipv6 ] || [ "$sc" = nat64 ] && HOST_V6=1
     NAT64=0; [ "$sc" = nat64 ] && NAT64=1
-    setup_site A 198.51.100 192.168.1 2001:db8:100 2001:db8:a "$masq"
-    setup_site B 198.51.101 192.168.2 2001:db8:101 2001:db8:b "$masq"
-    iptables -I FORWARD 1 -i inetA -o inetB -j ACCEPT
-    iptables -I FORWARD 1 -i inetB -o inetA -j ACCEPT
-    ip6tables -I FORWARD 1 -i inetA -o inetB -j ACCEPT
-    ip6tables -I FORWARD 1 -i inetB -o inetA -j ACCEPT
-    # Fresh veths need a few seconds of link-local DAD before IPv6 neighbour
-    # discovery works. A real network is already warm, so wait it out here
-    # instead of charging it to the connect time
-    local warm="rA:2001:db8:101::2"
-    [ "$HOST_V6" = 1 ] && warm="hA:2001:db8:100::1 hB:2001:db8:101::1 $warm"
-    for pair in $warm; do
-        for _ in $(seq 50); do
-            nsx "${pair%%:*}" ping -6 -c1 -W0.2 "${pair#*:}" >/dev/null 2>&1 && break
-        done
-    done
+    topology_up "$masq"
     block "$sc"
 
     local invite
@@ -488,8 +605,8 @@ run_scenario() {
         code=$(start_helper)
         [ -n "$code" ] || { echo "  helper node did not start"; tail -5 "$WORK/helper.log"; return 1; }
         for s in A B; do
-            ip netns exec "h$s" env RETAIL_API_TOKEN_FILE="$WORK/$s.token" RUST_LOG="${RUST_LOG:-retaild=debug,retail_control=info}" "$BIN/retaild" --state-dir "$WORK/$s" >"$WORK/node$s.log" 2>&1 &
-            pid[$s]=$!
+            RUST_LOG="${RUST_LOG:-retaild=debug,retail_control=info}" start_node "$s"
+            pid[$s]=$NODE_PID
         done
         sleep 0.5
         cli B server start --helper "$code" >/dev/null || { echo "  hosting on B failed"; return 1; }
@@ -508,8 +625,8 @@ run_scenario() {
         NATPMP=yes; [ "$sc" = host-upnp ] && NATPMP=no
         start_upnp_router B
         for s in A B; do
-            ip netns exec "h$s" env RETAIL_API_TOKEN_FILE="$WORK/$s.token" RUST_LOG="${RUST_LOG:-retaild=debug,retail_control=info}" "$BIN/retaild" --state-dir "$WORK/$s" >"$WORK/node$s.log" 2>&1 &
-            pid[$s]=$!
+            RUST_LOG="${RUST_LOG:-retaild=debug,retail_control=info}" start_node "$s"
+            pid[$s]=$NODE_PID
         done
         sleep 0.5
         cli B server start >/dev/null || { echo "  hosting on B failed"; return 1; }
@@ -539,8 +656,8 @@ run_scenario() {
         [ -n "$invite" ] || { echo "  server did not start"; tail -5 "$WORK/control.log"; return 1; }
         for s in A B; do
             # shellcheck disable=SC2086
-            ip netns exec "h$s" env RETAIL_API_TOKEN_FILE="$WORK/$s.token" RUST_LOG="${RUST_LOG:-retaild=debug}" ${envs[$s]} "$BIN/retaild" --state-dir "$WORK/$s" >"$WORK/node$s.log" 2>&1 &
-            pid[$s]=$!
+            start_node "$s" ${envs[$s]}
+            pid[$s]=$NODE_PID
         done
         sleep 0.5
         [ "$sc" = proxy ] && cli A set --proxy http://u:p4ss@192.168.1.1:3128 >/dev/null
@@ -603,6 +720,13 @@ run_scenario() {
             echo "  local API accepted a change without the token"; ok=0
         fi
         ip netns exec hA env RETAIL_API_TOKEN_FILE=/nonexistent "$BIN/retail" status >/dev/null || { echo "  status needs no token"; ok=0; }
+        lifecycle_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = switch ] && [ "$ok" = 1 ]; then
+        switch_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = rekey ] && [ "$ok" = 1 ]; then
+        soak "$ip_b" || ok=0
     fi
     if [[ $sc == exit* ]] && [ "$ok" = 1 ]; then
         exit_checks "$sc" "$ip_b" || ok=0
@@ -726,7 +850,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper
+    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper switch install
 else
     set -- "$WHICH"
 fi
@@ -735,6 +859,7 @@ for sc in "$@"; do
     echo "== $sc"
     if run_scenario "$sc"; then results+=("PASS $sc"); else results+=("FAIL $sc"); fi
 done
+[ "${DEBUG:-0}" = 1 ] && debug_dump
 echo "== summary"
 printf '  %s\n' "${results[@]}"
 printf '%s\n' "${results[@]}" | grep -q FAIL && exit 1 || exit 0

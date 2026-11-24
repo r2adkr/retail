@@ -34,9 +34,94 @@ pub struct Persisted {
     pub server_reality: Option<retail_proto::invite::RealityInvite>,
     #[serde(default)]
     pub server_fronts: Vec<String>,
+    /// The invite this device joined the current server with, kept to join
+    /// again should the server have forgotten the device
+    #[serde(default)]
+    pub invite: Option<String>,
+    /// Every server joined, the current one included, to switch between
+    #[serde(default)]
+    pub saved: Vec<Profile>,
+}
+
+/// One server's registration: everything needed to reconnect without an invite.
+/// Each server gets its own key, so networks cannot link a device across them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Profile {
+    pub server: String,
+    pub private_key: Option<String>,
+    pub token: Option<String>,
+    pub node_id: Option<i64>,
+    pub ip: Option<Ipv4Addr>,
+    pub prefix_len: Option<u8>,
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub server_pin: Option<String>,
+    #[serde(default)]
+    pub server_alts: Vec<String>,
+    #[serde(default)]
+    pub server_reality: Option<retail_proto::invite::RealityInvite>,
+    #[serde(default)]
+    pub server_fronts: Vec<String>,
+    #[serde(default)]
+    pub invite: Option<String>,
 }
 
 impl Persisted {
+    /// The current registration as a profile
+    pub fn current(&self) -> Option<Profile> {
+        Some(Profile {
+            server: self.server.clone()?,
+            private_key: self.private_key.clone(),
+            token: Some(self.token.clone()?),
+            node_id: self.node_id,
+            ip: self.ip,
+            prefix_len: self.prefix_len,
+            hostname: self.hostname.clone(),
+            server_pin: self.server_pin.clone(),
+            server_alts: self.server_alts.clone(),
+            server_reality: self.server_reality.clone(),
+            server_fronts: self.server_fronts.clone(),
+            invite: self.invite.clone(),
+        })
+    }
+
+    /// Records the current registration in `saved`, replacing an older one
+    /// for the same server
+    pub fn remember_current(&mut self) {
+        if let Some(cur) = self.current() {
+            match self.saved.iter_mut().find(|s| s.server == cur.server) {
+                Some(s) => *s = cur,
+                None => self.saved.push(cur),
+            }
+        }
+    }
+
+    /// Makes `p` the current registration. Exit-node choices belong to the
+    /// network being left, so they go.
+    pub fn load_profile(&mut self, p: &Profile) {
+        self.server = Some(p.server.clone());
+        self.private_key = p.private_key.clone();
+        self.token = p.token.clone();
+        self.node_id = p.node_id;
+        self.ip = p.ip;
+        self.prefix_len = p.prefix_len;
+        self.hostname = p.hostname.clone();
+        self.server_pin = p.server_pin.clone();
+        self.server_alts = p.server_alts.clone();
+        self.server_reality = p.server_reality.clone();
+        self.server_fronts = p.server_fronts.clone();
+        self.invite = p.invite.clone();
+        self.prefs.exit_node = None;
+    }
+
+    /// Leaves no current registration (and no key), keeping settings and
+    /// the saved servers
+    pub fn clear_current(&mut self) {
+        let keep = Persisted { prefs: self.prefs.clone(), saved: std::mem::take(&mut self.saved), ..Default::default() };
+        *self = keep;
+        self.prefs.exit_node = None;
+    }
+
     pub fn target(&self) -> Option<crate::http::Target> {
         Some(crate::http::Target {
             url: self.server.clone()?,
@@ -187,5 +272,33 @@ mod tests {
         again.ensure_private_key();
         assert_eq!(again.private_key, p.private_key);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn profiles_switch_without_losing_keys() {
+        let mut p = Persisted::default();
+        p.ensure_private_key();
+        p.server = Some("https://a.example".into());
+        p.token = Some("ta".into());
+        p.ip = Some(Ipv4Addr::new(100, 64, 0, 2));
+        p.remember_current();
+        let key_a = p.private_key.clone();
+
+        // Joining another server: the first is kept, the new one has its own key
+        p.clear_current();
+        p.ensure_private_key();
+        p.server = Some("https://b.example".into());
+        p.token = Some("tb".into());
+        p.remember_current();
+        assert_eq!(p.saved.len(), 2);
+        assert_ne!(p.private_key, key_a);
+
+        let a = p.saved.iter().find(|s| s.server == "https://a.example").unwrap().clone();
+        p.remember_current();
+        p.load_profile(&a);
+        assert_eq!((p.token.as_deref(), p.private_key.clone(), p.ip), (Some("ta"), key_a, Some(Ipv4Addr::new(100, 64, 0, 2))));
+        // Remembering again replaces rather than duplicates
+        p.remember_current();
+        assert_eq!(p.saved.len(), 2);
     }
 }

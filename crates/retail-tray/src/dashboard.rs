@@ -7,6 +7,7 @@ use retail_proto::api::{InviteResponse, RouterState, ServerNotice, ServerStatus}
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::draw::{Canvas, Theme, contains, shade, with_alpha};
+use crate::i18n::{tr, trf};
 use crate::text::{Fonts, Weight};
 
 pub const WIDTH: f32 = 460.0;
@@ -99,12 +100,12 @@ impl Dashboard {
         let mut y = 44.0;
         let status = self.status.clone();
         let running = matches!(&status, Some(Ok(s)) if s.running);
-        c.text(if running { "내 네트워크" } else { "네트워크 열기" }, PAD, y, 20.0, Weight::Semibold, t.text, None);
+        c.text(if running { tr("My network") } else { tr("Open a network") }, PAD, y, 20.0, Weight::Semibold, t.text, None);
         y += 24.0;
 
         match status {
             None => {
-                c.text("확인하는 중…", PAD, y + 20.0, 13.0, Weight::Regular, t.dim, None);
+                c.text(tr("Checking…"), PAD, y + 20.0, 13.0, Weight::Regular, t.dim, None);
                 y += 40.0;
             }
             Some(Err(e)) => {
@@ -126,8 +127,7 @@ impl Dashboard {
         let w = WIDTH - 2.0 * PAD;
         let mut y = paragraph(
             c,
-            "Run the server for your own network on this device. Other devices join with an invite code or QR code; \
-             retail opens the ports on your router automatically where it can.",
+            tr("Run the server for your own network on this device. Other devices join with an invite code or QR code; retail opens the ports on your router automatically where it can."),
             PAD,
             y + 22.0,
             w,
@@ -135,14 +135,14 @@ impl Dashboard {
             t.dim,
         );
         if let Some(other) = &self.other_network {
-            let note = format!("이 기기는 지금 {other}에 연결돼 있습니다. 서버를 열면 새 네트워크로 옮겨집니다.");
+            let note = trf("This device is connected to {other}. Opening a server moves it to the new network.", &[("other", other)]);
             y = paragraph(c, &note, PAD, y + 26.0, w, 12.5, t.amber);
         }
         if let Some(e) = &s.last_error {
             y = paragraph(c, e, PAD, y + 14.0, w, 12.5, t.red);
         }
         let busy = self.is_busy();
-        let label = if busy { "여는 중…" } else { "서버 열기" };
+        let label = if busy { tr("Opening…") } else { tr("Open server") };
         self.button(c, t, label, PAD, y + 18.0, 150.0, Style::Primary, !busy, DashAction::Start);
         y + 18.0 + BUTTON_H
     }
@@ -152,26 +152,30 @@ impl Dashboard {
         let (x, ix) = (PAD, PAD + 16.0);
         let mut rows: Vec<(&str, String, Color)> = Vec::new();
         rows.push((
-            "주소",
-            s.public.clone().unwrap_or_else(|| "다른 네트워크에서는 접속할 수 없음".into()),
+            tr("Address"),
+            s.public.clone().unwrap_or_else(|| tr("Not reachable from other networks").into()),
             if s.public.is_some() { t.text } else { t.amber },
         ));
         if let Some(lan) = s.lan.first() {
-            rows.push(("이 네트워크", lan.clone(), t.text));
+            rows.push((tr("This network"), lan.clone(), t.text));
         }
         match &s.router {
             Some(RouterState::Opened { method, tcp, udp }) => {
-                rows.push(("공유기 포트", format!("{method}로 열림 (TCP {tcp}, UDP {udp})"), t.text));
+                rows.push((
+                    tr("Router ports"),
+                    trf("Opened with {method} (TCP {tcp}, UDP {udp})", &[("method", method), ("tcp", tcp), ("udp", udp)]),
+                    t.text,
+                ));
             }
-            Some(RouterState::Unavailable) => rows.push(("공유기 포트", "자동으로 열지 못함".into(), t.amber)),
+            Some(RouterState::Unavailable) => rows.push((tr("Router ports"), tr("Could not open automatically").into(), t.amber)),
             None => {}
         }
         if let Some(site) = &s.reality {
-            rows.push(("REALITY", format!("켜짐 · {site}처럼 보임"), t.text));
+            rows.push(("REALITY", trf("On · looks like {site}", &[("site", site)]), t.text));
         }
         if let Some(helper) = &s.helper {
-            let (state, color) = if s.helper_linked { ("연결됨", t.text) } else { ("연결 안 됨", t.amber) };
-            rows.push(("보조 노드", format!("{helper} · {state}"), color));
+            let (state, color) = if s.helper_linked { (tr("Connected"), t.text) } else { (tr("Not connected"), t.amber) };
+            rows.push((tr("Helper node"), format!("{helper} · {state}"), color));
         }
         if !s.fronts.is_empty() {
             rows.push(("CDN", s.fronts.join(", "), t.text));
@@ -191,12 +195,12 @@ impl Dashboard {
         }
 
         y += 34.0;
-        c.text("기기 초대", x + 4.0, y, 10.5, Weight::Semibold, t.dim, None);
+        c.text(tr("Invite devices"), x + 4.0, y, 10.5, Weight::Semibold, t.dim, None);
         y += 12.0;
         match self.invite.clone() {
             None => {
                 let busy = self.is_busy();
-                self.button(c, t, "초대 만들기", x, y, 140.0, Style::Primary, !busy, DashAction::Invite);
+                self.button(c, t, tr("Create invite"), x, y, 140.0, Style::Primary, !busy, DashAction::Invite);
                 y += BUTTON_H;
             }
             Some(inv) => {
@@ -207,37 +211,37 @@ impl Dashboard {
                 draw_qr(c, &inv.code, qx + 8.0, qy + 8.0, QR_SIZE - 16.0);
                 let tx = qx + QR_SIZE + 16.0;
                 let tw = x + w - tx - 12.0;
-                c.text("찍거나 코드를 복사하세요", tx, y + 30.0, 13.0, Weight::Semibold, t.text, Some(tw));
-                c.text("상대 기기의 retail 설정에", tx, y + 50.0, 12.0, Weight::Regular, t.dim, Some(tw));
-                c.text("붙여 넣으면 참여합니다.", tx, y + 66.0, 12.0, Weight::Regular, t.dim, Some(tw));
+                c.text(tr("Scan it or copy the code"), tx, y + 30.0, 13.0, Weight::Semibold, t.text, Some(tw));
+                let ty = paragraph(c, tr("Paste it into retail settings on the other device to join."), tx, y + 50.0, tw, 12.0, t.dim);
                 let hours = ((inv.expires_at - unix_now()).max(0) + 1800) / 3600;
-                c.text(&format!("1회용 · {hours}시간 뒤 만료"), tx, y + 92.0, 11.5, Weight::Regular, t.dim, Some(tw));
-                self.button(c, t, "코드 복사", tx, y + QR_SIZE - 28.0, 104.0, Style::Secondary, true, DashAction::CopyInvite);
+                let expiry = trf("One-time · expires in {hours} h", &[("hours", &hours)]);
+                c.text(&expiry, tx, ty + 24.0, 11.5, Weight::Regular, t.dim, Some(tw));
+                self.button(c, t, tr("Copy code"), tx, y + QR_SIZE - 28.0, 104.0, Style::Secondary, true, DashAction::CopyInvite);
                 y += QR_SIZE + 24.0;
-                self.button(c, t, "새 초대", x, y + 12.0, 116.0, Style::Secondary, !self.is_busy(), DashAction::Invite);
+                self.button(c, t, tr("New invite"), x, y + 12.0, 116.0, Style::Secondary, !self.is_busy(), DashAction::Invite);
                 y += 12.0 + BUTTON_H;
             }
         }
 
         y += 34.0;
         let online = s.nodes.iter().filter(|n| n.online).count();
-        c.text("기기", x + 4.0, y, 10.5, Weight::Semibold, t.dim, None);
-        let count = format!("{}대 중 {online}대 연결", s.nodes.len());
+        c.text(tr("Devices"), x + 4.0, y, 10.5, Weight::Semibold, t.dim, None);
+        let count = trf("{online} of {total} connected", &[("online", &online), ("total", &s.nodes.len())]);
         let cw = c.measure(&count, 11.0, Weight::Regular);
         c.text(&count, x + w - 4.0 - cw, y, 11.0, Weight::Regular, t.dim, None);
         y += 8.0;
         if s.nodes.is_empty() {
-            c.text("아직 기기가 없습니다. 초대를 만들어 추가하세요.", x + 4.0, y + 28.0, 12.5, Weight::Regular, t.dim, None);
+            c.text(tr("No devices yet. Create an invite to add one."), x + 4.0, y + 28.0, 12.5, Weight::Regular, t.dim, Some(w - 8.0));
             y += ROW_H;
         }
         for n in &s.nodes {
             c.circle(x + 9.0, y + ROW_H / 2.0, 4.0, if n.online { t.accent } else { t.gray });
             let name = if n.exit_node { format!("{} · Exit node", n.hostname) } else { n.hostname.clone() };
             c.text(&name, x + 24.0, y + 20.0, 13.5, Weight::Regular, t.text, Some(w - 190.0));
-            let seen = if n.online { "연결됨".to_string() } else { last_seen(n.last_seen) };
+            let seen = if n.online { tr("Connected").to_string() } else { last_seen(n.last_seen) };
             c.text(&format!("{} · {} · {seen}", n.ip, n.os), x + 24.0, y + 37.0, 11.5, Weight::Regular, t.dim, Some(w - 190.0));
             let armed = self.remove_armed(n.id);
-            let label = if armed { "눌러서 빼기" } else { "빼기" };
+            let label = if armed { tr("Click again to remove") } else { tr("Remove") };
             let lw = c.measure(label, 12.5, Weight::Regular) + 20.0;
             let r = Rect::from_xywh(x + w - lw, y + 8.0, lw, 28.0).unwrap();
             if armed || self.hovered(&r) {
@@ -250,13 +254,13 @@ impl Dashboard {
 
         y += 20.0;
         let (label, style) = if self.stop_armed() {
-            ("한 번 더 누르면 서버 닫기", Style::Danger)
+            (tr("Click again to close the server"), Style::Danger)
         } else {
-            ("서버 닫기", Style::Secondary)
+            (tr("Close server"), Style::Secondary)
         };
         let lw = c.measure(label, 13.0, Weight::Semibold) + 32.0;
         self.button(c, t, label, x, y, lw, style, !self.is_busy(), DashAction::Stop);
-        let web = "웹에서 관리";
+        let web = tr("Manage on the web");
         let ww = c.measure(web, 13.0, Weight::Semibold) + 32.0;
         self.button(c, t, web, x + lw + 8.0, y, ww, Style::Secondary, true, DashAction::OpenWeb);
         y + BUTTON_H
@@ -285,31 +289,47 @@ impl Dashboard {
     }
 }
 
-/// Draws word-wrapped text and returns the baseline of the last line
+/// Draws word-wrapped text and returns the baseline of the last line. Lines
+/// break at spaces, or between any two characters where a word is too long
+/// or the script has no spaces (Japanese, Chinese).
 fn paragraph(c: &mut Canvas, text: &str, x: f32, y: f32, w: f32, px: f32, color: Color) -> f32 {
+    let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
-    let mut baseline = y;
-    let mut first = true;
-    for word in text.split_whitespace() {
-        let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-        if !line.is_empty() && c.measure(&candidate, px, Weight::Regular) > w {
-            if !first {
-                baseline += px * 1.45;
-            }
-            c.text(&line, x, baseline, px, Weight::Regular, color, None);
-            first = false;
-            line = word.to_string();
-        } else {
-            line = candidate;
+    for ch in text.chars() {
+        line.push(ch);
+        if c.measure(&line, px, Weight::Regular) <= w || line.chars().count() == 1 {
+            continue;
         }
+        // Back up to the last space if the line has one, else move just this character down
+        let rest = match line.rfind(' ') {
+            Some(i) if i > 0 && !is_wide(ch) => {
+                let rest = line[i + 1..].to_string();
+                line.truncate(i);
+                rest
+            }
+            _ => {
+                line.pop();
+                ch.to_string()
+            }
+        };
+        lines.push(std::mem::replace(&mut line, rest.trim_start().to_string()));
     }
-    if !line.is_empty() {
-        if !first {
+    if !line.trim().is_empty() {
+        lines.push(line);
+    }
+    let mut baseline = y;
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
             baseline += px * 1.45;
         }
-        c.text(&line, x, baseline, px, Weight::Regular, color, None);
+        c.text(l.trim_end(), x, baseline, px, Weight::Regular, color, None);
     }
     baseline
+}
+
+/// Kana, CJK ideographs and full-width punctuation, which wrap anywhere
+fn is_wide(ch: char) -> bool {
+    matches!(ch as u32, 0x3000..=0x30ff | 0x3400..=0x9fff | 0xf900..=0xfaff | 0xff00..=0xffef)
 }
 
 fn draw_qr(c: &mut Canvas, data: &str, x: f32, y: f32, size: f32) {
@@ -331,23 +351,25 @@ fn draw_qr(c: &mut Canvas, data: &str, x: f32, y: f32, size: f32) {
 /// The same wording as the web admin page
 fn notice_text(n: &ServerNotice) -> String {
     match n {
-        ServerNotice::Cgnat { router_ip } => format!(
-            "공유기의 외부 주소({router_ip})가 사설 주소입니다. 통신사나 다른 공유기가 공인 주소를 나눠 쓰는 환경(CGNAT)이라,              다른 네트워크의 기기는 보조 노드 없이 이 서버에 접속할 수 없습니다. 같은 네트워크의 기기는 참여할 수 있습니다."
+        ServerNotice::Cgnat { router_ip } => trf(
+            "The router's external address ({router_ip}) is private. Your provider or another router shares one public address (CGNAT), so devices on other networks can't reach this server without a helper node. Devices on the same network can still join.",
+            &[("router_ip", router_ip)],
         ),
-        ServerNotice::ForwardPorts { tcp, udp } => format!(
-            "공유기가 포트를 자동으로 열지 않았습니다. 다른 네트워크의 기기가 접속하려면 공유기에서 TCP {tcp}와 UDP {udp}를              이 컴퓨터로 포트포워딩하거나 도메인을 지정하세요."
+        ServerNotice::ForwardPorts { tcp, udp } => trf(
+            "The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",
+            &[("tcp", tcp), ("udp", udp)],
         ),
     }
 }
 
 fn last_seen(at: Option<i64>) -> String {
-    let Some(at) = at else { return "접속 기록 없음".into() };
+    let Some(at) = at else { return tr("Never connected").into() };
     let m = (unix_now() - at).max(0) / 60;
     match m {
-        0 => "방금 접속".into(),
-        1..60 => format!("{m}분 전 접속"),
-        60..1440 => format!("{}시간 전 접속", m / 60),
-        _ => format!("{}일 전 접속", m / 1440),
+        0 => tr("Seen just now").into(),
+        1..60 => trf("Seen {n} min ago", &[("n", &m)]),
+        60..1440 => trf("Seen {n} h ago", &[("n", &(m / 60))]),
+        _ => trf("Seen {n} d ago", &[("n", &(m / 1440))]),
     }
 }
 

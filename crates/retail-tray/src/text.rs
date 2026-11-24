@@ -1,14 +1,16 @@
 //! Text rendering with system fonts. ab_glyph reads glyph outlines on demand,
 //! so memory stays proportional to the glyphs actually drawn (an eager
 //! rasterizer would expand every glyph of a CJK font: hundreds of megabytes).
-//! Fallback fonts, needed only for characters the UI font lacks (for example
-//! Hangul), are opened the first time such a character shows up.
+//! Fallback fonts, needed only for characters the UI font lacks (Hangul,
+//! kana, Han), are opened the first time such a character shows up.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ab_glyph::{Font, FontVec, GlyphId, PxScale, ScaleFont, point};
 use tiny_skia::{Color, Pixmap, PremultipliedColorU8};
+
+use crate::i18n::LangPref;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Weight {
@@ -28,23 +30,48 @@ struct Glyph {
 pub struct Fonts {
     regular: FontVec,
     semibold: Option<FontVec>,
-    /// Paths still to try for missing characters, opened lazily
-    fallback_paths: RefCell<Vec<&'static str>>,
-    fallbacks: RefCell<Vec<FontVec>>,
+    fallback: &'static [(&'static str, Script)],
+    /// One per `fallback` entry, opened the first time it is needed
+    slots: RefCell<Vec<Slot>>,
     cache: RefCell<HashMap<(u8, GlyphId, u32), Glyph>>,
 }
 
+/// The script a fallback font is drawn for first. Han characters look
+/// different in Korean, Japanese and Chinese fonts, so the interface language
+/// picks among them; kana go to a Japanese font and Hangul to a Korean one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Script {
+    Ko,
+    Ja,
+    Zh,
+    /// Covers all three (Noto Sans CJK); only Linux lists one
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+    Any,
+}
+
+enum Slot {
+    Untried,
+    Missing,
+    Loaded(FontVec),
+}
+
+type Candidates = (&'static [&'static str], &'static [&'static str], &'static [(&'static str, Script)]);
+
 #[cfg(windows)]
-fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [&'static str]) {
+fn candidates() -> Candidates {
     (
         &["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"],
         &["C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf"],
-        &["C:\\Windows\\Fonts\\malgun.ttf", "C:\\Windows\\Fonts\\YuGothR.ttc", "C:\\Windows\\Fonts\\msyh.ttc"],
+        &[
+            ("C:\\Windows\\Fonts\\malgun.ttf", Script::Ko),
+            ("C:\\Windows\\Fonts\\YuGothR.ttc#1", Script::Ja),
+            ("C:\\Windows\\Fonts\\msyh.ttc", Script::Zh),
+        ],
     )
 }
 
 #[cfg(target_os = "macos")]
-fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [&'static str]) {
+fn candidates() -> Candidates {
     (
         &[
             "/System/Library/Fonts/SFNS.ttf",
@@ -52,12 +79,16 @@ fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [
             "/Library/Fonts/Arial.ttf",
         ],
         &[],
-        &["/System/Library/Fonts/AppleSDGothicNeo.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc"],
+        &[
+            ("/System/Library/Fonts/AppleSDGothicNeo.ttc", Script::Ko),
+            ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", Script::Ja),
+            ("/System/Library/Fonts/Hiragino Sans GB.ttc", Script::Zh),
+        ],
     )
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [&'static str]) {
+fn candidates() -> Candidates {
     (
         &[
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
@@ -77,9 +108,9 @@ fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [
             "/usr/share/fonts/truetype/cantarell/Cantarell-Bold.otf",
         ],
         &[
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", Script::Any),
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", Script::Any),
+            ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", Script::Ko),
         ],
     )
 }
@@ -91,8 +122,13 @@ fn em(font: &FontVec, px: f32) -> PxScale {
     PxScale::from(px * font.height_unscaled() / upem)
 }
 
+/// `path`, or `path#n` for the n-th font of a collection
 fn load(path: &str) -> Option<FontVec> {
-    FontVec::try_from_vec_and_index(std::fs::read(path).ok()?, 0).ok()
+    let (path, index) = match path.rsplit_once('#') {
+        Some((p, i)) => (p, i.parse().ok()?),
+        None => (path, 0),
+    };
+    FontVec::try_from_vec_and_index(std::fs::read(path).ok()?, index).ok()
 }
 
 impl Fonts {
@@ -105,8 +141,8 @@ impl Fonts {
         Ok(Fonts {
             regular,
             semibold: semibold.iter().find_map(|p| load(p)),
-            fallback_paths: RefCell::new(fallback.to_vec()),
-            fallbacks: RefCell::default(),
+            fallback,
+            slots: RefCell::new(fallback.iter().map(|_| Slot::Untried).collect()),
             cache: RefCell::default(),
         })
     }
@@ -120,29 +156,34 @@ impl Fonts {
         if c.is_ascii() || primary.1.glyph_id(c).0 != 0 {
             return f(primary.0, primary.1);
         }
-        let fallbacks = self.fallbacks.borrow();
-        if let Some(i) = fallbacks.iter().position(|font| font.glyph_id(c).0 != 0) {
-            return f(2 + i as u8, &fallbacks[i]);
-        }
-        drop(fallbacks);
-        loop {
-            let next = {
-                let mut paths = self.fallback_paths.borrow_mut();
-                (!paths.is_empty()).then(|| paths.remove(0))
-            };
-            let Some(path) = next else {
-                return f(primary.0, primary.1);
-            };
-            if let Some(font) = load(path) {
-                let covers = font.glyph_id(c).0 != 0;
-                self.fallbacks.borrow_mut().push(font);
-                if covers {
-                    let fallbacks = self.fallbacks.borrow();
-                    let i = fallbacks.len() - 1;
-                    return f(2 + i as u8, &fallbacks[i]);
+        let first = match c as u32 {
+            0x3040..=0x30ff | 0x31f0..=0x31ff => Script::Ja,
+            0x1100..=0x11ff | 0x3130..=0x318f | 0xac00..=0xd7af => Script::Ko,
+            _ => match crate::i18n::current() {
+                LangPref::Ja => Script::Ja,
+                LangPref::Ko => Script::Ko,
+                _ => Script::Zh,
+            },
+        };
+        // Fonts for that script first, then the rest in their listed order
+        let order = (0..self.fallback.len())
+            .filter(|&i| self.fallback[i].1 == first)
+            .chain((0..self.fallback.len()).filter(|&i| self.fallback[i].1 != first));
+        for i in order {
+            {
+                let mut slots = self.slots.borrow_mut();
+                if let Slot::Untried = slots[i] {
+                    slots[i] = load(self.fallback[i].0).map_or(Slot::Missing, Slot::Loaded);
                 }
             }
+            let slots = self.slots.borrow();
+            if let Slot::Loaded(font) = &slots[i]
+                && font.glyph_id(c).0 != 0
+            {
+                return f(2 + i as u8, font);
+            }
         }
+        f(primary.0, primary.1)
     }
 
     fn advance(&self, weight: Weight, prev: Option<char>, c: char, px: f32) -> f32 {

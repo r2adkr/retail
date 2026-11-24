@@ -1,375 +1,297 @@
-# retail 설계 문서
+# retail design
 
-retail은 Tailscale과 같은 기능을 하는 **셀프호스팅 메시 VPN**입니다.
-WireGuard(boringtun)를 데이터 터널로 재사용하고, 그 위의 제어 계층과 NAT 통과 계층을 직접 구현합니다.
-Tailscale 클라이언트와의 프로토콜 호환은 목표가 아닙니다.
+retail is a **self-hosted mesh VPN**.
+It reuses WireGuard (boringtun) as the data tunnel and implements the control and NAT traversal layers above it.
 
-## 1. 구성요소
+## 1. Components
 
-| 크레이트 | 바이너리 | 역할 |
+| Crate | Binary | Role |
 |---|---|---|
-| `retail-proto` | (라이브러리) | 와이어 타입(JSON), 키 인코딩, STUN·릴레이 프레임, 초대 코드, 로컬 API 토큰 |
-| `retail-control` | (라이브러리) | 코디네이션 서버: 노드 등록, IP 할당, NetMap 푸시, 릴레이, STUN, REALITY, HTTP 터널, 보조 노드. retaild가 네트워크를 호스팅할 때 실행합니다 |
-| `retail-daemon` | `retaild` | 노드 데몬: TUN, WireGuard 데이터 플레인, 엔드포인트 탐색, 서버까지 가는 전송 경주(프록시·터널·NAT64), Exit node, 호스팅(서버·공유기 포트·보조 노드), 로컬 API |
-| `retail-cli` | `retail` | `up`/`down`/`logout`/`status`/`set`/`server …`/`helper …` (로컬 API 호출) |
-| `retail-web` | (라이브러리) | 웹 관리자 페이지와 설치 파일 생성 |
-| `retail-tray` | `retail-tray` | 트레이/메뉴 막대 앱: 상태 팝업(기기별 ⋯ 메뉴), 설정 창, 서버 창 |
+| `retail-proto` | (library) | Wire types (JSON), key encoding, STUN and relay frames, invite codes, local API token |
+| `retail-control` | (library) | Coordination server: node registration, IP allocation, NetMap push, relay, STUN, REALITY, HTTP tunnels, helper nodes. Runs inside retaild when it hosts a network |
+| `retail-daemon` | `retaild` | Node daemon: TUN, WireGuard data plane, endpoint discovery, the transport race to the server (proxies, tunnels, NAT64), exit node, hosting (server, router ports, helper node), local API |
+| `retail-cli` | `retail` | `up`/`down`/`logout`/`status`/`set`/`server …`/`helper …` (calls the local API) |
+| `retail-web` | (library) | Web admin page and installer packages |
+| `retail-tray` | `retail-tray` | Tray / menu bar app: status popup (⋯ menu per device), settings window, server window |
 
 ```
-retail (CLI, 트레이) ──HTTP 127.0.0.1:41112──► retaild ──HTTPS/WSS (REALITY, 프록시, 터널, CDN, 보조 노드)──► retaild (호스팅 기기, 서버 포함)
-                                                  │                                  │ (UDP 3478 STUN)
-                                                  │ WireGuard UDP 41641              │
-                                                  ▼                                  │
-                                               retaild (다른 노드) ◄─────────────────┘
+retail (CLI, tray) ──HTTP 127.0.0.1:41112──► retaild ──HTTPS/WSS (REALITY, proxies, tunnels, CDN, helper)──► retaild (hosting device, with the server)
+                                                 │                                  │ (UDP 3478 STUN)
+                                                 │ WireGuard UDP 41641              │
+                                                 ▼                                  │
+                                              retaild (other node) ◄────────────────┘
 ```
 
-## 2. 신원과 인증 (MVP)
+## 2. Identity and authentication
 
-- 노드는 WireGuard 키 쌍(Curve25519)을 하나 생성해 상태 파일에 저장합니다.
-- 최초 등록 시 **초대 코드**(`retail1.` + base64url JSON)를 씁니다. 안에 서버 주소(공인 주소, 보조 노드 주소, LAN 주소 순), 서버 인증서 공개키의 SHA-256(핀), 한 번 쓰는 인증 키, REALITY 공개 설정, CDN 주소가 들어 있습니다.
-- 초대: 1회용(기본, 24시간)과 이름 붙은 재사용 초대가 있습니다. 1회용은 해시만, 이름 붙은 초대는 설치 파일을 다시 만들 수 있도록 코드 원문도 서버 데이터 폴더(관리자만 읽음)에 저장합니다. 이름마다 살아 있는 코드는 하나이고, 새 코드는 이전 코드를 같은 쓰기 안에서 지웁니다.
-- 서버는 노드에 **노드 토큰**(256비트 난수)을 발급하고 SHA-256 해시만 저장합니다. 이후 제어 연결은 `Authorization: Bearer <토큰>`으로 인증합니다.
-- 서버 인증서는 서버가 처음 실행될 때 만든 자체 서명 인증서입니다(P-256). 데몬은 인증 기관 대신 **공개키 핀**과 비교하고, TLS 서명 검증은 그 키로 그대로 수행합니다. 핀이 다르면 실패하며 다른 방식으로 넘어가지 않습니다. 초대 없이 URL로 접속할 때는 webpki 루트 인증서(와 `RETAIL_CA_FILE`)로 검증합니다.
+- A node generates one WireGuard key pair (Curve25519) and keeps it in its state file.
+- The first registration uses an **invite code** (`retail1.` + base64url JSON). It carries the server addresses (public address, helper address, LAN addresses, in that order), the SHA-256 of the server certificate's public key (the pin), a one-time auth key, the public REALITY settings and CDN addresses.
+- Invites are one-time (the default, 24 hours) or named and reusable. One-time invites are stored as hashes only; named invites also keep the code itself in the server's data folder (readable by administrators only) so that installers can be made again. Each name has one live code, and a new code removes the old one in the same write.
+- The server issues each node a **node token** (256 random bits) and stores only its SHA-256. Later control connections authenticate with `Authorization: Bearer <token>`.
+- The server certificate is self-signed (P-256), made the first time the server runs. Instead of a certificate authority the daemon compares against the **public key pin**, and verifies TLS signatures with that very key. A wrong pin fails; it never falls back to another check. When joining by URL without an invite, the webpki roots (and `RETAIL_CA_FILE`) verify the server.
 
-## 3. 컨트롤 프로토콜
+## 3. Control protocol
 
-| 엔드포인트 | 방향 | 내용 |
+| Endpoint | Direction | Content |
 |---|---|---|
 | `POST /api/v1/register` | C→S | `RegisterRequest { auth_key, node_key, hostname, os }` → `RegisterResponse { node_id, ip, prefix_len, token }` |
-| `GET /api/v1/poll` (WebSocket) | 양방향 | 서버 → `ServerMessage::NetMap`, 클라이언트 → `ClientMessage::Endpoints` |
-| `GET /api/v1/tunnel` (WebSocket) | C→S | 터널. 바이너리 메시지가 바이트 스트림을 나르고, 그 안에서 핀 고정 TLS로 위 API를 씁니다 |
-| `POST /api/v1/tunnel/poll`, `GET`·`POST /api/v1/tunnel/poll/{id}` | C→S | WebSocket이 막힌 곳을 위한 같은 터널. `GET`은 받을 데이터가 생기거나 15초가 될 때까지 기다립니다 |
-| `GET /health` | - | 헬스 체크 |
+| `GET /api/v1/poll` (WebSocket) | both | server → `ServerMessage::NetMap`, client → `ClientMessage::Endpoints` |
+| `GET /api/v1/tunnel` (WebSocket) | C→S | Tunnel. Binary messages carry a byte stream, inside which pinned TLS talks to the API above |
+| `POST /api/v1/tunnel/poll`, `GET`/`POST /api/v1/tunnel/poll/{id}` | C→S | The same tunnel where WebSocket is blocked. `GET` waits until there is data or 15 seconds pass |
+| `GET /health` | - | Health check |
 
-- 서버 포트는 TLS와 평문 HTTP를 첫 바이트로 구분합니다. 평문 HTTP로는 터널 엔드포인트만 쓸 수 있고, 나머지는 403입니다.
+- The server port tells TLS from plain HTTP by the first byte. Plain HTTP reaches only the tunnel endpoints; everything else gets 403.
+- Registering again with the same `node_key` keeps the node and its IP and only replaces the token.
+- On every change (registration, endpoint update, connect/disconnect, admin command) the server recomputes each connection's NetMap and sends it unless it is unchanged.
+- Admin commands come in through the hosting device's local API, so they take effect in the same process at once. Connections of deleted nodes are closed.
+- On each connect a node announces whether it offers an exit node with `ClientMessage::Hostinfo { exit_node }`. The server keeps this in memory only and forgets it when the node disconnects.
+- Registration is limited to 10 requests per minute per client address.
 
-- 같은 `node_key`로 다시 등록하면 기존 노드와 IP를 유지하고 토큰만 교체합니다.
-- 서버는 변경(등록, 엔드포인트 갱신, 접속/해제, 관리 명령)이 생길 때마다 각 연결에 NetMap을 다시 계산해 보내고, 이전과 같으면 생략합니다.
-- 관리 명령은 호스팅 기기 데몬의 로컬 API로 들어오므로 서버와 같은 프로세스에서 바로 전파됩니다. 삭제된 노드의 연결은 끊습니다.
-- 노드는 접속할 때마다 `ClientMessage::Hostinfo { exit_node }`로 Exit node 제공 여부를 알립니다. 서버는 이것을 메모리에만 두고, 노드 연결이 끊기면 지웁니다.
-- 등록 요청은 클라이언트 주소당 분당 10회로 제한합니다.
+## 4. Addresses
 
-## 4. 주소
+- Virtual IPs come from `100.64.0.0/10` (the CGNAT range) in order and stay until the node is deleted.
+- The TUN interface gets its address with a `/10` prefix, so the OS routes the mesh range by itself (on macOS tun-rs adds the route).
+- The MTU is fixed at 1280 (avoids path MTU problems; the IPv6 minimum MTU).
 
-- 가상 IP는 `100.64.0.0/10`(CGNAT 대역)에서 순차 할당하고, 노드가 삭제될 때까지 유지합니다.
-- TUN 인터페이스에 `/10` 프리픽스로 주소를 설정해 OS가 메시 대역 라우트를 자동으로 잡게 합니다. (macOS는 tun-rs가 라우트를 추가)
-- MTU는 1280으로 고정합니다. (경로 MTU 문제 회피, IPv6 최소 MTU와 동일)
+## 5. Data plane
 
-## 5. 데이터 플레인
+- One UDP socket (41641 by default) carries all peer traffic and STUN.
+- **Batched I/O** cuts system calls per packet.
+  - TUN reads: on Linux the `IFF_VNET_HDR` offload reads TSO superpackets (up to 64 KB) at once and splits them at the MTU. If the next superpacket is already waiting, it goes into the same job without waiting (up to 128 packets per job). Every hand-off between stages wakes a thread, so bigger jobs mean less CPU per GB.
+  - UDP sends: encrypted packets of the same size to the same peer go out in one GSO send (quinn-udp: Linux UDP_SEGMENT, Windows USO, macOS sendmsg_x).
+  - UDP receives: `recvmmsg` and UDP GRO take many datagrams at once. The GRO batches of one receive go to a single decryption job, up to 128 datagrams (−20% context switches, −11% CPU per GB).
+  - TUN writes: decrypted TCP segments are merged again with GRO before writing (Linux).
+- When the send buffer is full, packets wait instead of being dropped (backpressure). The TUN queue paces TCP, and retransmits disappear.
+- Socket buffers are raised to 8 MB (as root on Linux, `SO_RCVBUFFORCE` goes past the `rmem_max` limit).
+  - STUN and WireGuard packets differ in their second byte (STUN message type high byte `0x01`, WireGuard reserved byte `0x00`).
+- Finding the peer of a received packet
+  - Handshake initiation: `parse_handshake_anon` recovers the sender's static public key.
+  - Anything else: `receiver_idx >> 8` is the local peer index.
+- A decrypted packet whose source IP is not that peer's virtual IP is dropped (the allowed-IPs check).
+- `update_timers` runs for every peer each 250 ms; the persistent keepalive is 25 seconds.
 
-- UDP 소켓 하나(기본 41641)로 모든 피어 트래픽과 STUN을 처리합니다.
-- **배치 I/O**로 패킷당 시스템 콜을 줄입니다.
-  - TUN 읽기: Linux는 `IFF_VNET_HDR` 오프로드로 TSO 슈퍼패킷(최대 64KB)을 한 번에 읽고 MTU 단위로 나눕니다. 다음 슈퍼패킷이 이미 와 있으면 기다리지 않고 같은 작업에 담습니다(작업당 최대 128패킷). 단계 사이에서 작업을 넘길 때마다 스레드를 깨워야 해서, 작업이 클수록 1 GB당 CPU가 줄어듭니다.
-  - UDP 송신: 같은 피어로 가는 같은 크기의 암호화 패킷을 모아 GSO 한 번으로 보냅니다. (quinn-udp: Linux UDP_SEGMENT, Windows USO, macOS sendmsg_x)
-  - UDP 수신: `recvmmsg`와 UDP GRO로 여러 데이터그램을 한 번에 받습니다. 한 번에 받은 GRO 묶음들은 데이터그램 128개까지 복호화 작업 하나로 넘깁니다(문맥 전환 −20%, 1 GB당 CPU −11%).
-  - TUN 쓰기: 복호화한 TCP 세그먼트를 GRO로 다시 합쳐 씁니다. (Linux)
-- 송신 버퍼가 차면 패킷을 버리지 않고 기다립니다(백프레셔). TUN 큐가 TCP에 속도를 알려줘서 재전송이 사라집니다.
-- 소켓 버퍼는 8MB로 키웁니다. (Linux root는 `SO_RCVBUFFORCE`로 `rmem_max` 제한을 넘김)
-  - STUN과 WireGuard 패킷은 두 번째 바이트로 구분합니다. (STUN 메시지 타입 상위 바이트 `0x01`, WireGuard 예약 바이트 `0x00`)
-- 수신 패킷의 피어 식별
-  - 핸드셰이크 개시: `parse_handshake_anon`으로 상대 정적 공개키를 복원해 찾습니다.
-  - 그 외: `receiver_idx >> 8`이 로컬 피어 인덱스입니다.
-- 복호화된 패킷의 출발지 IP가 그 피어의 가상 IP와 다르면 버립니다. (allowed-IPs 검사)
-- 250ms마다 각 피어의 `update_timers`를 돌리고, persistent keepalive는 25초입니다.
+## 6. NAT traversal
 
-## 6. NAT 통과
+1. The daemon sends Binding requests to the STUN servers (`stun_servers` in the NetMap, or port 3478 on the control server's host) to learn its public address: every 3 seconds until an answer comes, then every 20 seconds. It uses the data plane socket, so the NAT mapping is the same.
+   - The UDP socket is a single IPv6 socket with IPv4-mapped addresses (dual stack), so IPv4 and IPv6 candidates are used together, and the public address is learned per address family. Systems without IPv6 use an IPv4 socket.
+2. Local interface addresses (LAN, global IPv6) and the STUN results are reported to the server as endpoint candidates.
+3. The server passes the candidates to the peers, and both sides at once send handshakes to all of each other's candidates. Since both send at the same time, hole punching works through most cone NATs.
+   - Until a session exists, the last handshake initiation is **resent every 250 ms** (WireGuard's own retry is 5 seconds). Duplicate initiations are safe: the receiver ignores them by their timestamp.
+4. The source address of the first authenticated packet becomes the confirmed endpoint, and from then on packets go only there. After 20 seconds without anything received, packets go to all candidates again (roaming).
+5. Connections to the control server (registration, control connection) use Happy Eyeballs (RFC 8305): the IPv6 and IPv4 addresses of the server name are tried alternately 250 ms apart, and the first to connect wins.
 
-1. 데몬은 STUN 서버(NetMap의 `stun_servers`, 없으면 컨트롤 서버 호스트의 3478 포트)에 Binding 요청을 보내 공인 주소를 알아냅니다. 응답을 받기 전까지는 3초마다, 받은 뒤에는 20초마다 묻습니다. 데이터 플레인과 같은 소켓을 쓰므로 NAT 매핑도 같습니다.
-   - UDP 소켓은 IPv4가 매핑된 IPv6 소켓 하나(듀얼 스택)라서 IPv4와 IPv6 후보를 함께 씁니다. 공인 주소도 주소 계열마다 따로 알아냅니다. IPv6를 쓸 수 없는 시스템에서는 IPv4 소켓으로 동작합니다.
-2. 로컬 인터페이스 주소(LAN, 전역 IPv6)와 STUN 결과를 합쳐 엔드포인트 후보로 서버에 보고합니다.
-3. 서버가 후보를 피어들에게 전파하면, 양쪽이 즉시 상대의 모든 후보로 핸드셰이크를 보냅니다. 동시에 보내므로 대부분의 cone NAT에서 홀펀칭이 됩니다.
-   - 세션이 생기기 전까지는 마지막 핸드셰이크 개시 패킷을 **250ms마다 재전송**합니다. (WireGuard 기본 재시도는 5초) 중복 개시 패킷은 상대가 타임스탬프 검사로 무시하므로 안전합니다.
-4. 인증된 패킷을 처음 받은 출발지 주소를 확정 엔드포인트로 삼고, 이후 그 주소로만 보냅니다. 20초 이상 수신이 없으면 다시 모든 후보로 보냅니다. (로밍 대응)
-5. 컨트롤 서버 접속(등록, 제어 연결)은 Happy Eyeballs(RFC 8305)로 합니다. 서버 이름의 IPv6·IPv4 주소를 번갈아 250ms 간격으로 시도하고 먼저 연결된 쪽을 씁니다.
+### 6.1 Path choice and fallback
 
-### 6.1 경로 선택과 폴백
+The aim is to **connect on any network, and use a direct path whenever one exists**. Each peer's path is one of three.
 
-목표는 **어떤 네트워크에서도 연결되고, 가능하면 언제나 직접 경로를 쓰는 것**입니다. 피어마다 경로는 셋 중 하나입니다.
-
-| 경로 | 조건 | 송신 |
+| Path | When | Sending |
 |---|---|---|
-| 직접 | 최근 20초 안에 UDP로 인증된 패킷을 받았고, 양방향이 통한다고 볼 수 있음(아래) | 그 엔드포인트로 GSO 묶음 전송 |
-| 릴레이 | 최근 60초 안에 릴레이로 인증된 패킷을 받음 | 컨트롤 서버를 거쳐 전송 |
-| 탐색 | 둘 다 아님 | 모든 UDP 후보로, 1초 뒤부터는 릴레이로도 |
+| Direct | an authenticated packet came over UDP in the last 20 seconds, and both directions can be taken to work (below) | GSO batches to that endpoint |
+| Relay | an authenticated packet came through the relay in the last 60 seconds | through the control server |
+| Probing | neither | to every UDP candidate, and after 1 second through the relay too |
 
-- **릴레이**는 컨트롤 서버의 TCP 443(HTTPS WebSocket) 위에서 동작합니다. 이미 열려 있는 제어 연결에 바이너리 메시지로 실어 보내므로 연결이 더 필요 없고, UDP를 막은 네트워크나 양쪽 모두 대칭형 NAT인 경우에도 연결됩니다. 프레임은 `노드 키(32B) | (길이 u16, WireGuard 데이터그램)*` 형식입니다(`retail_proto::relay`). 서버는 키를 보낸 쪽의 키로 바꿔 전달만 하며, 내용은 WireGuard 암호문이라 읽거나 위조할 수 없습니다.
-- **경쟁**: 탐색을 시작한 뒤 1초(`RELAY_DELAY`) 동안은 UDP만 씁니다. 직접 경로가 되는 환경이면 보통 이 안에 끝나서 처음부터 직접 경로로 연결됩니다. 그 뒤에는 핸드셰이크를 릴레이로도 보내 먼저 성공한 경로를 씁니다. 응답은 요청이 온 경로로 돌려보냅니다. 한 번 릴레이를 쓴 피어는 5분 동안 탐색 시작부터 릴레이를 함께 씁니다.
-- **승격**: 릴레이로 통신하는 동안 3초마다 직접 후보들로 keepalive를 보냅니다. 하나라도 도착해 인증되면 받은 쪽이 직접 경로로 바꾸고 즉시 keepalive로 답해, 보낸 쪽도 바로 직접 경로로 바꿉니다. UDP 차단이 풀리면 약 1~3초 안에 직접 경로로 돌아갑니다.
-- **장애 전환**: 데이터를 보내고 있는데 직접 경로에서 3초 동안 아무것도 오지 않으면 경로를 잃은 것으로 보고 곧바로 릴레이로 보냅니다. 오탐을 막기 위해, 데이터를 받기만 하고 보낼 것이 없는 쪽은 1초마다 keepalive를 보냅니다(WireGuard 기본은 10초). 측정한 끊김은 양방향 차단과 한쪽 차단 모두 약 3초입니다.
-- **한 방향만 끊긴 경우**: UDP 수신은 "상대가 나에게 닿는다"는 것만 증명합니다. 그래서 두 가지 규칙을 둡니다.
-  - 경로를 잃은 쪽은 이후 UDP로 무엇을 받아도 직접 경로로 돌아가지 않습니다. 3초마다 **UDP로만** 핸드셰이크를 보내고, 그 응답이 UDP로 돌아와야(응답은 요청이 온 경로로 가므로 양방향 증명) 직접 경로로 돌아갑니다.
-  - 직접 경로가 선 지 2초가 지났는데 상대의 **데이터**가 UDP보다 최근에 릴레이로 오면, 상대가 내 직접 패킷을 받지 못하는 것이므로 나도 릴레이로 보냅니다. 상대의 데이터가 다시 UDP로 오면 직접 경로로 돌아갑니다. keepalive와 핸드셰이크는 판단에 쓰지 않습니다(같은 패킷이 두 경로로 갈 수 있고, 늦게 온 쪽은 재전송 검사에서 버려지기 때문).
-- **릴레이 송신 속도 조절**: 릴레이 대기열은 60KB 프레임 16개입니다. `udp-send` 단계는 대기열이 차면 **작업 하나당** 최대 2ms만 기다리고, 그 이상이면 버립니다. 짧은 대기로 내부 TCP가 손실 없이 속도를 맞춥니다. 다만 상한은 작업마다 적용되므로, 느린 릴레이로 대량 전송이 계속되면 같은 기기에서 다른 피어로 가는 직접 트래픽도 느려질 수 있습니다. 이 영향은 아직 측정하지 않았습니다.
-- **릴레이 효율**: 제어 연결과 서버는 이미 쌓인 프레임을 모아 한 번에 내보냅니다(flush 한 번, 최대 128KB). 받는 쪽은 프레임 안의 데이터그램을 UDP 경로처럼 묶어서 복호화하고 TCP 세그먼트를 GRO로 합쳐 TUN에 씁니다. 서버의 노드별 대기열은 프레임 48개입니다(더 길게 하면 지연만 늘었습니다).
-- **제어 연결 생존 확인**: 데몬은 10초마다 ping을 보내고, 30초 동안 아무것도 받지 못하면 연결이 죽은 것으로 보고 다시 연결합니다. NAT가 연결을 조용히 잊어버린 경우에도 릴레이가 몇 분씩 끊기지 않습니다. 전송도 10초 제한이 있습니다.
+- The **relay** runs over the control server's TCP 443 (HTTPS WebSocket). It rides the already open control connection as binary messages, so it needs no extra connection, and it works on networks that block UDP and between two symmetric NATs. A frame is `node key (32 B) | (length u16, WireGuard datagram)*` (`retail_proto::relay`). The server only swaps the key for the sender's and forwards; the content is WireGuard ciphertext, which it can neither read nor forge.
+- **Race**: for 1 second after probing starts (`RELAY_DELAY`) only UDP is used. Where a direct path works it usually succeeds within that time, so the connection starts out direct. After that, handshakes also go through the relay, and the first path to succeed is used. Answers go back the way the request came. A peer that has used the relay uses it from the start of probing for 5 minutes.
+- **Upgrade**: while on the relay, keepalives go to the direct candidates every 3 seconds. When one arrives and authenticates, the receiver switches to direct and answers with a keepalive at once, so the sender switches too. When a UDP block is lifted, the path is direct again within about 1–3 seconds.
+- **Failover**: if data is being sent and nothing comes back on the direct path for 3 seconds, the path is taken as lost and traffic goes to the relay at once. To avoid false alarms, a side that only receives data sends a keepalive every second (WireGuard's default is 10 seconds). The measured outage is about 3 seconds, for blocks in both directions and in one.
+- **One direction cut**: receiving over UDP only proves that the peer reaches me. Hence two rules:
+  - The side that lost the path does not go back to direct on anything it receives over UDP. It sends handshakes **over UDP only** every 3 seconds, and goes back to direct only when the answer arrives over UDP (answers go back the way the request came, so this proves both directions).
+  - If, 2 seconds after the direct path is up, the peer's **data** arrives through the relay more recently than over UDP, the peer does not get my direct packets, so I send through the relay too. When its data comes over UDP again, I go back to direct. Keepalives and handshakes do not count (the same packet can take both paths, and the later copy is dropped by the replay check).
+- **Relay send pacing**: the relay queue holds 16 frames of 60 KB. When it is full the `udp-send` stage waits at most 2 ms **per job** and then drops. The short wait lets the inner TCP match the rate without loss. Since the cap applies per job, a long bulk transfer over a slow relay can slow direct traffic from the same device to other peers. That effect has not been measured yet.
+- **Relay efficiency**: the control connection and the server gather queued frames and send them in one go (one flush, up to 128 KB). The receiver decrypts a frame's datagrams in one batch as on the UDP path and merges TCP segments with GRO before writing to TUN. The server's per-node queue is 48 frames (longer only added delay).
+- **Control connection liveness**: the daemon pings every 10 seconds and reconnects after 30 seconds without receiving anything, so the relay does not stay down for minutes when a NAT silently forgets the connection. Sends have a 10-second limit too.
 
-`scripts/fallback-netns.sh`로 12가지 장애 상황을 확인합니다(HTTPS 서버, 양쪽 NAT, WSL2).
+`scripts/netns-test.sh` checks each of these cases end to end (its header lists the scenarios). Relay throughput there is high because the server runs on the same machine; in practice the server's line and CPU are the limit.
 
-| 시나리오 | 결과 경로 | 연결 시간 | iperf3 | 최대 메모리 (A / B) |
-|---|---|---|---|---|
-| 일반 NAT | 직접 IPv4 | 0.4초 | 4.3~7.2 Gbit/s | 9.1 / 9.6 MiB |
-| UDP 전부 차단 | 릴레이 | 1.3초 | 1.4~1.5 Gbit/s | 9.4 / 8.8 MiB |
-| 양쪽 대칭형 NAT | 릴레이 | 1.3초 | 1.5 Gbit/s | 9.4 / 8.6 MiB |
-| TCP 443만 허용 | 릴레이 | 1.3초 | 1.4 Gbit/s | 9.5 / 8.6 MiB |
-| UDP는 443만 허용 | 릴레이 | 1.3초 | 1.6 Gbit/s | 9.4 / 8.8 MiB |
-| IPv4 대칭형 NAT + IPv6 | 직접 IPv6 | 0.4초 | 5.2 Gbit/s | 9.2 / 9.6 MiB |
-| UDP 차단 후 해제 | 릴레이 → 직접 | 1.1초, 해제 1초 뒤 직접 | 1.4 Gbit/s | 9.3 / 8.7 MiB |
-| 릴레이 연결 후 40초 유휴 | 릴레이 유지, 재개 시 손실 없음 | 1.3초 | 1.4 Gbit/s | 9.3 / 8.8 MiB |
-| 직접 통신 중 UDP 차단 (양쪽) | 직접 → 릴레이 | 끊김 약 2.9~3.2초 | - | 9.4 / 9.6 MiB |
-| 직접 통신 중 A 쪽만 UDP 차단, 이후 해제 | 직접 → 릴레이 → 직접 | 끊김 약 3.0초, 해제 2초 뒤 직접 | - | 9.2 / 9.5 MiB |
-| 직접 통신 중 B 쪽만 UDP 차단, 이후 해제 | 직접 → 릴레이 → 직접 | 끊김 약 2.9초, 해제 2초 뒤 직접 | - | 9.2 / 9.6 MiB |
-| 제어 연결 30초 무응답 | 릴레이 복구 | 복구 후 0.7~5.3초 | 1.5 Gbit/s | 9.4 / 8.7 MiB |
-
-릴레이 처리량은 같은 기기 안의 서버라서 높게 나옵니다. 실제로는 서버의 회선과 CPU가 한계입니다. 손실·지연이 있는 회선에서의 릴레이(TCP 위 TCP) 성능은 아직 측정하지 않았습니다.
-
-**MASQUE를 넣지 않은 이유**: 표준 프록시와의 호환이 필요할 때 의미가 있는데, retail은 자체 프로토콜입니다. QUIC·HTTP/3 스택은 메모리 여유보다 큽니다. UDP 443만 열린 네트워크도 TCP 443 릴레이로 연결됩니다. 손실이 많은 회선에서 TCP 위 TCP 성능이 문제로 확인되면, 의존성 없이 서버에 UDP 데이터그램 릴레이를 추가하는 것이 다음 단계입니다.
+**Why not MASQUE**: it pays off where compatibility with standard proxies matters, and retail speaks its own protocol. A QUIC/HTTP/3 stack is larger than the memory budget allows. Networks that open only UDP 443 still connect through the TCP 443 relay. If TCP-over-TCP turns out to hurt on lossy lines, the next step is a UDP datagram relay in the server, with no new dependency.
 
 ### 6.2 REALITY
 
-서버로 가는 HTTPS 자체가 막힌 네트워크(서버 이름이나 TLS 지문으로 막는 방화벽, 능동 탐지)에서 쓰는 마지막 단계입니다. 방식은 Xray의 REALITY를 따릅니다.
+The last resort for networks where HTTPS to the server is itself blocked (firewalls that block by server name or TLS fingerprint, active probing). It follows Xray's REALITY.
 
-- 서버(호스팅 기기)는 443 포트에서 TLS를 rustls에 넘기기 전에 ClientHello를 읽어 셋으로 나눕니다.
-  - SNI가 없거나 위장 사이트 이름이 아니면: 일반 HTTPS.
-  - 위장 사이트 이름이고 인증이 맞으면: REALITY. 일회용 Ed25519 인증서로 TLS 1.3을 맺고 같은 HTTP 서비스(등록, 제어, 릴레이)로 넘깁니다.
-  - 위장 사이트 이름인데 인증이 틀리면: 연결을 그대로 진짜 사이트로 이어 줍니다. 탐지하는 쪽은 그 사이트의 핸드셰이크와 내용을 봅니다.
-- 인증: 클라이언트는 X25519(키 공유 개인키, 서버 정적 공개키)에서 HKDF로 인증 키를 만들고, 세션 ID에 버전·시각·short ID를 AES-256-GCM으로 봉인해 넣습니다(AAD는 세션 ID를 0으로 채운 ClientHello). 서버는 시각 ±120초, short ID, 재사용 여부를 확인합니다.
-- 서버 확인: 일회용 인증서의 서명 자리에 HMAC-SHA512(인증 키, 인증서 공개키)가 들어 있고, 클라이언트는 이것과 CertificateVerify 서명을 함께 확인합니다.
-- 클라이언트는 세션 ID와 키 공유를 직접 정해야 해서 rustls 대신 작은 TLS 1.3 클라이언트를 따로 구현했습니다(`retail-daemon/src/reality.rs`). TLS_AES_128_GCM_SHA256과 X25519만 쓰고, ClientHello는 Chrome 순서와 GREASE를 흉내 냅니다. rustls 서버와의 상호 운용, 잘못된 키, 탐지 요청을 단위 테스트로 확인합니다.
-- 전환: 6.5절의 경주에서 일반 HTTPS보다 1.5초 늦게(일반 HTTPS가 그 전에 실패하면 즉시) 출발합니다.
-- 한계: 서버 IP 차단에는 효과가 없습니다. ServerHello는 rustls가 만들므로 위장 사이트의 것과 똑같지는 않습니다. 시계가 2분 넘게 어긋나면 인증이 실패합니다.
+- Before handing TLS to rustls, the server (the hosting device) reads the ClientHello on port 443 and sorts it three ways.
+  - No SNI, or not the camouflage site's name: plain HTTPS.
+  - The camouflage site's name with valid authentication: REALITY. TLS 1.3 with a one-time Ed25519 certificate, then the same HTTP service (registration, control, relay).
+  - The camouflage site's name with wrong authentication: the connection is passed straight through to the real site, so a prober sees that site's handshake and content.
+- Authentication: the client derives an auth key with HKDF from X25519 (its key share's private key, the server's static public key) and seals version, time and short ID with AES-256-GCM into the session ID (the AAD is the ClientHello with the session ID zeroed). The server checks the time (±120 s), the short ID and replays.
+- Server verification: the one-time certificate's signature field holds HMAC-SHA512(auth key, certificate public key), and the client checks it along with the CertificateVerify signature.
+- The client must choose the session ID and the key share itself, so instead of rustls it uses a small TLS 1.3 client of its own (`retail-daemon/src/reality.rs`). It uses only TLS_AES_128_GCM_SHA256 and X25519, and its ClientHello mimics Chrome's order and GREASE. Unit tests cover interoperation with a rustls server, wrong keys and probes.
+- Switching: in the race of 6.5 it starts 1.5 seconds after plain HTTPS (at once if plain HTTPS fails sooner).
+- Limits: it does not help against a block of the server's IP. The ServerHello comes from rustls, so it is not identical to the camouflage site's. Authentication fails if clocks are more than 2 minutes apart.
 
 ### 6.3 Exit node
 
-한 기기를 거쳐 인터넷을 쓰는 기능입니다.
+Using the internet through another device.
 
-- 제공 쪽(Linux, Windows): IP 포워딩을 켜고 전용 체인(`RETAIL-FWD`, `RETAIL-NAT`, `RETAIL-MSS`)에 포워딩 허용, `100.64.0.0/10` MASQUERADE, MSS 보정 규칙을 넣습니다. Exit node의 사설망(10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10)으로는 보내지 않습니다. 시작할 때 남은 체인을 지우고 끝낼 때 정리합니다. Windows는 `New-NetNat`을 쓰며 실제 기기에서는 아직 확인하지 않았습니다. macOS는 제공을 지원하지 않습니다.
-- 사용 쪽: 메시 밖 목적지 패킷을 선택한 Exit 피어로 보내고, 그 피어에게서만 메시 밖 출발지 주소를 받아들입니다(다른 메시 주소 사칭은 계속 막음).
-- 라우팅 루프 방지: 데몬 자신의 소켓(WireGuard·STUN UDP, 제어 연결)은 터널을 우회합니다. Linux는 fwmark와 정책 라우팅(wg-quick 방식, 엄격한 rp_filter를 위한 connmark 복원), Windows는 `IP_UNICAST_IF`, macOS는 `IP_BOUND_IF`. Windows·macOS 경로는 실제 기기에서 아직 확인하지 않았습니다.
-- 터널은 IPv4만 나르므로 Exit node를 쓰는 동안 IPv6 인터넷은 막습니다(새지 않게).
-- 선택한 Exit node가 꺼지면 인터넷을 막습니다(fail closed). 트레이와 `retail status`가 이를 알리고, 해제하면 원래대로 돌아옵니다. 제어 연결은 계속 유지됩니다.
-- Exit node를 쓰는 동안 DNS가 터널로 가므로, 서버 이름 조회가 실패하면 마지막으로 성공한 주소를 씁니다.
+- Offering side (Linux, Windows): turns on IP forwarding and puts forwarding, `100.64.0.0/10` MASQUERADE and MSS clamping rules into dedicated chains (`RETAIL-FWD`, `RETAIL-NAT`, `RETAIL-MSS`). Traffic is never sent into the exit node's private networks (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10). Leftover chains are removed at start and cleaned up at the end. Windows uses `New-NetNat` and has not been checked on real hardware yet. macOS cannot offer an exit node.
+- Using side: packets to destinations outside the mesh go to the chosen exit peer, and source addresses outside the mesh are accepted only from that peer (spoofing other mesh addresses stays blocked).
+- No routing loops: the daemon's own sockets (WireGuard and STUN UDP, the control connection) bypass the tunnel: fwmark and policy routing on Linux (as wg-quick does, with connmark restore for strict rp_filter), `IP_UNICAST_IF` on Windows, `IP_BOUND_IF` on macOS. The Windows and macOS paths have not been checked on real hardware yet.
+- The tunnel carries IPv4 only, so the IPv6 internet is blocked while an exit node is in use (no leaks).
+- If the chosen exit node goes offline, the internet is blocked (fail closed). The tray and `retail status` say so, and clearing the choice restores it. The control connection stays up.
+- While an exit node is in use DNS goes through the tunnel, so if resolving the server name fails, the last address that worked is used.
 
-### 6.4 메모리 한도
+### 6.4 Memory limit
 
-`retail set --memory-limit <MiB|auto>`, `retaild --memory-limit`, `RETAIL_MEMORY_LIMIT`로 정합니다(앱 화면에는 없습니다). 기본은 자동이며 평소 메모리 약 10MB 수준입니다.
+Set with `retail set --memory-limit <MiB|auto>`, `retaild --memory-limit` or `RETAIL_MEMORY_LIMIT` (not in the app). The default is automatic.
 
-- 데이터 플레인 버퍼(암호화 작업자 수, 파이프라인 깊이, 수신 슬롯)를 한도에 들어가는 가장 빠른 조합으로 고릅니다. 바꾸면 터널을 다시 시작합니다.
-- 10초마다 한도를 넘었는지 보고, 넘었으면 해제된 힙을 OS에 돌려줍니다(Linux glibc).
+- The data plane buffers (number of crypto workers, pipeline depth, receive slots) are the fastest combination that fits the limit. Changing it restarts the tunnel.
+- Every 10 seconds the daemon checks the limit and, when over it, returns freed heap to the OS (Linux glibc).
 
-| 한도 | 직접 경로 | 최대 메모리 | 버퍼 |
-|---|---|---|---|
-| 자동 / 12MB | 약 4.4 Gbit/s | 9.3~9.7 MiB | 작업자 2개 (3.3MB) |
-| 24MB | 약 4.3 Gbit/s | 11.7~12.0 MiB | 작업자 4개 (6.2MB) |
-| 9MB 이하 | 1.9~2.2 Gbit/s | 7.6 MiB | 작업자 1개 (0.9MB) |
+The daemon idles at about 12 MiB and peaks around 15 MiB under load, within the 10–20 MB budget. A limit of 9 MB or less drops to one crypto worker and smaller buffers, at roughly half the throughput.
 
-(서버 내장 전에 측정한 값입니다. 지금은 서버 내장, 6.5절의 전송 방식, 128패킷 송신 작업이 더해져 평소 11.6~12.3 MiB, 부하 시 최대 14.8 MiB입니다. 사용자가 정한 예산은 평소 10~20MB입니다.)
+### 6.5 The way to the server (transport race)
 
-### 6.5 서버까지 가는 길 (전송 경주)
+So that the server is reachable from any network with internet access, the control connection and registration race every available way (`retail-daemon/src/transport.rs`). Each way starts when its delay has passed, or at once when all earlier ways have failed, and the first to succeed wins. On an ordinary network it connects at plain HTTPS speed; on a blocking one it tries the rest within seconds. The last way that worked is tried first next time.
 
-인터넷이 되는 네트워크라면 어디서든 서버에 닿도록, 제어 연결과 등록 요청은 가능한 방법을 모두 경주시킵니다(`retail-daemon/src/transport.rs`). 각 방법은 정해진 지연이 지나거나, 앞선 방법이 모두 실패하면 그 즉시 출발하고, 먼저 성공한 것을 씁니다. 그래서 평범한 네트워크에서는 HTTPS 속도 그대로 붙고, 막힌 네트워크에서는 몇 초 안에 나머지를 시도합니다. 마지막에 성공한 방법은 다음 연결에서 먼저 시도합니다.
-
-| 지연 | 방법 |
+| Delay | Way |
 |---|---|
-| 0초 | 핀 고정 HTTPS |
-| 1.5초 | REALITY (서버가 켜 둔 경우) |
-| 3초 | WebSocket 터널: 서버의 평문 HTTP(같은 포트와 80), 서버의 HTTPS, CDN 주소 |
-| 6초 | 같은 곳으로 HTTP 롱폴링 터널 |
+| 0 s | pinned HTTPS |
+| 1.5 s | REALITY (if the server has it on) |
+| 3 s | WebSocket tunnel: the server's plain HTTP (same port and 80), the server's HTTPS, CDN addresses |
+| 6 s | HTTP long-polling tunnel to the same places |
 
-- 위 표는 직접 연결과, 알고 있는 **프록시마다** 한 벌씩 돕니다.
-- **터널**의 바깥 TLS는 어떤 인증서든 받습니다(CDN의 것이든 TLS 검사 프록시의 것이든). 안쪽에서 핀 고정 TLS를 다시 맺으므로, 바깥을 푸는 쪽도 내용을 읽거나 바꿀 수 없습니다. 서버는 터널이 나르는 스트림을 새 연결처럼 자기 리스너에 넣습니다.
-- **프록시**: HTTP 프록시는 `CONNECT`(평문 HTTP 터널은 절대 경로 요청), SOCKS5는 자체 절차를 씁니다. 인증은 프록시 주소의 Basic·SOCKS5 사용자/비밀번호와, Windows에서는 로그인한 사용자의 Negotiate(Kerberos)·NTLM입니다. 서비스로 도는 데몬은 콘솔 사용자의 토큰을 빌려 SSPI를 부르고, 아무도 로그인하지 않았으면 컴퓨터 계정으로 시도합니다. 비밀번호는 저장하지 않습니다.
-- **어떤 프록시**: `retail set --proxy`(설정 시 그것만, `off`면 없음), 아니면 시스템 설정입니다. 시스템 설정은 트레이 앱이 알려 주는 로그인 사용자의 Windows 프록시(PAC·WPAD 결과 포함), `HTTPS_PROXY`·`ALL_PROXY`, Windows의 WinHTTP 설정, macOS의 네트워크 설정을 씁니다. 직접 연결은 어떤 경우에도 함께 시도합니다.
-- **NAT64**: IPv4 주소가 없는 기기는 `ipv4only.arpa`를 조회해 NAT64 접두사를 찾고(RFC 7050), 서버·STUN·피어의 IPv4 주소를 그 접두사로 바꾼 주소를 후보에 더합니다. IPv4가 있는 기기는 조회하지 않습니다(시스템 해석기 모듈이 메모리를 차지하므로).
-- `retail status`와 상태 API의 `control_via`가 지금 쓰는 방법을 보여 줍니다.
-- 한계: 로그인 전 캡티브 포털, 허용 목록에 있는 사이트만 통과시키는 네트워크(CDN 주소도 허용되지 않은 경우), DNS만 열린 네트워크는 넘지 못합니다. 터널 안의 릴레이는 직접 TCP보다 느리고, 롱폴링은 특히 느립니다.
+- The table runs once directly and once **for each known proxy**.
+- A **tunnel**'s outer TLS accepts any certificate (a CDN's, or a TLS-inspecting proxy's). Pinned TLS runs again inside, so whoever opens the outer layer can neither read nor change the content. The server feeds the stream a tunnel carries into its own listener as a new connection.
+- **Proxies**: HTTP proxies use `CONNECT` (absolute-form requests for the plain HTTP tunnel), SOCKS5 its own handshake. Authentication: Basic or SOCKS5 user/password from the proxy URL, and on Windows the signed-in user's Negotiate (Kerberos) or NTLM. The daemon runs as a service, so it borrows the console user's token to call SSPI, and with nobody signed in it tries the computer account. No password is stored.
+- **Which proxies**: `retail set --proxy` (when set, only that; `off` for none), otherwise the system settings: the signed-in user's Windows proxy as reported by the tray app (including PAC and WPAD results), `HTTPS_PROXY` / `ALL_PROXY`, the WinHTTP settings on Windows, the network settings on macOS. A direct connection is always tried as well.
+- **NAT64**: a device without an IPv4 address looks up `ipv4only.arpa` to find the NAT64 prefix (RFC 7050) and adds the server's, STUN's and peers' IPv4 addresses translated into that prefix as candidates. Devices with IPv4 do not look it up (the system resolver module costs memory).
+- `retail status` and the status API's `control_via` show the way in use.
+- Limits: captive portals before sign-in, allow-list networks (where even the CDN address is not allowed) and DNS-only networks are out of reach. The relay inside a tunnel is slower than over direct TCP, and long polling especially so.
 
-## 7. 로컬 API (데몬)
+## 7. Local API (daemon)
 
-`127.0.0.1:41112`에서 열립니다.
+Listens on `127.0.0.1:41112`.
 
-- 브라우저 공격 차단: 모든 요청에 `X-Retail-Local` 헤더가 있어야 하고(CORS 사전 요청을 강제), `Host`가 루프백 이름이어야 합니다(DNS 리바인딩 차단).
-- 변경 요청(POST)은 `X-Retail-Token`이 필요합니다. 데몬이 시작할 때마다 새 토큰을 만들어 파일에 씁니다. 그 파일을 읽을 수 있는 사람이 retail을 조작할 수 있습니다.
-  - Windows: `%ProgramData%\retail-api\token`, SYSTEM·Administrators와 이 컴퓨터에 로그인한 사용자(INTERACTIVE).
-  - Linux: `/run/retail/api-token`, root와 `retail` 그룹. macOS: root와 `admin` 그룹.
-  - 상태 조회(GET)는 토큰 없이 됩니다. 비밀 값이 들어 있지 않습니다.
+- Against browser attacks: every request needs the `X-Retail-Local` header (forcing a CORS preflight), and `Host` must be a loopback name (against DNS rebinding).
+- Changes (POST) need `X-Retail-Token`. The daemon writes a new token to a file each time it starts; whoever can read that file can control retail.
+  - Windows: `%ProgramData%\retail-api\token`: SYSTEM, Administrators, and users signed in to this computer (INTERACTIVE).
+  - Linux: `/run/retail/api-token`: root and the `retail` group. macOS: root and the `admin` group.
+  - Reading status (GET) needs no token; it holds no secrets.
 
-| 메서드 | 경로 | 동작 |
+| Method | Path | Action |
 |---|---|---|
-| GET | `/status` | 상태, 자기 노드, 피어별 경로/핸드셰이크/트래픽, 설정, 최대 메모리 |
-| POST | `/up` | `{ server?, auth_key?, hostname?, invite? }` 필요하면 등록 후 연결 |
-| POST | `/down` | 연결 해제 (등록 정보 유지) |
-| POST | `/logout` | 연결 해제 후 등록 정보와 키 삭제 |
-| POST | `/prefs` | Exit node 선택, Exit node 제공, 메모리 한도 |
-| GET | `/server` | 호스팅 상태: 주소, 공유기, 기기, 초대 |
-| POST | `/server/start`, `/server/stop` | 호스팅 시작·중지 |
-| POST | `/server/invite` | 초대 코드 생성 |
-| POST | `/server/nodes/{id}/delete`, `/server/invites/{id}/revoke` | 기기 내보내기, 초대 폐기 |
-| POST | `/server/invites/{id}/code` | 이름 붙은 초대의 현재 코드 (재사용 초대라서 토큰 필요) |
-| POST | `/web/login` | 웹 관리자 1회용 로그인 링크 |
+| GET | `/status` | State, own node, per-peer path/handshake/traffic, settings, peak memory |
+| POST | `/up` | `{ server?, auth_key?, hostname?, invite? }` registers if needed, then connects |
+| POST | `/down` | Disconnect (registration kept) |
+| POST | `/logout` | Disconnect, then delete the current registration and its key |
+| POST | `/servers/switch`, `/servers/forget` | `{ server }`: connect to a saved server instead of the current one, or remove one from the list |
+| POST | `/prefs` | Exit node choice, offering an exit node, memory limit |
+| GET | `/server` | Hosting state: addresses, router, devices, invites |
+| POST | `/server/start`, `/server/stop` | Start or stop hosting |
+| POST | `/server/invite` | Make an invite code |
+| POST | `/server/nodes/{id}/delete`, `/server/invites/{id}/revoke` | Remove a device, revoke an invite |
+| POST | `/server/invites/{id}/code` | The current code of a named invite (a reusable invite, hence the token) |
+| POST | `/web/login` | One-time sign-in link for the web admin page |
 
-### 7.1 웹 관리자 (`retail-web`)
+### 7.1 Web admin page (`retail-web`)
 
-`127.0.0.1:41180`, 그리고 호스팅하면서 네트워크의 구성원이고 관리를 허용한 기기가 있을 때만 이 기기의 메시 주소 `:41180`에서도 열립니다(3초마다 확인해 열고 닫음). 크기 우선(`opt-level = "s"`)으로 빌드하는 별도 크레이트이고, 데몬과는 정해진 인터페이스(`retail_web::Backend`)로만 연결됩니다.
+Listens on `127.0.0.1:41180`, and also on this device's mesh address `:41180` only while it hosts, is a member of the network and has devices allowed to manage (checked every 3 seconds). It is a separate crate built for size (`opt-level = "s"`) and talks to the daemon only through a fixed interface (`retail_web::Backend`). The page follows the browser's language (English, Korean, Japanese, Simplified Chinese, Spanish), with English as the fallback.
 
-- 루프백: 1회용 로그인 링크(2분)를 `HttpOnly; SameSite=Strict` 세션 쿠키(12시간)로 바꿉니다. 같은 PC의 다른 프로그램도 루프백에 닿을 수 있어서 로그인이 필요합니다.
-- 메시: 출발지 주소 → 서버 DB의 노드 → 허용 목록(노드 id, 호스트 설정에 저장)으로 판단합니다. WireGuard가 출발지 주소를 보증하므로 로그인이 없습니다. 이 기기 자신의 메시 주소와 메시 밖 주소는 거부합니다.
-- 공통: `Host`가 그 리스너 주소와 정확히 같아야 하고(DNS 리바인딩 차단), 변경(POST)은 `X-Retail-Web` 헤더와 같은 출처의 `Origin`이 있어야 합니다. 단위 테스트가 각 규칙을 확인합니다.
-- 설치 파일: `GET /download/{초대 id}/{os}-{arch}`가 미리 빌드된 트레이 실행 파일 뒤에 데몬·CLI(Windows는 `wintun.dll`)와 매니페스트(초대 코드, 파일 위치)를 이어 붙여 스트리밍합니다(`retail_proto::package`, 끝 16바이트가 `RETAIL-PACKAGE-1`). 실행 파일이 시작할 때 자기 끝을 읽어(최대 64KB) 패키지이면 설치 모드로 들어갑니다. 파일 이름은 안전한 문자만 허용합니다. 이어 붙이기는 코드 서명을 깨므로, 서명된 배포를 할 때는 서명이 허용하는 위치에 넣도록 바꿔야 합니다.
-- 다른 OS용 파일 올리기: `POST /api/clients/{os}-{arch}/{파일 이름}`. 그 OS에 필요한 파일 이름만 받고(경로 문자 불가), 내용의 시작이 그 OS의 실행 파일 형식(PE `MZ`, ELF, Mach-O)이어야 하며, 받는 대로 파일에 쓰고(최대 200MB) 끝나면 이름을 바꿉니다. GET·POST 말고는 거부합니다.
-- 설치(트레이 `install.rs`): 확인 → 관리자 권한으로 자신을 다시 실행(`runas`, `pkexec`, `osascript`) → 파일 풀기 → 부팅 등록(Windows 작업 스케줄러 XML: SYSTEM, 시간 제한 없음, 배터리 조건 없음, 실패 시 재시작 / systemd / launchd) → 데몬 API를 기다려 참여 → 사용자 프로세스에서 트레이 자동 시작 등록(관리자 권한으로 바뀐 계정의 HKCU가 아니라 원래 사용자의 것). 이미 다른 네트워크에 속해 있으면 바꾸지 않습니다. `--prefix`, `--no-service`, `--no-autostart`로 시험합니다(`scripts/install-netns.sh`).
+- Loopback: a one-time sign-in link (2 minutes) is exchanged for an `HttpOnly; SameSite=Strict` session cookie (12 hours). Other programs on the same PC can reach loopback too, hence the sign-in.
+- Mesh: source address → node in the server database → allow list (node ids, kept in the host settings). WireGuard vouches for the source address, so there is no sign-in. This device's own mesh address and addresses outside the mesh are refused.
+- Both: `Host` must equal the listener's address exactly (against DNS rebinding), and changes (POST) need the `X-Retail-Web` header and a same-origin `Origin`. Unit tests cover each rule.
+- Installers: `GET /download/{invite id}/{os}-{arch}` streams a prebuilt tray executable followed by the daemon and CLI (on Windows also `wintun.dll`) and a manifest (invite code, file offsets) (`retail_proto::package`; the last 16 bytes are `RETAIL-PACKAGE-1`). When the executable starts it reads its own tail (at most 64 KB) and, if it is a package, enters install mode. File names are limited to safe characters. Appending breaks code signatures, so signed releases will need the payload where the signature allows it.
+- Clients for other systems: fetched once from the official GitHub release of the same version and checked against `SHA256SUMS` (`retail-daemon/src/releases.rs`), or uploaded with `POST /api/clients/{os}-{arch}/{file name}`. An upload takes only the file names that system needs (no path characters), its content must start like an executable of that system (PE `MZ`, ELF, Mach-O), and it is written as it arrives (at most 200 MB) and renamed at the end. Methods other than GET and POST are refused.
+- Installation (tray `install.rs`): confirm → run itself again as administrator (`runas`, `pkexec`, `osascript`) → unpack → register for boot (Windows Task Scheduler XML: SYSTEM, no time limit, no battery conditions, restart on failure / systemd / launchd) → wait for the daemon API and join → register the tray to start at sign-in from the user's own process (the original user's HKCU, not the elevated account's). A device that already belongs to another network is left as it is. `--prefix`, `--no-service` and `--no-autostart` exist for testing (the `install` scenario of `scripts/netns-test.sh`).
 
-## 8. 상태 저장
+## 8. State
 
-- 데몬: `<state-dir>/state.json` (개인키, 서버 주소·핀·REALITY 설정, 토큰, IP, 설정).
-  - 기본 위치: Windows `%ProgramData%\retail`, Linux `/var/lib/retail`, macOS `/Library/Application Support/retail`.
-  - 상태 디렉터리는 Windows에서 SYSTEM·Administrators(와 데몬 실행 계정)만, Unix에서 소유자만(0700) 읽을 수 있게 저장할 때마다 다시 설정합니다.
-- 호스팅: `<state-dir>/server/` 안에 `retail.json`(기기, 초대 키 해시), `tls/`(인증서와 키), `host.json`(포트, 도메인, REALITY 키). 데이터가 작고 쓰는 곳이 데몬 하나뿐이라 데이터베이스 대신 JSON 파일을 통째로 원자적으로 다시 씁니다. 엔드포인트와 마지막 접속 시각은 메모리에만 둡니다.
+- Daemon: `<state-dir>/state.json` (private key, server address, pin and REALITY settings, token, IP, settings).
+  - Every server joined is kept there as a profile (its own key, token, address, pin and the invite used), so the device switches between networks without new invites and keeps its node and address in each. Joining another server keeps the current one; if joining fails, the device goes back to it. Logging out forgets only the current server.
+  - Default location: `%ProgramData%\retail` on Windows, `/var/lib/retail` on Linux, `/Library/Application Support/retail` on macOS.
+  - Every save resets the state directory to SYSTEM and Administrators (and the daemon's account) on Windows, and to the owner only (0700) on Unix.
+- Hosting: `<state-dir>/server/` holds `retail.json` (devices, invite key hashes), `tls/` (certificate and key) and `host.json` (ports, domain, REALITY keys). The data is small and has a single writer, so instead of a database the JSON file is rewritten whole, atomically. Endpoints and last-seen times live in memory only.
 
-## 9. 안정성
+## 9. Robustness
 
-- 세션 작업(TUN, UDP, 타이머, 탐색, 제어)이 오류로 끝나면 감시자가 세션을 다시 시작합니다. (1초부터 최대 30초까지 지수 백오프, 60초 이상 정상 동작하면 초기화)
-- 제어 연결이 끊기면 1초부터 최대 30초까지 백오프하며 재연결합니다. 끊긴 동안에도 데이터 플레인은 마지막 NetMap으로 계속 동작합니다.
-- SIGTERM/Ctrl-C를 받으면 세션을 정리하고(TUN 해제) 종료합니다. 재시작하면 `want_running` 상태에 따라 자동으로 다시 연결합니다.
-- 20초 이상 수신이 없는 엔드포인트는 버리고 모든 후보로 다시 시도합니다. 데이터를 보내는 중이면 3초 만에 릴레이로 넘어갑니다(6.1절).
-- 제어 연결은 10초마다 ping을 보내고, 30초 동안 응답이 없으면 다시 연결합니다.
+- If a session task (TUN, UDP, timers, probing, control) ends in an error, a supervisor restarts the session (exponential backoff from 1 to 30 seconds, reset after 60 seconds of normal running).
+- A dropped control connection reconnects with backoff from 1 to 30 seconds. Meanwhile the data plane keeps working with the last NetMap.
+- On SIGTERM/Ctrl-C the session is cleaned up (TUN released) before exiting. After a restart it reconnects on its own according to `want_running`.
+- Endpoints silent for 20 seconds are dropped and all candidates are tried again. While data is being sent, the relay takes over after 3 seconds (6.1).
+- The control connection pings every 10 seconds and reconnects after 30 seconds without an answer.
 
-## 10. 서버 (호스팅)
+## 10. Server (hosting)
 
-별도 서버 프로그램은 없습니다. 호스팅하는 기기의 retaild 안에서 `retail-control` 라이브러리가 돕니다(트레이 서버 관리 창, `retail server start`, VPS·Docker는 `retail server start --no-join` 또는 `retaild --serve`). 사용법은 [SELF-HOSTING.md](SELF-HOSTING.md)에 있습니다.
+There is no separate server program. The `retail-control` library runs inside the hosting device's retaild (the tray's server window, `retail server start`, or `retail server start --no-join` / `retaild --serve` on a VPS or in Docker). [SELF-HOSTING.md](SELF-HOSTING.md) explains how to use it.
 
-- **TLS**: 자체 서명 인증서(위 2절). 도메인이나 인증 기관이 필요 없어 ACME를 뺐습니다. 핸드셰이크는 연결마다 별도 작업에서 10초 제한으로 처리합니다.
-- **관리**: 웹 관리 콘솔을 없애고 로컬 API(토큰 필요)로만 관리합니다. 인터넷에 노출되는 관리자 로그인 화면이 없습니다.
-- **포트 80**: 서버 포트 말고도 80을 (비어 있으면) 엽니다. 웹 포트만 나가는 네트워크의 평문 HTTP 터널용입니다.
-- **공유기 포트**: PCP, 안 되면 NAT-PMP, 안 되면 UPnP IGD로 TCP 서버 포트와 80, UDP 3478, UDP WireGuard 포트를 열고, 임대 시간의 절반마다 갱신하고, 중지하면 지웁니다. 외부 포트가 이미 쓰이면 다른 포트를 받아 초대에 넣습니다. 공유기 응답(SSDP, XML)은 크기와 시간을 제한해 읽습니다. 외부 주소가 사설 주소면 CGNAT 경고를 띄웁니다. `RETAIL_NO_PORTMAP=1`로 끕니다.
-- **호스팅 기기 자신**: 루프백으로 자기 서버에 참여하고, 공유기가 열어 준 WireGuard 포트를 공인 엔드포인트 후보로 알립니다(자기 서버의 STUN은 루프백만 보이므로). 초대의 LAN 주소는 기본 경로 인터페이스의 주소를 먼저 넣습니다(가상 머신·컨테이너 어댑터 뒤로).
-- **보조 노드** (CGNAT 등 밖에서 들어올 수 없는 서버용): 공인 주소가 있는 기계(VPS)에서 `retail helper start`를 켜면 코드(`retailh1.…`)가 나옵니다. 서버에 `--helper CODE`를 주면 서버가 보조 노드로 연결을 열어 두고, 보조 노드는 받은 연결마다 서버에 새 연결을 요청해 바이트를 그대로 잇습니다. TLS·REALITY·터널은 서버에서 끝나므로 보조 노드는 내용을 보지 못합니다. 서버 자신의 연결은 TLS SNI `link.retail.invalid`와 비밀 값으로 구분합니다. 보조 노드는 STUN도 답하고, 초대 코드에는 보조 노드 주소가 들어갑니다.
-- **CDN**: `--front https://이름`을 주면 초대 코드에 들어가고, 기기는 CDN을 거치는 터널을 시도합니다. CDN은 서버(또는 보조 노드)의 443으로 전달해야 합니다.
-- **Windows 방화벽**: retaild 프로그램에만 적용되는 수신 허용 규칙을 추가하고 중지하면 지웁니다.
-- **중지**: WebSocket(제어·릴레이) 연결을 모두 닫고 포트를 풉니다. 연결된 기기는 0.1초 안에 끊김을 알고, 다시 시작하면 약 1초 안에 다시 붙습니다.
-- **패키징**: `packaging/docker`(retaild 서버 모드, distroless), `packaging/systemd/retaild.service`.
+- **TLS**: a self-signed certificate (section 2). No domain or certificate authority is needed, so there is no ACME. Each handshake runs in its own task with a 10-second limit.
+- **Administration**: through the local API (token required) and the web admin page of 7.1, which is never open to the internet. There is no admin sign-in page exposed to the internet.
+- **Port 80**: besides the server port, port 80 is opened (if free) for the plain HTTP tunnel on networks that let only web ports out.
+- **Router ports**: PCP, then NAT-PMP, then UPnP IGD open the TCP server port and 80, UDP 3478 and the UDP WireGuard port, renew them every half lease, and remove them on stop. If an external port is taken, another one is used and put into invites. Router answers (SSDP, XML) are read with size and time limits. A private external address raises the CGNAT warning. `RETAIL_NO_PORTMAP=1` turns this off.
+- **The hosting device itself**: joins its own server over loopback and reports the WireGuard port the router opened as a public endpoint candidate (its own server's STUN only sees loopback). The invite lists the LAN address of the default-route interface first (ahead of virtual machine and container adapters).
+- **Helper node** (for servers that cannot be reached from outside, such as behind CGNAT): `retail helper start` on a machine with a public address (a VPS) prints a code (`retailh1.…`). With `--helper CODE` the server keeps a connection open to the helper, and for each connection the helper receives it asks the server for a new connection and joins the bytes as they are. TLS, REALITY and tunnels end at the server, so the helper never sees content. The server's own connections are told apart by the TLS SNI `link.retail.invalid` and a secret. The helper answers STUN too, and invite codes carry its address.
+- **CDN**: `--front https://name` goes into invite codes, and devices try a tunnel through the CDN. The CDN must forward to port 443 of the server (or of the helper).
+- **Windows firewall**: an inbound allow rule for the retaild program only, removed on stop.
+- **Stop**: closes all WebSocket (control and relay) connections and releases the ports. Connected devices notice within 0.1 seconds and reconnect within about 1 second when the server starts again.
+- **Packaging**: `packaging/docker` (retaild in server mode, distroless), `packaging/systemd/retaild.service`, and the release workflow that publishes the official clients (`.github/workflows/release.yml`).
 
-## 11. 트레이 앱
+## 11. Tray app
 
-- 모든 화면을 CPU로 직접 그립니다(winit + softbuffer + tiny-skia + ab_glyph). OS 기본 위젯과 웹뷰를 쓰지 않습니다.
-- 트레이 아이콘: Windows/macOS는 `tray-icon`, Linux는 `ksni`(D-Bus StatusNotifierItem, GTK 불필요)를 씁니다. 메뉴 대신 직접 그린 팝업을 띄웁니다.
-- 글꼴은 시스템 글꼴을 쓰고, 글리프를 필요할 때만 읽습니다. 한글 같은 대체 글꼴은 해당 문자가 처음 나올 때 엽니다. (모든 글리프를 미리 펼치는 방식은 한중일 글꼴에서 수백 MB가 듭니다.)
-- 강조색은 파란색이고, 화면 문구는 한국어입니다. 데몬이 보내는 흔한 오류(초대 코드 오류, 서버 연결 실패, 권한 등)는 트레이가 한국어로 바꿔 보여 줍니다. 서버 상태의 공유기 결과와 경고는 문장이 아닌 값(`router`, `notice`)으로 받아 트레이와 웹이 각자 표시합니다.
-- 팝업: 아래쪽 오른쪽 톱니바퀴 메뉴에서 서버 관리·설정·종료를 고릅니다. 기기마다 ⋯ 메뉴가 있습니다(IP 복사, 그 기기가 Exit node를 제공하면 사용·해제). Exit node를 쓰는 중이면 머리글과 해당 기기 줄에 표시하고, 그 기기가 꺼지면 빨간색으로 인터넷 차단을 알립니다.
-- 설정 창: 초대 코드(또는 서버 URL과 인증 키)로 로그인, 서버 변경, 로그아웃(두 번 눌러 확인), Exit node 제공 토글, 시스템/라이트/다크 테마. 테마는 사용자별 `tray.json`에 저장합니다.
-- 서버 창: 톱니바퀴 → 서버 관리로 엽니다. 호스팅 시작·중지(두 번 눌러 확인), 주소·공유기 상태·경고, 초대 코드와 QR 코드(창을 닫으면 화면에서 지움), 기기 목록(마지막 접속 시각)과 내보내기.
-- 서버 창의 **웹에서 관리**: 웹 관리자를 1회용 로그인 링크로 엽니다.
-- `--preview out.png [--settings | --server] [--dark] [--state ...]`로 화면을 PNG로 렌더링할 수 있습니다(`docs/img`).
+- Every screen is drawn on the CPU (winit + softbuffer + tiny-skia + ab_glyph), with no native widgets or web views.
+- Tray icon: `tray-icon` on Windows and macOS, `ksni` on Linux (D-Bus StatusNotifierItem, no GTK). Instead of a menu it opens a popup it draws itself.
+- Fonts are the system's, and glyphs are read only when needed. Fallback fonts for Hangul, kana and Han characters open the first time such a character appears; kana go to a Japanese font, Hangul to a Korean one, and Han characters to the font of the interface language. (Expanding every glyph up front costs hundreds of MB with CJK fonts.)
+- Languages: English, Korean, Japanese, Simplified Chinese and Spanish, picked in settings or following the system (the default). Source strings are English and double as keys into one table (`i18n.rs`); a unit test checks that every row is complete and keeps its placeholders. Common daemon errors (invite code problems, unreachable server, permissions) are reworded in the chosen language. The server's router result and warnings arrive as values (`router`, `notice`), not sentences, so the tray and the web page word them themselves.
+- The accent colour is blue. The theme follows the system by default (light or dark), or is fixed in settings.
+- Popup: the gear at the bottom right opens Manage server, Settings and Quit. Each device has a ⋯ menu (copy IP; use or stop using it as exit node when it offers one). An exit node in use shows in the header and on its device row, and in red if it goes offline and the internet is blocked.
+- Settings window: sign in with an invite code (or server URL and auth key); **Change server** lists the saved servers: a click switches, the ⋯ menu removes one, and **+ Add server** joins another with its code; log out (click twice to confirm), offer as exit node, theme (System / Light / Dark), language (a drop-down list). Theme and language are saved per user in `tray.json`.
+- Server window: gear → Manage server. Start or stop hosting (click twice to confirm), addresses, router state and warnings, invite code and QR code (wiped from the screen when the window closes), device list (last seen) and removal.
+- **Manage on the web** in the server window opens the web admin page with a one-time sign-in link.
+- Run on a device already in another network, an installer package asks whether to switch; on yes the daemon leaves the current network (kept in the list) and joins the package's.
+- `--preview out.png [--settings | --server] [--dark] [--lang <en|ko|ja|zh|es>] [--state ...]` renders a screen to PNG (`docs/img`).
 
-## 12. 성능 (WSL2, 네트워크 네임스페이스, 양쪽 NAT 뒤)
+## 12. Performance
 
-`scripts/e2e-netns.sh`와 `scripts/bench.sh`로 측정했습니다. 같은 기기 안에서 veth로 연결한 환경이라 물리 NIC 한계는 없고, 구현별 효율을 비교하는 용도입니다. 같은 경로의 평문 TCP는 40 Gbit/s 이상 나옵니다.
+Measured with `scripts/bench.sh` on WSL2: two network namespaces, each behind a NAT, joined by veth pairs on one computer. There is no physical NIC limit, so this compares the efficiency of implementations; plain TCP on the same path does over 25 Gbit/s. The machine varies ±25% from run to run, so comparisons are made within one session (`RUNS=3` averages).
 
-| 항목 | 첫 구현 | 현재 |
-|---|---|---|
-| `retail up`부터 첫 ping | 5.12초 | 0.1~0.2초 |
-| TCP 단일 스트림 | 946 Mbit/s (재전송 3,396) | 약 4.7~4.9 Gbit/s (재전송 0) |
-| TCP 역방향 | 926 Mbit/s | 약 4.7~5.4 Gbit/s |
-| TCP 4 스트림 | 577 Mbit/s | 약 4.4~5.2 Gbit/s |
-| retaild 최대 메모리 | 10.9 MiB | 9.6 MiB (암호화 작업자 2개 포함) |
-| 데몬 재시작 후 터널 복구 | - | 0.02~0.15초 |
-| 컨트롤 서버 복귀 후 재연결 | - | 약 1.1초 |
-
-같은 환경의 다른 구현과 비교한 결과입니다(같은 세션에서 3회 평균, Mbit/s).
-
-| 구현 | 단일 | 역방향 | 4 스트림 | 메모리 |
+| Implementation | Single stream | Reverse | 4 streams | Memory |
 |---|---|---|---|---|
-| retail (암호화 작업자 2개) | 4,883 | 5,427 | 5,210 | 약 9.6 MiB |
-| wireguard-go (Tailscale 엔진, GSO/GRO 포함) | 4,768 | 5,105 | 4,616 | 524~892 MiB |
-| 커널 WireGuard (이전 측정) | 642~850 | 677~769 | 674~732 | - |
+| retail | 7,396 | 7,402 | 8,287 Mbit/s | 13 MiB |
+| wireguard-go (with GSO/GRO) | 5,387 | 4,056 | 4,273 Mbit/s | 814–944 MiB |
 
-단일 스트림은 측정 편차 안에서 동등하고(+2%), 역방향(+6%)과 다중 스트림(+13%)은 retail이 앞섭니다. CPU는 retail이 조금 덜 쓰고(약 62% 대 67%), 메모리는 1/50 이하입니다. 이 환경은 실행마다 ±10% 정도 흔들리므로, 단일 스트림은 "동등"으로 보는 것이 정확합니다. 기여한 최적화는 다음과 같습니다.
+What gets it there:
 
-1. TSO/GSO/GRO 배치 I/O와 백프레셔(5절)
-2. **TCP GRO 직접 구현**(`gro.rs`). tun-rs의 GRO는 버퍼 용량이 작으면 병합을 포기해서, 수신 측이 패킷마다 `write()`를 호출하고 있었습니다. 직접 구현으로 쓰기 횟수가 1/26이 됐습니다.
-3. 데이터 플레인 단계를 전용 OS 스레드에서 파이프라인으로 실행(작업 이동 없음, tokio 워커는 2개)
-4. 의존성 정리(TLS 백엔드 하나, HTTP 클라이언트 제거)
-5. **피어별 병렬 암호화**(아래)
+1. Batched I/O and backpressure (section 5): TSO reads, GSO sends, GRO receives and writes, several reads per job.
+2. **TCP GRO of our own** (`gro.rs`). tun-rs gives up merging when the buffer is small, which left the receiver calling `write()` per packet; ours writes 1/26 as often.
+3. Data plane stages as a pipeline on dedicated OS threads (no task migration).
+4. **Parallel encryption per peer** (below).
+5. Relay and tunnels batch too: frames are gathered and flushed together, and received frames are decrypted in one batch and merged with GRO.
 
-### 2026-11-24 성능 작업
+The largest remaining cost is encryption (ChaCha20-Poly1305, about 25%), which the WireGuard specification fixes.
 
-이 노트북(Intel Core Ultra 7 258V, WSL2)은 실행마다 처리량이 ±25%까지 흔들립니다. 그래서 판단은 **같은 실행 안에서 번갈아 잰 비교**와, 덜 흔들리는 **1 GB당 데몬 CPU 시간**으로 했습니다(`perf`로 원인을 찾고 3~5라운드 교차 측정).
+**The tunnel MTU stays at 1280.** Against 1420 it costs only 1–2% throughput (most of the cost is per byte), while 1420 lets large packets vanish silently on networks with a smaller path MTU (PPPoE, mobile, tunnels over IPv6), which would need path MTU discovery per device pair.
 
-| 변경 | 결과 (변경 전 → 후) |
-|---|---|
-| 송신 작업에 TUN 읽기 여러 번 담기 (작업당 64 → 128패킷) | 직접 경로 중앙값 단일 3,207 → 3,510, 역방향 3,055 → 3,803, 4 스트림 2,863 → 4,114 Mbit/s, CPU 11.4 → 10.1초/GB. 릴레이 CPU −22% |
-| 릴레이: 받는 쪽 일괄 복호화와 GRO, 보내는 쪽 프레임 모아 flush, 프레임 16 → 60KB, 대기열 8 → 16 | 같은 실행 기준 1,247 → 2,013 Mbit/s, CPU −36% |
-| 터널: 메시지 16 → 64KB, 롱폴링 응답·요청에 2ms 모으기 | 롱폴링 CPU −20%, CDN 경유 CPU −9% |
-| 수신: 한 번에 받은 GRO 묶음들을 복호화 작업 하나로 | 5라운드 평균 단일 6,485 → 7,361, 역방향 6,798 → 7,481, 4 스트림 7,104 → 8,335 Mbit/s, CPU −11%, 문맥 전환 −20% |
+### Parallel encryption
 
-같은 세션에서 잰 최종 결과입니다(Mbit/s, 이 실행에서는 기계가 빨라 절대값이 위 표보다 큽니다).
-
-| 구현 | 단일 | 역방향 | 4 스트림 | 메모리 |
-|---|---|---|---|---|
-| retail (송신 묶음까지) | 7,396 | 7,402 | 8,287 | 13.0 MiB |
-| wireguard-go (같은 세션) | 5,387 | 4,056 | 4,273 | 814~944 MiB |
-| retail (수신 묶음까지, 기계가 느린 세션) | 2,756 | 2,596 | 2,919 | 14.1 MiB |
-| wireguard-go (같은 세션) | 2,051 | 2,434 | 2,289 | 637~917 MiB |
-
-작업 시작 때 같은 방식으로 잰 값은 retail 3,905 / 3,927 / 3,974, wireguard-go 4,677 / 4,800 / 5,514로 retail이 뒤졌습니다. 시나리오 기준으로는 릴레이 2.5~3.7 Gbit/s(이전 약 1.1), CDN 경유 약 2.0 Gbit/s(이전 41~190 Mbit/s), TLS 검사망 롱폴링 약 1.6 Gbit/s(이전 약 0.7)입니다.
-
-효과가 없거나 나빴던 시도:
-
-| 시도 | 결과 |
-|---|---|
-| 수신 슬롯 8 → 16, 파이프라인 깊이 4 → 6, 암호화 작업자 2 → 3 | 측정 편차 안. 지연만 늘어 채택하지 않음 |
-| 단계가 잠들기 전 20~100µs 바쁘게 기다리기 | CPU/GB 17~25% 증가, 처리량도 낮음(가상 머신에서 다른 스레드의 CPU를 빼앗음) |
-| 서버 릴레이 대기열 128 → 512 | 처리량은 같고 지연만 증가 |
-| TCP 버퍼 32 MiB | 처리량은 같고 지연만 증가. 병목은 TCP 창이 아니라 CPU |
-
-**터널 MTU는 1280으로 둡니다.** 1420과 교차 5라운드로 비교하니 처리량 +1~2%, CPU −1.6%뿐이었습니다(비용 대부분이 바이트 단위인 암호화라 패킷 수 11% 감소의 효과가 작습니다). 반면 1420은 경로 MTU가 작은 네트워크(PPPoE, 모바일, IPv6 위 터널)에서 큰 패킷만 조용히 버려져 연결이 살아 보이는데 전송이 멈출 수 있고, 이를 막으려면 기기 쌍마다 경로 MTU 탐색이 필요합니다. 1~2%를 위해 그 위험과 복잡도를 감수하지 않았습니다.
-
-남은 비용의 가장 큰 부분은 암호화(ChaCha20-Poly1305, 약 25%)입니다. WireGuard 규격이 정한 알고리즘이고, ring의 AVX2 구현이 AVX-512가 없는 이 CPU에서 사실상 최선이라 더 줄일 방법이 없습니다.
-
-### 병렬 암호화
-
-boringtun의 `Tunn`은 `&mut self`라 한 피어의 암호화가 코어 하나에서만 돕니다. 세션 객체는 `&self`로 암호화할 수 있으므로 boringtun을 `vendor/boringtun`에 가져와 최소한으로 패치했습니다(`RETAIL-CHANGES.md`). 세션을 `Arc`로 노출하고, 카운터 일괄 예약, 배치 암복호화, 그리고 `Tunn`이 패킷마다 하던 타이머·바이트·세션 전환 기록을 묶음 단위로 하는 API를 추가했습니다. 원본 단위 테스트(`mock-instant` 포함)와 병렬 왕복·재전송·변조 테스트를 통과합니다.
-
-구조는 다음과 같습니다.
+boringtun's `Tunn` takes `&mut self`, so one peer's encryption would run on a single core. Its session objects can encrypt through `&self`, so boringtun is vendored in `vendor/boringtun` with a minimal patch (`RETAIL-CHANGES.md`): sessions exposed as `Arc`, counters reserved in bulk, batch encryption and decryption, and timers, byte counts and session switches recorded per batch. It passes the original unit tests plus parallel round-trip, replay and tampering tests.
 
 ```
 tun-read --+-- encrypt[0..K] --+-- udp-send
 udp-recv --+-- decrypt[0..K] --+-- tun-write
 ```
 
-- `tun-read`가 피어 조회와 **송신 카운터 예약**을 하고, 작업을 K개 작업자에 순환 배분합니다. `udp-send`와 `tun-write`는 같은 순환 순서로 결과를 받습니다. 채널이 FIFO라 재정렬 버퍼 없이 순서가 유지되고, 카운터 순서도 전송 순서와 같습니다.
-- 생산자는 작업을 넘기고 바로 다음 읽기로 갑니다. 모든 버퍼가 사용 중일 때만 기다립니다.
-- `RETAIL_CRYPTO_THREADS`로 K를 정합니다. 기본값은 **측정한 조건에서만 2**입니다. Linux에서 TUN 오프로드와 UDP GRO가 모두 켜져 있고(작업 하나가 패킷 약 40개) 코어가 4개 이상인 경우입니다. 그 밖(Windows, macOS, 오프로드가 없는 Linux)에서는 작업이 패킷 하나일 수 있어 1을 씁니다. 그런 환경의 K=2 효과는 아직 측정하지 않았습니다.
+- `tun-read` looks up the peer, **reserves send counters** and hands jobs to the K workers in turn; `udp-send` and `tun-write` take results in the same rotation. The channels are FIFO, so order holds without a reorder buffer and counter order matches send order.
+- The pipeline is 4 jobs deep; at 2 the stages wait on each other and lose 30–45%.
+- `RETAIL_CRYPTO_THREADS` sets K. The default is 2 on Linux with TUN offload and UDP GRO and at least 4 cores (about 40 packets per job), and 1 elsewhere, where a job can be a single packet.
+- A long transfer across WireGuard's rekeys (the `rekey` scenario of `scripts/netns-test.sh`) runs without a break around the new handshakes.
 
-측정 과정에서 배운 점입니다.
+## 13. Next milestones
 
-| 시도 | 결과 |
+| Milestone | Content |
 |---|---|
-| 묶음마다 rayon 작업자로 fork-join | 처리량 **절반**. 단계 스레드가 초당 수천 번 작업자를 깨우고 기다렸습니다. |
-| 라운드로빈 구조, 파이프라인 깊이 2 | K=2가 기존보다 느림(약 3.5~4.2 Gbit/s). 처음엔 병렬화가 손해로 보였지만, 같은 구조에서 K=1→K=2는 +53%였습니다. 깊이와 다른 상수를 한꺼번에 바꾼 **교란된 실험**이었습니다. |
-| 라운드로빈 구조, **파이프라인 깊이 4** | 교차 5회 평균 기존 4,232 / 4,298 / 3,802 대비 K=2 **4,862 / 4,843 / 4,404** (+13~16%) |
+| Policy | ACLs between devices (groups/tags), MagicDNS, key expiry and rotation, admin approval of exit nodes |
+| Convenience | Subnet routers, IPv6 inside the mesh, mobile |
+| Releases | Code signing and automatic updates |
+| Performance | Measure the worker count (K) on real many-core hardware, the relay on lossy and high-latency lines (a UDP relay if needed), several relay servers, a faster first REALITY connection |
+| Verification | Exit node routing, NAT and firewall rules on real Windows and macOS machines. Proxy integrated authentication (Kerberos, NTLM) and PAC on a real corporate network |
+| Connectivity | Opening the IPv6 firewall with PCP, entering helper codes and CDN addresses in the tray |
 
-`PIPELINE_DEPTH`를 2로 줄이면 단계들이 서로를 기다리며 30~45% 느려지므로 4를 유지해야 합니다.
+## 14. Known limitations
 
-**키 교체 장기 테스트** (`scripts/soak-rekey.sh`, 240초 단일 스트림, K=2): 약 117초와 240초에 양쪽 핸드셰이크가 새로 맺어졌고(키 교체), 그 전후로 처리량이 끊기지 않았습니다. 123GB 전송에 재전송 1회, 최대 메모리 8.6 / 9.0 MiB였습니다. 처리량이 시간에 따라 5.5에서 3.5 Gbit/s 사이로 흔들렸는데, 변경 전 엔진도 같은 테스트에서 4.3에서 2.9 사이로 흔들려 측정 환경(노트북 VM) 요인으로 판단했습니다. 240초 평균은 새 엔진 4,392, 변경 전 엔진 3,449 Mbit/s였습니다(연속 실행이라 조건이 완전히 같지는 않음).
-
-## 13. 다음 마일스톤
-
-| 마일스톤 | 내용 |
-|---|---|
-| M4 정책 | 기기 간 ACL(그룹/태그), MagicDNS, 키 만료와 회전, Exit node 관리자 승인 |
-| M5 편의 기능 | 서브넷 라우터, 메시 내부 IPv6, Windows Service/launchd 등록, 클라이언트 설치 패키지, 모바일 |
-| 배포 | GitHub Releases로 배포, 서명된 자동 업데이트 |
-| 성능 | 코어가 많은 실제 장비에서 작업자 수(K) 재측정, 손실·지연이 있는 회선에서 릴레이 측정(필요하면 UDP 릴레이), 여러 릴레이 서버, REALITY 첫 연결 시간 단축 |
-| 확인 | Windows·macOS 실제 기기에서 Exit node 라우팅·NAT, 방화벽 규칙. 실제 회사망에서 프록시 통합 인증(Kerberos·NTLM)과 PAC |
-| 연결 | PCP로 IPv6 방화벽 열기, 트레이에서 보조 노드 코드·CDN 입력 |
-
-## 14. 알려진 제약
-
-- 직접 연결이 안 되는 경우(대칭형 NAT끼리, UDP 차단 등)는 컨트롤 서버 릴레이로 연결됩니다. 이때 트래픽이 서버를 지나므로 서버 회선이 처리량의 한계입니다. 릴레이 서버는 컨트롤 서버 하나뿐입니다.
-- 가상 주소(메시 내부)는 IPv4 전용입니다. 기기 사이의 실제 경로는 IPv6도 씁니다. Windows/macOS는 TUN 오프로드가 없어 Linux보다 처리량이 낮을 수 있습니다. (UDP 쪽 배치 I/O는 적용됨)
-- Windows에서는 이 컴퓨터에 로그인한 모든 사용자가 retail을 조작할 수 있습니다(로컬 API 토큰을 INTERACTIVE가 읽음). 같은 사용자로 도는 다른 프로그램도 마찬가지입니다.
-- 기기 간 접근 제어가 없어 같은 네트워크의 모든 노드가 서로 통신할 수 있습니다. Exit node 제공도 관리자 승인 없이 됩니다(사용하는 쪽이 고름).
-- 평소 메모리는 11.6~12.3 MiB, 부하 시 최대 14.8 MiB입니다(사용자가 정한 예산 10~20MB 안).
-- 프록시 통합 인증은 Windows에서만 됩니다. Linux·macOS는 Basic과 SOCKS5 비밀번호만 씁니다. Linux에서는 시스템 프록시를 환경 변수로만 읽습니다.
-- 서버 인증서 키를 잃으면 모든 기기를 다시 초대해야 합니다.
-- **Tailscale과 동시에 쓰면 충돌**합니다. 둘 다 `100.64.0.0/10` 대역과 UDP 41641을 씁니다. retaild는 포트가 사용 중이면 임의 포트로 바꾸지만, 주소 대역은 겹칩니다.
+- Where no direct connection is possible (two symmetric NATs, blocked UDP, ...), traffic relays through the control server, whose line then limits throughput. The control server is the only relay.
+- Virtual (mesh) addresses are IPv4 only; the real paths between devices use IPv6 too. Windows and macOS have no TUN offload and may be slower than Linux (UDP batching applies there).
+- On Windows every user signed in to the computer can control retail (INTERACTIVE can read the local API token), and so can other programs running as those users.
+- There is no access control between devices: every node in a network can reach every other. Offering an exit node needs no admin approval (the using side chooses).
+- Idle memory is 11.6–12.4 MiB, at most 14.9 MiB under load (within the 10–20 MB budget).
+- Integrated proxy authentication works on Windows only. Linux and macOS use Basic and SOCKS5 passwords only, and Linux reads the system proxy from environment variables only.
+- Losing the server certificate key means inviting every device again.
+- **Other VPNs that use `100.64.0.0/10` conflict**: retail takes addresses from that range and UDP 41641. retaild moves to a random port if 41641 is taken, but the address ranges overlap, so do not run such a VPN on the same device at the same time.

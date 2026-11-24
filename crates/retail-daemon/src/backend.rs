@@ -157,6 +157,20 @@ impl Backend {
         };
         let server = target.url.clone();
         let mut p = self.persisted.lock().await;
+        // Joining another server keeps the current one in the saved list, to
+        // switch back to, and goes back to it if joining fails
+        let previous = p.clone();
+        if p.token.is_some() && p.server.as_deref() != Some(server.as_str()) {
+            self.stop_session().await;
+            p.remember_current();
+            p.clear_current();
+        }
+        // A server joined before: same key, so it keeps this device's node and address
+        if p.token.is_none()
+            && let Some(saved) = p.saved.iter().find(|s| s.server == server).cloned()
+        {
+            p.load_profile(&saved);
+        }
         let secret = p.ensure_private_key();
 
         let registered_here = p.token.is_some() && p.server.as_deref() == Some(server.as_str());
@@ -176,7 +190,7 @@ impl Backend {
                 .clone()
                 .or_else(|| p.hostname.clone())
                 .unwrap_or_else(default_hostname);
-            let resp = control::register(
+            let registered = control::register(
                 &target,
                 &RegisterRequest {
                     auth_key,
@@ -185,7 +199,19 @@ impl Backend {
                     os: std::env::consts::OS.to_string(),
                 },
             )
-            .await?;
+            .await;
+            let resp = match registered {
+                Ok(r) => r,
+                Err(e) => {
+                    if previous.server != p.server || previous.token != p.token {
+                        *p = previous;
+                        if p.want_running && p.token.is_some() && self.session.lock().await.is_none() {
+                            let _ = self.start_locked(&p).await;
+                        }
+                    }
+                    return Err(e);
+                }
+            };
             tracing::info!(ip = %resp.ip, node_id = resp.node_id, "registered with {server}");
             p.server = Some(server);
             p.server_pin = target.pin.as_ref().map(retail_proto::invite::encode_pin);
@@ -197,8 +223,12 @@ impl Backend {
             p.ip = Some(resp.ip);
             p.prefix_len = Some(resp.prefix_len);
             p.hostname = Some(hostname);
+            if let Some(code) = req.invite.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                p.invite = Some(code.to_string());
+            }
         }
         p.want_running = true;
+        p.remember_current();
         p.save(&self.state_path)?;
 
         self.stop_session().await;
@@ -213,19 +243,56 @@ impl Backend {
         Ok(())
     }
 
-    /// Disconnects and forgets the registration and key, so the next `up` creates a new node
+    /// Disconnects and forgets the current registration and its key (it
+    /// leaves the saved servers too), so the next `up` creates a new node
     pub async fn logout(&self) -> Result<()> {
         let mut p = self.persisted.lock().await;
         self.stop_session().await;
-        // Only the memory limit survives since exit-node choices belong to the network being left
-        let memory_limit_mb = p.prefs.memory_limit_mb;
-        let proxy = p.prefs.proxy.clone();
-        *p = Persisted::default();
-        p.prefs.memory_limit_mb = memory_limit_mb;
-        p.prefs.proxy = proxy;
+        if let Some(server) = p.server.clone() {
+            p.saved.retain(|s| s.server != server);
+        }
+        p.clear_current();
         p.save(&self.state_path)?;
         self.set_error(None);
         Ok(())
+    }
+
+    /// Leaves the current server (kept in the saved list) and connects to a
+    /// saved one with its own registration, no invite needed
+    pub async fn switch_server(&self, server: &str) -> Result<()> {
+        let mut p = self.persisted.lock().await;
+        if p.token.is_some() && p.server.as_deref() == Some(server) {
+            p.want_running = true;
+            p.save(&self.state_path)?;
+            if self.session.lock().await.is_none() {
+                self.start_locked(&p).await?;
+            }
+            return Ok(());
+        }
+        let target = p.saved.iter().find(|s| s.server == server).cloned().with_context(|| format!("{server} is not a saved server"))?;
+        self.stop_session().await;
+        p.remember_current();
+        p.clear_current();
+        p.load_profile(&target);
+        p.want_running = true;
+        p.save(&self.state_path)?;
+        tracing::info!("switched to {server}");
+        self.start_locked(&p).await
+    }
+
+    /// Removes a saved server; the current one is logged out of
+    pub async fn forget_server(&self, server: &str) -> Result<()> {
+        let current = self.persisted.lock().await.server.as_deref() == Some(server);
+        if current {
+            return self.logout().await;
+        }
+        let mut p = self.persisted.lock().await;
+        let before = p.saved.len();
+        p.saved.retain(|s| s.server != server);
+        if p.saved.len() == before {
+            anyhow::bail!("{server} is not a saved server");
+        }
+        p.save(&self.state_path)
     }
 
     /// Changes user settings, applied at once when the tunnel is up
@@ -491,8 +558,30 @@ impl Backend {
             prefs: p.prefs.clone(),
             memory_peak: crate::memory::peak(),
             control_via: engine.and_then(|e| e.control_via()),
+            servers: saved_servers(&p),
         }
     }
+}
+
+/// The saved servers for `status`, with the current one marked (and listed
+/// even when it was joined before servers were saved)
+fn saved_servers(p: &Persisted) -> Vec<retail_proto::api::SavedServer> {
+    let current = p.token.as_ref().and(p.server.as_deref());
+    let mut out: Vec<_> = p
+        .saved
+        .iter()
+        .map(|s| retail_proto::api::SavedServer {
+            server: s.server.clone(),
+            ip: if Some(s.server.as_str()) == current { p.ip } else { s.ip },
+            current: Some(s.server.as_str()) == current,
+        })
+        .collect();
+    if let Some(cur) = current
+        && !out.iter().any(|s| s.current)
+    {
+        out.insert(0, retail_proto::api::SavedServer { server: cur.to_string(), ip: p.ip, current: true });
+    }
+    out
 }
 
 /// Brings exit-node routing and forwarding in line with `prefs`

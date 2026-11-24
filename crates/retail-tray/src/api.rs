@@ -8,8 +8,10 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use retail_proto::api::{
-    ApiError, InviteRequest, InviteResponse, PrefsRequest, ServerStartRequest, ServerStatus, StatusResponse, UpRequest,
+    ApiError, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus, StatusResponse, UpRequest,
 };
+
+use crate::i18n::tr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -22,6 +24,10 @@ pub enum Command {
     Up { server: String, auth_key: Option<String>, hostname: Option<String>, invite: Option<String>, origin: Origin },
     Down,
     Logout,
+    /// Connect to a saved server instead of the current one
+    Switch(String),
+    /// Remove a saved server
+    Forget(String),
     Refresh,
     Prefs { req: PrefsRequest, origin: Origin },
     /// Hosting a network on this device
@@ -52,6 +58,8 @@ pub enum ActionKind {
     Down,
     Logout,
     Prefs,
+    Switch,
+    Forget,
 }
 
 /// Starts the poller. It refreshes every second while `fast` is set (a window
@@ -87,6 +95,14 @@ pub fn spawn(
                     }
                     Ok(Command::Logout) => {
                         (Origin::Settings, ActionKind::Logout, call(addr, "POST", "/logout", None, Duration::from_secs(10)))
+                    }
+                    Ok(Command::Switch(server)) => {
+                        let body = serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
+                        (Origin::Settings, ActionKind::Switch, call(addr, "POST", "/servers/switch", Some(&body), Duration::from_secs(20)))
+                    }
+                    Ok(Command::Forget(server)) => {
+                        let body = serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
+                        (Origin::Settings, ActionKind::Forget, call(addr, "POST", "/servers/forget", Some(&body), Duration::from_secs(10)))
                     }
                     Ok(Command::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
                         on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));
@@ -158,7 +174,7 @@ fn call<T: serde::de::DeserializeOwned>(
     timeout: Duration,
 ) -> Result<T, String> {
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
-        .map_err(|_| "retaild가 꺼져 있습니다".to_string())?;
+        .map_err(|_| tr("retaild is not running").to_string())?;
     s.set_read_timeout(Some(timeout)).ok();
     s.set_write_timeout(Some(timeout)).ok();
     let body = body.unwrap_or("");
@@ -202,18 +218,18 @@ fn open_browser(url: &str) {
 }
 
 /// The daemon words its errors in English for logs and the CLI; the common
-/// ones are said in Korean here, the rest shown as they are
+/// ones are reworded and translated here, the rest shown as they are
 fn friendly(msg: String) -> String {
-    let known: [(&str, &str); 9] = [
-        ("invalid, used or expired auth key", "초대 코드나 인증 키가 잘못됐거나, 이미 쓰였거나, 만료됐습니다."),
-        ("too many attempts", "시도가 너무 많습니다. 1분 뒤에 다시 해 보세요."),
-        ("not a retail invite code", "retail 초대 코드가 아닙니다. retail1.로 시작하는 코드를 붙여 넣으세요."),
-        ("the invite code is damaged", "초대 코드가 손상됐습니다. 다시 복사해 붙여 넣으세요."),
-        ("the invite code is incomplete", "초대 코드가 일부만 들어왔습니다. 다시 복사해 붙여 넣으세요."),
-        ("request timed out", "서버에 연결하지 못했습니다. 서버 주소와 네트워크를 확인하세요."),
-        ("connecting to", "서버에 연결하지 못했습니다. 서버 주소와 네트워크를 확인하세요."),
-        ("not allowed", "권한이 없습니다. 관리자 권한으로 실행하세요(Linux는 retail 그룹)."),
-        ("the server is not running", "서버가 꺼져 있습니다."),
+    let known: [(&str, &'static str); 9] = [
+        ("invalid, used or expired auth key", "The invite code or auth key is wrong, already used, or expired."),
+        ("too many attempts", "Too many attempts. Try again in a minute."),
+        ("not a retail invite code", "This is not a retail invite code. Paste a code that starts with retail1."),
+        ("the invite code is damaged", "The invite code is damaged. Copy and paste it again."),
+        ("the invite code is incomplete", "Only part of the invite code came through. Copy and paste it again."),
+        ("request timed out", "Could not reach the server. Check the server address and your network."),
+        ("connecting to", "Could not reach the server. Check the server address and your network."),
+        ("not allowed", "Permission denied. Run as administrator (on Linux, join the retail group)."),
+        ("the server is not running", "The server is not running."),
     ];
-    known.iter().find(|(k, _)| msg.contains(k)).map_or(msg, |(_, ko)| ko.to_string())
+    known.iter().find(|(k, _)| msg.contains(k)).map_or(msg, |(_, en)| tr(en).to_string())
 }

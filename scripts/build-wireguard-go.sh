@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds wireguard-go (the userspace WireGuard engine Tailscale is built on,
+# Builds wireguard-go (the official userspace WireGuard implementation,
 # including its GSO/GRO work) for use as a reference in scripts/bench.sh.
 # Installs Go from apt. Go may fetch a newer toolchain if go.mod requires it.
 set -euo pipefail

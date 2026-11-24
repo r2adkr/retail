@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::LangPref;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePref {
@@ -15,6 +17,8 @@ pub enum ThemePref {
 pub struct Config {
     #[serde(default)]
     pub theme: ThemePref,
+    #[serde(default)]
+    pub language: LangPref,
 }
 
 fn path() -> Option<PathBuf> {
