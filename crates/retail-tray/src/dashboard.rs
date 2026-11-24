@@ -15,6 +15,8 @@ const PAD: f32 = 24.0;
 const BUTTON_H: f32 = 34.0;
 const ROW_H: f32 = 44.0;
 const QR_SIZE: f32 = 150.0;
+/// Devices shown at once; more scroll
+const MAX_ROWS: usize = 6;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DashAction {
@@ -46,6 +48,10 @@ pub struct Dashboard {
     pub message: Option<(String, bool)>,
     pub confirm_stop: Option<Instant>,
     pub confirm_remove: Option<(i64, Instant)>,
+    /// The first device shown, when there are more than fit
+    pub node_scroll: usize,
+    /// Where the device list was drawn, for the mouse wheel
+    nodes_area: Option<Rect>,
     height: f32,
     regions: Vec<(Rect, DashAction)>,
 }
@@ -58,6 +64,8 @@ impl Dashboard {
             status: None,
             other_network: None,
             invite: None,
+            node_scroll: 0,
+            nodes_area: None,
             busy: None,
             message: None,
             confirm_stop: None,
@@ -96,6 +104,7 @@ impl Dashboard {
         let t = Theme::new(self.dark);
         let mut c = Canvas { pix, fonts, scale };
         self.regions.clear();
+        self.nodes_area = None;
         c.fill_rect(0.0, 0.0, WIDTH, self.height.max(2000.0), t.bg);
         let mut y = 44.0;
         let status = self.status.clone();
@@ -234,7 +243,20 @@ impl Dashboard {
             c.text(tr("No devices yet. Create an invite to add one."), x + 4.0, y + 28.0, 12.5, Weight::Regular, t.dim, Some(w - 8.0));
             y += ROW_H;
         }
-        for n in &s.nodes {
+        let total = s.nodes.len();
+        self.node_scroll = self.node_scroll.min(total.saturating_sub(MAX_ROWS));
+        let first = self.node_scroll;
+        if total > 0 {
+            self.nodes_area = Rect::from_xywh(x, y, w, total.min(MAX_ROWS) as f32 * ROW_H);
+        }
+        if total > MAX_ROWS {
+            // Scroll bar along the right edge of the list
+            let track_h = MAX_ROWS as f32 * ROW_H - 8.0;
+            let thumb_h = (track_h * MAX_ROWS as f32 / total as f32).max(24.0);
+            let ty = y + 4.0 + (track_h - thumb_h) * first as f32 / (total - MAX_ROWS) as f32;
+            c.fill_rrect(x + w + 8.0, ty, 3.0, thumb_h, 1.5, with_alpha(t.dim, 0.5));
+        }
+        for n in s.nodes.iter().skip(first).take(MAX_ROWS) {
             c.circle(x + 9.0, y + ROW_H / 2.0, 4.0, if n.online { t.accent } else { t.gray });
             let name = if n.exit_node { format!("{} · Exit node", n.hostname) } else { n.hostname.clone() };
             c.text(&name, x + 24.0, y + 20.0, 13.5, Weight::Regular, t.text, Some(w - 190.0));
@@ -264,6 +286,21 @@ impl Dashboard {
         let ww = c.measure(web, 13.0, Weight::Semibold) + 32.0;
         self.button(c, t, web, x + lw + 8.0, y, ww, Style::Secondary, true, DashAction::OpenWeb);
         y + BUTTON_H
+    }
+
+    /// Scrolls the device list by `rows` when (x, y) is over it; true if it moved
+    pub fn scroll_nodes(&mut self, x: f32, y: f32, rows: i32) -> bool {
+        let total = match &self.status {
+            Some(Ok(s)) => s.nodes.len(),
+            _ => 0,
+        };
+        if !self.nodes_area.is_some_and(|r| contains(&r, x, y)) {
+            return false;
+        }
+        let next = (self.node_scroll as i32 + rows).clamp(0, total.saturating_sub(MAX_ROWS) as i32) as usize;
+        let moved = next != self.node_scroll;
+        self.node_scroll = next;
+        moved
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -772,6 +772,18 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Escape) => {
                     self.close_dashboard();
                 }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let rows = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y / 40.0) as i32,
+                    };
+                    if let Some((x, y)) = self.dashboard.cursor
+                        && rows != 0
+                        && self.dashboard.scroll_nodes(x, y, rows)
+                    {
+                        self.redraw_dashboard();
+                    }
+                }
                 WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => self.redraw_dashboard(),
                 _ => {}
             }
@@ -1185,6 +1197,14 @@ mod preview {
                 ..Default::default()
             }
         }));
+        if state == "many"
+            && let Some(Ok(st)) = &mut d.status
+        {
+            for (i, name) in ["nas", "tablet", "work-macbook", "pi-garage", "old-thinkpad", "living-room-tv"].iter().enumerate() {
+                st.nodes.push(node(4 + i as i64, name, 4 + i as u8, i % 2 == 0, false));
+            }
+            d.node_scroll = 2;
+        }
         if state == "idle" {
             d.other_network = Some("vpn.example.com".into());
         } else {
