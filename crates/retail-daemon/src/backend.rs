@@ -219,6 +219,17 @@ impl Backend {
                 .clone()
                 .or_else(|| p.hostname.clone())
                 .unwrap_or_else(default_hostname);
+            // Proves this device is the one registered with the key
+            let token = p.token.clone().filter(|_| p.server.as_deref() == Some(server.as_str()));
+            if token.is_some() {
+                // A stored token goes only to the server it belongs to: one that
+                // proves the stored pin, or holds the REALITY key saved with the
+                // registration. REALITY does not check the pin, so a REALITY key
+                // named by this invite (anyone can copy a pin into an invite)
+                // must not carry it.
+                invite_reality = p.server_reality.clone();
+                target.reality = invite_reality.as_ref().and_then(crate::reality::Params::from_invite);
+            }
             let registered = control::register(
                 &target,
                 &RegisterRequest {
@@ -226,8 +237,7 @@ impl Backend {
                     node_key: Key(PublicKey::from(&secret).to_bytes()),
                     hostname: hostname.clone(),
                     os: std::env::consts::OS.to_string(),
-                    // Proves this device is the one registered with the key
-                    token: p.token.clone().filter(|_| p.server.as_deref() == Some(server.as_str())),
+                    token,
                 },
             )
             .await;
@@ -336,7 +346,7 @@ impl Backend {
                 None
             } else {
                 let engine = &session.as_ref().context("connect first: exit nodes are looked up in the network")?.engine;
-                let (key, hostname, offers) = engine.find_peer(name).with_context(|| format!("no device named {name}"))?;
+                let (key, hostname, offers) = engine.find_peer(name)?;
                 if !offers {
                     anyhow::bail!("{hostname} does not offer itself as an exit node (on it: retail set --advertise-exit-node)");
                 }

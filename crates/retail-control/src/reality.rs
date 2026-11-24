@@ -14,7 +14,7 @@
 //! This defeats blocking by name or fingerprint and active probing, not
 //! blocking of the server's IP address. Clocks must agree within `MAX_SKEW`.
 
-use std::collections::HashMap;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -196,24 +196,42 @@ pub enum Decision {
     Camouflage,
 }
 
+/// Session ids remembered at most. Anyone holding an invite can mint
+/// authenticated hellos, so the memory and the work per hello stay bounded;
+/// when full, new hellos are treated as probes until old ones age out.
+const MAX_SEEN: usize = 65536;
+
 /// A replayed ClientHello is treated as a probe
 #[derive(Default)]
 pub struct ReplayGuard {
-    seen: Mutex<HashMap<[u8; 32], Instant>>,
+    seen: Mutex<Seen>,
+}
+
+#[derive(Default)]
+struct Seen {
+    ids: HashSet<[u8; 32]>,
+    /// The same ids, oldest first
+    order: VecDeque<(Instant, [u8; 32])>,
 }
 
 impl ReplayGuard {
     fn fresh(&self, sid: &[u8; 32]) -> bool {
         let mut seen = self.seen.lock().unwrap();
+        let Seen { ids, order } = &mut *seen;
         // A sealed timestamp stays acceptable for at most 2 * MAX_SKEW
         let window = Duration::from_secs(2 * MAX_SKEW);
-        if seen.len() > 4096 {
-            seen.retain(|_, t| t.elapsed() < window);
+        while let Some((at, old)) = order.front() {
+            if at.elapsed() < window {
+                break;
+            }
+            ids.remove(old);
+            order.pop_front();
         }
-        if seen.get(sid).is_some_and(|t| t.elapsed() < window) {
+        if ids.contains(sid) || ids.len() >= MAX_SEEN {
             return false;
         }
-        seen.insert(*sid, Instant::now());
+        ids.insert(*sid);
+        order.push_back((Instant::now(), *sid));
         true
     }
 }
@@ -251,6 +269,25 @@ fn authenticate(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], hello: &He
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_guard_is_bounded() {
+        let g = ReplayGuard::default();
+        let sid = |i: usize| {
+            let mut s = [0u8; 32];
+            s[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            s
+        };
+        assert!(g.fresh(&sid(0)));
+        assert!(!g.fresh(&sid(0)), "a replay is refused");
+        for i in 1..MAX_SEEN {
+            assert!(g.fresh(&sid(i)));
+        }
+        // Full: new hellos count as probes rather than growing the set
+        assert!(!g.fresh(&sid(MAX_SEEN)));
+        let s = g.seen.lock().unwrap();
+        assert_eq!((s.ids.len(), s.order.len()), (MAX_SEEN, MAX_SEEN));
+    }
 
     pub(crate) fn hello(sni: &str, share: [u8; 32], sid: [u8; 32], random: [u8; 32]) -> Vec<u8> {
         let mut ext = Vec::new();

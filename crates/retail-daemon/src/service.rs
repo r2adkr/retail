@@ -48,6 +48,23 @@ pub enum Cmd {
     },
 }
 
+/// On Windows the daemon is stopped by terminating it, so the system settings
+/// a session undoes when it ends stay behind: the name resolution rule that
+/// sends `.retail.internal` to the MagicDNS address, the exit node's NAT and
+/// the firewall rule. Removing retail removes them too.
+fn remove_system_changes() {
+    #[cfg(windows)]
+    {
+        for script in [
+            "Get-DnsClientNrptRule | Where-Object Comment -eq 'retail' | Remove-DnsClientNrptRule -Force",
+            "Remove-NetNat -Name retail-exit -Confirm:$false -ErrorAction SilentlyContinue",
+        ] {
+            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).output();
+        }
+        crate::firewall::remove_inbound();
+    }
+}
+
 pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
     match cmd {
         Cmd::Service { action } => {
@@ -61,6 +78,7 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
                 _ => {
                     stop();
                     unregister();
+                    remove_system_changes();
                     Ok(())
                 }
             }
@@ -69,6 +87,7 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             require_admin()?;
             stop();
             unregister();
+            remove_system_changes();
             let dir = dir.unwrap_or_else(default_dir);
             for name in ["retaild", "retail"] {
                 let _ = std::fs::remove_file(dir.join(exe(name)));

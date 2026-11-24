@@ -41,6 +41,25 @@ impl Params {
     }
 }
 
+/// The server handshake message expected next
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Step {
+    EncryptedExtensions,
+    Certificate,
+    CertificateVerify,
+    Finished,
+}
+
+/// Whether handshake message `kind` is the one `step` waits for
+fn expects(step: Step, kind: u8) -> bool {
+    kind == match step {
+        Step::EncryptedExtensions => 8,
+        Step::Certificate => 11,
+        Step::CertificateVerify => 15,
+        Step::Finished => 20,
+    }
+}
+
 /// Returns a stream carrying the plaintext
 pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
     let (rd, mut wr) = tokio::io::split(io);
@@ -80,29 +99,39 @@ pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
     let master = extract(&expand_label(&hs, "derived", empty_hash.as_ref()), &zeros);
     let mut server_keys = Keys::new(&s_hs);
 
+    // The server is authenticated only by a certificate signed with the REALITY auth key plus a
+    // CertificateVerify over the transcript, so the handshake must contain exactly that sequence:
+    // EncryptedExtensions, Certificate, CertificateVerify, Finished. The ECDHE secret alone proves
+    // nothing (anyone in the path can complete it), so Finished is refused until the proof is in
     let mut msgs = Vec::new();
+    let mut step = Step::EncryptedExtensions;
     let mut cert_key: Option<[u8; 32]> = None;
     loop {
         while let Some(len) = whole_message(&msgs) {
             let msg: Vec<u8> = msgs.drain(..len).collect();
-            match msg[0] {
-                8 => transcript.update(&msg), // EncryptedExtensions
-                11 => {
+            ensure!(expects(step, msg[0]), "unexpected handshake message {} while waiting for {step:?}", msg[0]);
+            match step {
+                Step::EncryptedExtensions => {
+                    transcript.update(&msg);
+                    step = Step::Certificate;
+                }
+                Step::Certificate => {
                     cert_key = Some(check_certificate(&msg, &auth)?);
                     transcript.update(&msg);
+                    step = Step::CertificateVerify;
                 }
-                15 => {
+                Step::CertificateVerify => {
                     let key = cert_key.context("CertificateVerify before Certificate")?;
                     verify_certificate_verify(&msg, &key, transcript.clone().finish().as_ref())?;
                     transcript.update(&msg);
+                    step = Step::Finished;
                 }
-                20 => {
+                Step::Finished => {
                     let expected = finished(&s_hs, transcript.clone().finish().as_ref());
                     ensure!(msg.len() == 36 && msg[4..] == expected[..], "server Finished does not verify");
                     transcript.update(&msg);
                     return finish(records, wr, server_keys, &c_hs, &master, transcript).await;
                 }
-                t => bail!("unexpected handshake message {t}"),
             }
         }
         let (kind, payload) = records.next().await?;
@@ -489,6 +518,17 @@ mod tests {
                 at += 4 + u16::from_be_bytes([body[at + 2], body[at + 3]]) as usize;
             }
         }
+    }
+
+    #[test]
+    fn finished_needs_the_certificate_proof_first() {
+        // A server that skips Certificate/CertificateVerify proves nothing beyond ECDHE
+        assert!(!expects(Step::EncryptedExtensions, 20));
+        assert!(!expects(Step::Certificate, 20));
+        assert!(!expects(Step::CertificateVerify, 20));
+        assert!(!expects(Step::Certificate, 15));
+        assert!(!expects(Step::EncryptedExtensions, 11));
+        assert!(expects(Step::Finished, 20));
     }
 
     #[tokio::test]

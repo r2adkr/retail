@@ -154,9 +154,20 @@ impl WebAdmin {
             )
             .route("/download/{invite}/{variant}", get(download))
             .layer(middleware::from_fn_with_state(ctx.clone(), guard))
+            .layer(middleware::from_fn(no_framing))
             .with_state(ctx);
         axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
     }
+}
+
+/// On the mesh listener a request is authorized by where it comes from, so a
+/// page another site frames would be too: no page here may be framed
+async fn no_framing(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(header::X_FRAME_OPTIONS, header::HeaderValue::from_static("DENY"));
+    h.insert(header::CONTENT_SECURITY_POLICY, header::HeaderValue::from_static("frame-ancestors 'none'"));
+    resp
 }
 
 fn random_token() -> String {
@@ -411,6 +422,12 @@ async fn upload(State(ctx): State<Ctx>, Path((variant, name)): Path<(String, Str
     }
     if !wanted.contains(&name) {
         return deny(StatusCode::BAD_REQUEST, &format!("expected one of: {}", wanted.join(", ")));
+    }
+    // From another device, only missing files may be supplied: the files
+    // present (an official set checked against its checksums, or ones the
+    // owner put there) go into every installer and are replaced only here
+    if ctx.listener != Listener::Local && tokio::fs::try_exists(dir.join(&name)).await.unwrap_or(true) {
+        return deny(StatusCode::CONFLICT, "this file is already there; it can only be replaced on the server's own device");
     }
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return deny(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());

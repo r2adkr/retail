@@ -147,6 +147,7 @@ pub fn spawn(
                             ServerCommand::OpenWeb => {
                                 if let Ok(v) = call::<serde_json::Value>(addr, "POST", "/web/login", Some("{}"), t)
                                     && let Some(url) = v["url"].as_str()
+                                    && retail_proto::local::is_local_web_link(url)
                                 {
                                     open_browser(url);
                                 }

@@ -583,7 +583,9 @@ pub struct Engine {
     advertise_exit: watch::Sender<bool>,
     /// Networks this device offers to route
     advertise_routes: watch::Sender<Vec<Ipv4Net>>,
-    /// Networks this device routes, as the server approved them
+    /// Networks the server approved for this device, as last told
+    granted_routes: RwLock<Vec<Ipv4Net>>,
+    /// Networks this device routes: approved and still offered here
     own_routes: RwLock<Arc<[Ipv4Net]>>,
     /// What the system's routes and forwarding should follow
     route_state: watch::Sender<RouteState>,
@@ -691,6 +693,7 @@ impl Engine {
             advertise_exit: watch::channel(false).0,
             advertise_routes: watch::channel(Vec::new()).0,
             own_routes: RwLock::new(Arc::from(Vec::new())),
+            granted_routes: RwLock::new(Vec::new()),
             route_state: watch::channel(RouteState::default()).0,
             key_state: Mutex::default(),
             server_addrs: watch::channel(Vec::new()).0,
@@ -725,16 +728,27 @@ impl Engine {
         self.peers.write().unwrap().select_exit(key);
     }
 
-    /// Finds a peer by hostname, mesh IP or node key (base64)
-    pub fn find_peer(&self, name: &str) -> Option<(Key, String, bool)> {
+    /// Finds a peer by mesh IP, node key (base64) or hostname. Hostnames are
+    /// chosen by each device and need not be unique, so a name several
+    /// devices share is refused rather than picking one of them.
+    pub fn find_peer(&self, name: &str) -> anyhow::Result<(Key, String, bool)> {
         let peers = self.peers.read().unwrap();
-        peers.by_key.values().find_map(|p| {
+        let mut by_name = Vec::new();
+        for p in peers.by_key.values() {
             let info = p.info.lock().unwrap();
-            let hit = info.hostname.eq_ignore_ascii_case(name)
-                || info.ip.to_string() == name
-                || p.key.to_base64() == name;
-            hit.then(|| (p.key, info.hostname.clone(), info.exit_node))
-        })
+            let found = (p.key, info.hostname.clone(), info.exit_node);
+            if info.ip.to_string() == name || p.key.to_base64() == name {
+                return Ok(found);
+            }
+            if info.hostname.eq_ignore_ascii_case(name) {
+                by_name.push(found);
+            }
+        }
+        match by_name.len() {
+            0 => anyhow::bail!("no device named {name}"),
+            1 => Ok(by_name.remove(0)),
+            n => anyhow::bail!("{n} devices are named {name}; give its mesh IP or key instead"),
+        }
     }
 
     pub fn set_advertise_exit(&self, on: bool) {
@@ -747,6 +761,23 @@ impl Engine {
 
     pub fn set_advertise_routes(&self, routes: Vec<Ipv4Net>) {
         self.advertise_routes.send_if_modified(|r| std::mem::replace(r, routes.clone()) != routes);
+        // A network withdrawn here stops being routed at once, server or not
+        let own = self.own_routes_now();
+        *self.own_routes.write().unwrap() = own.clone();
+        self.route_state.send_if_modified(|s| {
+            let changed = s.own[..] != own[..];
+            s.own = own.to_vec();
+            changed
+        });
+    }
+
+    /// The networks this device routes for the mesh: those the server
+    /// approved that this device's owner also offers. The server is not
+    /// trusted to add networks the owner did not offer.
+    fn own_routes_now(&self) -> Arc<[Ipv4Net]> {
+        let offered = self.advertise_routes.borrow();
+        let granted = self.granted_routes.read().unwrap();
+        granted.iter().filter(|r| r.check_route().is_ok() && offered.contains(r)).copied().collect()
     }
 
     pub fn subscribe_advertise_routes(&self) -> watch::Receiver<Vec<Ipv4Net>> {
@@ -823,7 +854,8 @@ impl Engine {
         if !addrs.is_empty() {
             self.server_addrs.send_if_modified(|cur| std::mem::replace(cur, addrs.clone()) != addrs);
         }
-        let own_routes: Arc<[Ipv4Net]> = Arc::from(nm.self_node.routes.clone());
+        *self.granted_routes.write().unwrap() = nm.self_node.routes.clone();
+        let own_routes = self.own_routes_now();
         *self.own_routes.write().unwrap() = own_routes.clone();
         // Networks this device is on itself stay off the tunnel, or it would
         // lose its own LAN
@@ -861,8 +893,8 @@ impl Engine {
                     Some(p) => {
                         let mut info = p.info.lock().unwrap();
                         let changed = info.candidates != candidates || (node.online && !info.online);
-                        info.hostname = node.hostname.clone();
-                        info.dns_name = node.dns_name.clone();
+                        info.hostname = display_safe(&node.hostname);
+                        info.dns_name = display_safe(&node.dns_name);
                         info.ip = node.ip;
                         info.online = node.online;
                         info.exit_node = node.exit_node;
@@ -936,8 +968,8 @@ impl Engine {
             filter,
             routes: RwLock::new(Arc::from(Vec::new())),
             info: Mutex::new(PeerInfo {
-                hostname: node.hostname.clone(),
-                dns_name: node.dns_name.clone(),
+                hostname: display_safe(&node.hostname),
+                dns_name: display_safe(&node.dns_name),
                 ip: node.ip,
                 online: node.online,
                 exit_node: node.exit_node,
@@ -1980,6 +2012,14 @@ impl Engine {
         out.sort_by_key(|p| p.ip);
         out
     }
+}
+
+/// Names from the server end up in terminals (`retail status`) and the tray.
+/// The server cleans the names it hands out, but this device does not depend
+/// on that: control characters (terminal escape sequences) are dropped and
+/// the length is bounded.
+fn display_safe(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(253).collect()
 }
 
 /// Subnet routes as the system should see them

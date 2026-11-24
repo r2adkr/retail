@@ -126,7 +126,9 @@ async fn local_access_rules() {
     let server = web.clone();
     tokio::spawn(async move { server.serve_local(listener).await });
 
-    assert_eq!(request(port, get(port, "/", "")).await.0, 401, "no session");
+    let (code, text) = request(port, get(port, "/", "")).await;
+    assert_eq!(code, 401, "no session");
+    assert!(text.contains("x-frame-options: DENY") && text.contains("frame-ancestors 'none'"), "{text}");
     assert_eq!(request(port, get(port, "/api/status", "")).await.0, 401);
     assert_eq!(request(port, get(port, "/login?t=guess", "")).await.0, 401);
 

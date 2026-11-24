@@ -82,12 +82,22 @@ struct NodeRec {
     /// Exempt from key expiry (the hosting device, or by the administrator)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     no_expiry: bool,
+    /// Exempt while it is the helper device; ends with that role
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    helper_exempt: bool,
     /// The invite it joined with
     #[serde(default, skip_serializing_if = "Option::is_none")]
     invite_id: Option<i64>,
     /// Networks the administrator lets it route
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     routes: Vec<Ipv4Net>,
+}
+
+impl NodeRec {
+    /// Exempt from key expiry and inactivity removal
+    fn exempt(&self) -> bool {
+        self.no_expiry || self.helper_exempt
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -355,7 +365,7 @@ impl Db {
                 n.label = label;
                 n.no_expiry |= host_key;
                 // Joining again with an invite renews the key
-                n.expires_at = expiry(policy, n.no_expiry, now);
+                n.expires_at = expiry(policy, n.exempt(), now);
                 n.invite_id = Some(key_id);
                 (n.id, n.ip)
             }
@@ -377,6 +387,7 @@ impl Db {
                     tags: Vec::new(),
                     expires_at: expiry(policy, host_key, now),
                     no_expiry: host_key,
+                    helper_exempt: false,
                     invite_id: Some(key_id),
                     routes: Vec::new(),
                 });
@@ -449,13 +460,16 @@ impl Db {
         Ok(rows)
     }
 
-    pub async fn set_endpoints(&self, id: i64, endpoints: &[SocketAddr]) -> Result<()> {
+    /// Returns whether the stored endpoints changed
+    pub async fn set_endpoints(&self, id: i64, endpoints: &[SocketAddr]) -> Result<bool> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) {
-            n.endpoints = endpoints.to_vec();
-            n.last_seen = Some(now_unix());
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        n.last_seen = Some(now_unix());
+        if n.endpoints == endpoints {
+            return Ok(false);
         }
-        Ok(())
+        n.endpoints = endpoints.to_vec();
+        Ok(true)
     }
 
     pub async fn touch(&self, id: i64) -> Result<()> {
@@ -495,7 +509,7 @@ impl Db {
             // Keys that expired stay expired until renewed: a new setting
             // must not bring back a device that was cut off
             for n in s.data.nodes.iter_mut().filter(|n| n.expires_at.is_none_or(|t| t > now)) {
-                n.expires_at = expiry(key_days, n.no_expiry, now);
+                n.expires_at = expiry(key_days, n.exempt(), now);
             }
         }
         s.data.remove_inactive_days = inactive_days;
@@ -510,7 +524,7 @@ impl Db {
         let policy = s.data.key_expiry_days;
         let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
         n.no_expiry = never;
-        n.expires_at = expiry(policy, never, now);
+        n.expires_at = expiry(policy, n.exempt(), now);
         s.save()?;
         Ok(true)
     }
@@ -559,7 +573,7 @@ impl Db {
             .data
             .nodes
             .iter()
-            .filter(|n| !n.no_expiry && !online(n.id) && n.last_seen.is_some_and(|t| t.max(started) < cutoff))
+            .filter(|n| !n.exempt() && !online(n.id) && n.last_seen.is_some_and(|t| t.max(started) < cutoff))
             .map(|n| n.id)
             .collect();
         if !stale.is_empty() {
@@ -612,13 +626,27 @@ impl Db {
         self.inner.lock().unwrap().data.helper_device
     }
 
-    /// The helper device never expires: losing it would cut off the server
+    /// The helper device never expires: losing it would cut off the server.
+    /// The exemption ends with the role, when the previous helper gets a new
+    /// key lifetime from now (unless it is exempt for another reason).
     pub fn set_helper_device(&self, id: Option<i64>) -> Result<()> {
+        let now = now_unix();
         let mut s = self.inner.lock().unwrap();
-        if let Some(id) = id {
-            let n = s.data.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("there is no device {id}"))?;
-            n.no_expiry = true;
-            n.expires_at = None;
+        if let Some(id) = id
+            && !s.data.nodes.iter().any(|n| n.id == id)
+        {
+            anyhow::bail!("there is no device {id}");
+        }
+        let policy = s.data.key_expiry_days;
+        for n in s.data.nodes.iter_mut() {
+            let helper = Some(n.id) == id;
+            if n.helper_exempt && !helper {
+                n.helper_exempt = false;
+                n.expires_at = expiry(policy, n.exempt(), now);
+            } else if helper {
+                n.helper_exempt = true;
+                n.expires_at = None;
+            }
         }
         s.data.helper_device = id;
         s.save()
@@ -839,6 +867,42 @@ mod tests {
         assert!(matches!(db.register(&req(&new, 6)).await, Err(RegisterError::InvalidAuthKey)), "revoked");
         let rows = db.list_preauth().await.unwrap();
         assert!(rows.iter().any(|r| r.name.as_deref() == Some("work") && r.uses == 1 && r.expires_at == NEVER));
+    }
+
+    #[tokio::test]
+    async fn helper_exemption_ends_with_the_role() {
+        let (db, path) = temp_db().await;
+        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let a = db.register(&req(&key, 2)).await.unwrap();
+        let b = db.register(&req(&key, 3)).await.unwrap();
+        db.set_expiry_settings(Some(30), Some(1)).unwrap();
+        let exp = |id| db.inner.lock().unwrap().data.nodes.iter().find(|n| n.id == id).unwrap().expires_at;
+        db.set_helper_device(Some(a.node_id)).unwrap();
+        assert_eq!(exp(a.node_id), None, "the helper never expires");
+        db.renew(a.node_id, false).unwrap();
+        assert_eq!(exp(a.node_id), None, "not even when renewed with the network's time");
+        // Moving the role, then ending it, gives each former helper a lifetime again
+        db.set_helper_device(Some(b.node_id)).unwrap();
+        assert!(exp(a.node_id).is_some(), "a kept the helper's exemption");
+        assert_eq!(exp(b.node_id), None);
+        db.set_helper_device(None).unwrap();
+        assert!(exp(b.node_id).is_some(), "b kept the helper's exemption");
+        // An administrator's 'never' survives the role ending
+        db.renew(a.node_id, true).unwrap();
+        db.set_helper_device(Some(a.node_id)).unwrap();
+        db.set_helper_device(None).unwrap();
+        assert_eq!(exp(a.node_id), None);
+        // And former helpers are removed for inactivity like anyone else
+        {
+            let mut s = db.inner.lock().unwrap();
+            let now = now_unix();
+            for n in &mut s.data.nodes {
+                n.last_seen = Some(now - 2 * day_secs());
+            }
+            s.started_at = now - 3 * day_secs();
+        }
+        assert_eq!(db.remove_inactive(&|_| false).unwrap(), vec![b.node_id]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

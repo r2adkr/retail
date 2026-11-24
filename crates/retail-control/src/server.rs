@@ -24,6 +24,12 @@ use retail_proto::route::Ipv4Net;
 
 /// Keeps netmaps small
 const MAX_ENDPOINTS: usize = 16;
+/// Endpoint updates from one connection cost every node a netmap. A device
+/// sends a few in quick succession while it finds its addresses, and those go
+/// through at once; beyond `ENDPOINTS_BURST` within `ENDPOINTS_WINDOW` they
+/// wait, and only the newest is applied.
+const ENDPOINTS_BURST: usize = 5;
+const ENDPOINTS_WINDOW: Duration = Duration::from_secs(5);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Per client address
 const REGISTER_PER_MINUTE: u32 = 10;
@@ -422,8 +428,11 @@ async fn serve_connection(
     let mut shutdown = state.shutdown.subscribe();
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut last_sent: Option<String> = None;
-    // An expired node may not relay to anyone
+    // An expired node may not relay to anyone, cause netmap rounds or act as helper
     let mut blocked = true;
+    let mut pending_endpoints: Option<Vec<std::net::SocketAddr>> = None;
+    let mut endpoints_due = tokio::time::Instant::now();
+    let mut endpoints_applied: std::collections::VecDeque<tokio::time::Instant> = Default::default();
     // Send the first netmap immediately
     changes.mark_changed();
 
@@ -438,10 +447,32 @@ async fn serve_connection(
                     return Ok(());
                 };
                 blocked = nm.expired;
+                // Expiry ends the helper role here, without relying on the device to withdraw
+                if blocked && state.helper_codes.lock().unwrap().remove(&node_id).is_some() {
+                    state.refresh_helper_code();
+                }
                 let json = serde_json::to_string(&ServerMessage::NetMap(nm))?;
                 if last_sent.as_deref() != Some(json.as_str()) {
                     socket.send(Message::Text(json.clone().into())).await?;
                     last_sent = Some(json);
+                }
+            }
+            // Ahead of the socket so a busy relay cannot starve it
+            _ = tokio::time::sleep_until(endpoints_due), if pending_endpoints.is_some() => {
+                let endpoints = pending_endpoints.take().unwrap_or_default();
+                let now = tokio::time::Instant::now();
+                endpoints_applied.push_back(now);
+                if endpoints_applied.len() > ENDPOINTS_BURST {
+                    endpoints_applied.pop_front();
+                }
+                endpoints_due = if endpoints_applied.len() == ENDPOINTS_BURST {
+                    endpoints_applied[0] + ENDPOINTS_WINDOW
+                } else {
+                    now
+                };
+                if state.db.set_endpoints(node_id, &endpoints).await? && !blocked {
+                    tracing::debug!(node_id, ?endpoints, "endpoints updated");
+                    state.notify();
                 }
             }
             msg = socket.recv() => {
@@ -449,9 +480,7 @@ async fn serve_connection(
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
                         Ok(ClientMessage::Endpoints { mut endpoints }) => {
                             endpoints.truncate(MAX_ENDPOINTS);
-                            tracing::debug!(node_id, ?endpoints, "endpoints updated");
-                            state.db.set_endpoints(node_id, &endpoints).await?;
-                            state.notify();
+                            pending_endpoints = Some(endpoints);
                         }
                         Ok(ClientMessage::Hostinfo { exit_node, mut routes }) => {
                             let mut changed = {
@@ -479,6 +508,8 @@ async fn serve_connection(
                             }
                         }
                         Ok(ClientMessage::HelperCode { code }) => {
+                            // A device whose key expired is no longer the helper
+                            let code = if blocked { None } else { code };
                             tracing::info!(node_id, ready = code.is_some(), "helper device reported");
                             {
                                 let mut codes = state.helper_codes.lock().unwrap();

@@ -31,6 +31,11 @@ pub const LINK_NAME: &str = "link.retail.invalid";
 const PICKUP: Duration = Duration::from_secs(10);
 const PING: Duration = Duration::from_secs(20);
 const MAX_PENDING: usize = 256;
+/// Connections claiming the link name that have not yet shown the secret,
+/// per source address and in all. Each is held at most 2 x `PICKUP`. A cap
+/// per address keeps one source from crowding out the server's own links.
+const MAX_UNAUTHENTICATED_LINKS_PER_IP: usize = 8;
+const MAX_UNAUTHENTICATED_LINKS: usize = 1024;
 
 pub struct HelperConfig {
     pub data_dir: PathBuf,
@@ -46,6 +51,39 @@ struct Shared {
     pending: Mutex<HashMap<u64, oneshot::Sender<BoxIo>>>,
     next: AtomicU64,
     linked: AtomicBool,
+    /// Unauthenticated link connections per source address
+    unauthenticated_links: Mutex<HashMap<std::net::IpAddr, usize>>,
+}
+
+/// Counts one link connection until it has authenticated (or gone)
+struct LinkSlot<'a> {
+    shared: &'a Shared,
+    ip: std::net::IpAddr,
+}
+
+impl<'a> LinkSlot<'a> {
+    fn take(shared: &'a Shared, ip: std::net::IpAddr) -> Option<Self> {
+        let mut map = shared.unauthenticated_links.lock().unwrap();
+        let total: usize = map.values().sum();
+        let mine = map.entry(ip).or_insert(0);
+        if *mine >= MAX_UNAUTHENTICATED_LINKS_PER_IP || total >= MAX_UNAUTHENTICATED_LINKS {
+            return None;
+        }
+        *mine += 1;
+        Some(LinkSlot { shared, ip })
+    }
+}
+
+impl Drop for LinkSlot<'_> {
+    fn drop(&mut self) {
+        let mut map = self.shared.unauthenticated_links.lock().unwrap();
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
 }
 
 pub struct Helper {
@@ -162,8 +200,11 @@ async fn handle(
     let sni = hello.as_deref().and_then(crate::reality::parse_client_hello).and_then(|h| h.server_name);
     let io = crate::tls::Prefixed::new(prefix, Box::new(tcp));
     if sni.as_deref() == Some(LINK_NAME) {
+        // The link name is public, so until the secret is shown this is anyone:
+        // bound how many may wait and for how long
+        let slot = LinkSlot::take(shared, peer.ip().to_canonical()).context("too many unauthenticated link connections")?;
         let tls = tokio::time::timeout(PICKUP, acceptor.accept(io)).await.context("link handshake timed out")??;
-        return link(tls, shared, secret).await;
+        return link(tls, shared, secret, slot).await;
     }
     // Anyone else is a client of the server
     let Some(announce) = shared.link.lock().unwrap().clone() else {
@@ -190,18 +231,21 @@ async fn handle(
     Ok(())
 }
 
-async fn link<S>(tls: S, shared: &Shared, secret: &str) -> Result<()>
+async fn link<S>(tls: S, shared: &Shared, secret: &str, slot: LinkSlot<'_>) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     let mut reader = BufReader::new(tls);
     let mut line = String::new();
-    (&mut reader).take(256).read_line(&mut line).await?;
+    tokio::time::timeout(PICKUP, (&mut reader).take(256).read_line(&mut line))
+        .await
+        .context("link authentication timed out")??;
     let mut words = line.split_whitespace();
     let (kind, given) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
     if !constant_time_eq(given.as_bytes(), secret.as_bytes()) {
         anyhow::bail!("wrong helper secret");
     }
+    drop(slot);
     match kind {
         "WORK" => {
             let id: u64 = words.next().and_then(|w| w.parse().ok()).context("malformed WORK")?;
@@ -258,4 +302,22 @@ where
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unauthenticated_links_are_capped_per_address() {
+        let shared = Shared::default();
+        let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let b: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+        let held: Vec<_> = (0..MAX_UNAUTHENTICATED_LINKS_PER_IP).map(|_| LinkSlot::take(&shared, a).unwrap()).collect();
+        assert!(LinkSlot::take(&shared, a).is_none(), "one address is capped");
+        assert!(LinkSlot::take(&shared, b).is_some(), "another still gets in");
+        drop(held);
+        assert!(LinkSlot::take(&shared, a).is_some(), "slots come back");
+        assert!(shared.unauthenticated_links.lock().unwrap().is_empty());
+    }
 }

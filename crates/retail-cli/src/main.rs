@@ -458,6 +458,10 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
         ServerCmd::Web { print } => {
             let r: serde_json::Value = client.post::<(), _>("/web/login", None).await?;
             let url = r["url"].as_str().context("no link in the answer")?.to_string();
+            anyhow::ensure!(
+                retail_proto::local::is_local_web_link(&url),
+                "the answer on the local API port is not a link to this device's web page; is retaild the program listening there?"
+            );
             println!("{url}");
             if !print && !open_browser(&url) {
                 eprintln!("Open the link above in a browser on this device (valid once, for 2 minutes).");

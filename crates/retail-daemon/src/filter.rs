@@ -48,6 +48,10 @@ impl Here<'_> {
         if dst.is_multicast() || dst.is_broadcast() {
             return Some(Dest::Own);
         }
+        // Loopback is reachable only from this device itself, never through the tunnel
+        if dst.is_loopback() || dst.is_unspecified() || dst.octets()[0] == 0 {
+            return None;
+        }
         // Its LAN or public address is this device too
         let own = crate::host::is_own(dst);
         if self.exit && is_internet(dst) && !own {
@@ -272,6 +276,11 @@ mod tests {
         let f = Filter::default();
         assert!(f.inbound(&packet(TCP, PEER, ME, 1000, 22), &PLAIN));
         assert!(f.inbound(&packet(UDP, PEER, Ipv4Addr::new(224, 0, 0, 251), 5353, 5353), &PLAIN));
+        // Services bound to loopback stay local, exit node or not
+        for here in [&PLAIN, &EXIT] {
+            assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::LOCALHOST, 1000, 41112), here));
+            assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::UNSPECIFIED, 1000, 41112), here));
+        }
         // Not a way into other networks, nor to the internet unless an exit node
         let lan = packet(TCP, PEER, Ipv4Addr::new(10, 99, 0, 7), 1000, 22);
         assert!(!f.inbound(&lan, &PLAIN));
