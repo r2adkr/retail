@@ -1,9 +1,12 @@
+mod tui;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use retail_proto::LOCAL_API_ADDR;
+use retail_proto::acl::{AclPolicy, AclRule};
 use retail_proto::api::{
-    ApiError, BackendState, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
-    StatusResponse, UpRequest,
+    AclRequest, ApiError, BackendState, HelperDeviceRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
+    StatusResponse, TagsRequest, UpRequest,
 };
 
 #[derive(Parser)]
@@ -37,6 +40,8 @@ enum Cmd {
     Down,
     /// Disconnect and forget this node's key and registration with the current server
     Logout,
+    /// Full-screen terminal view: devices, the server, saved servers
+    Tui,
     /// List the servers this device has joined
     Servers,
     /// Leave the current server (it stays saved) and connect to a saved one
@@ -181,6 +186,45 @@ enum ServerCmd {
     Remove { id: i64 },
     /// Revoke an invite (a named one stops working at once)
     Revoke { id: i64 },
+    /// Access between devices: show the rules, or change them
+    Acl {
+        #[command(subcommand)]
+        cmd: Option<AclCmd>,
+    },
+    /// Set a device's tags, which access rules can name (`tag:NAME`). No tags clears them.
+    Tag {
+        /// Device: name, mesh IP or id
+        device: String,
+        tags: Vec<String>,
+    },
+    /// Make a member device the helper node, for a server other networks
+    /// cannot reach (CGNAT). The device must be reachable from the internet
+    /// (a public address, or a router that opens ports). `off` stops it.
+    HelperDevice {
+        /// Device: name, mesh IP or id, or `off`
+        device: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AclCmd {
+    /// Allow FROM to reach TO (selectors: `*`, `tag:NAME`, a device name, IP or id).
+    /// The first rule turns access control on: devices then reach only what a rule allows.
+    Allow {
+        #[arg(long, required = true, num_args = 1..)]
+        from: Vec<String>,
+        #[arg(long, required = true, num_args = 1..)]
+        to: Vec<String>,
+        /// Ports: `22`, `tcp:443`, `udp:5000-5100`, `icmp`, `*` (default: all)
+        #[arg(long, num_args = 1..)]
+        ports: Vec<String>,
+    },
+    /// Remove rule number N (as `retail server acl` lists them)
+    Remove { n: usize },
+    /// Replace the policy with a JSON file (`-` reads standard input)
+    Set { file: String },
+    /// Turn access control off: every device reaches every other
+    Off,
 }
 
 struct Client {
@@ -238,6 +282,7 @@ async fn main() -> Result<()> {
             client.post::<(), StatusResponse>("/logout", None).await?;
             println!("logged out");
         }
+        Cmd::Tui => tui::run(&client).await?,
         Cmd::Servers => {
             let st: StatusResponse = client.get("/status").await?;
             if st.servers.is_empty() {
@@ -311,7 +356,7 @@ async fn main() -> Result<()> {
                     client.post("/helper/start", Some(&HelperStartRequest { port, public })).await?
                 }
                 HelperCmd::Stop => client.post::<(), _>("/helper/stop", None).await?,
-                HelperCmd::Status => client.get("/helper").await?,
+                HelperCmd::Status => client.post::<(), _>("/helper/status", None).await?,
             };
             if !st.running {
                 println!("helper:  not running (retail helper start)");
@@ -374,9 +419,108 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
         }
         ServerCmd::Remove { id } => client.post::<(), _>(&format!("/server/nodes/{id}/delete"), None).await?,
         ServerCmd::Revoke { id } => client.post::<(), _>(&format!("/server/invites/{id}/revoke"), None).await?,
+        ServerCmd::Tag { device, tags } => {
+            let current: ServerStatus = client.get("/server").await?;
+            let id = find_device(&current, &device)?;
+            client.post(&format!("/server/nodes/{id}/tags"), Some(&TagsRequest { tags })).await?
+        }
+        ServerCmd::HelperDevice { device } => {
+            let current: ServerStatus = client.get("/server").await?;
+            let id = if device == "off" { None } else { Some(find_device(&current, &device)?) };
+            client.post("/server/helper-device", Some(&HelperDeviceRequest { id })).await?
+        }
+        ServerCmd::Acl { cmd } => {
+            let current: ServerStatus = client.get("/server").await?;
+            let acl = match cmd {
+                None => {
+                    print_acl(&current);
+                    return Ok(());
+                }
+                Some(AclCmd::Off) => None,
+                Some(AclCmd::Set { file }) => {
+                    let text = if file == "-" {
+                        let mut s = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                        s
+                    } else {
+                        std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
+                    };
+                    Some(serde_json::from_str::<AclPolicy>(&text).context("not an access policy (JSON with \"rules\")")?)
+                }
+                Some(AclCmd::Allow { from, to, ports }) => {
+                    let mut acl = current.acl.clone().unwrap_or_default();
+                    let sel = |s: &String| selector(&current, s);
+                    acl.rules.push(AclRule {
+                        from: from.iter().map(sel).collect::<Result<_>>()?,
+                        to: to.iter().map(sel).collect::<Result<_>>()?,
+                        ports,
+                    });
+                    Some(acl)
+                }
+                Some(AclCmd::Remove { n }) => {
+                    let mut acl = current.acl.clone().context("access control is off: there are no rules")?;
+                    if n == 0 || n > acl.rules.len() {
+                        anyhow::bail!("there is no rule {n}");
+                    }
+                    acl.rules.remove(n - 1);
+                    Some(acl)
+                }
+            };
+            let st: ServerStatus = client.post("/server/acl", Some(&AclRequest { acl })).await?;
+            print_acl(&st);
+            return Ok(());
+        }
     };
     print_server(&st);
     Ok(())
+}
+
+/// A device by name (`laptop` or `laptop.retail.internal`), mesh IP or id
+fn find_device(st: &ServerStatus, device: &str) -> Result<i64> {
+    let d = device.trim().to_ascii_lowercase();
+    st.nodes
+        .iter()
+        .find(|n| n.hostname == d || n.dns_name == d || n.dns_name.split('.').next() == Some(d.as_str()) || n.ip.to_string() == d || n.id.to_string() == d)
+        .map(|n| n.id)
+        .with_context(|| format!("no device {device} (see `retail server status`)"))
+}
+
+/// `*` and `tag:` as they are, devices to `id:N`
+fn selector(st: &ServerStatus, s: &str) -> Result<String> {
+    let s = s.trim();
+    if s == "*" || s.starts_with("tag:") || s.starts_with("id:") {
+        retail_proto::acl::check_selector(s).map_err(anyhow::Error::msg)?;
+        return Ok(s.to_string());
+    }
+    Ok(format!("id:{}", find_device(st, s)?))
+}
+
+fn print_acl(st: &ServerStatus) {
+    let Some(acl) = &st.acl else {
+        println!("access:  open, every device reaches every other (`retail server acl allow` adds a rule)");
+        return;
+    };
+    let name = |sel: &String| match sel.strip_prefix("id:").and_then(|id| id.parse::<i64>().ok()) {
+        Some(id) => st.nodes.iter().find(|n| n.id == id).map_or(sel.clone(), |n| n.hostname.clone()),
+        None => sel.clone(),
+    };
+    println!("access:  only what these rules allow (replies always return)");
+    if acl.rules.is_empty() {
+        println!("         no rules: devices reach nothing");
+    }
+    for (i, r) in acl.rules.iter().enumerate() {
+        let ports = if r.ports.is_empty() { "all ports".to_string() } else { r.ports.join(", ") };
+        println!(
+            "{:>4}.  {} -> {}  ({ports})",
+            i + 1,
+            r.from.iter().map(name).collect::<Vec<_>>().join(", "),
+            r.to.iter().map(name).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let tagged: Vec<String> = st.nodes.iter().filter(|n| !n.tags.is_empty()).map(|n| format!("{}: {}", n.hostname, n.tags.join(", "))).collect();
+    if !tagged.is_empty() {
+        println!("tags:    {}", tagged.join("; "));
+    }
 }
 
 fn print_server(st: &ServerStatus) {
@@ -404,6 +548,13 @@ fn print_server(st: &ServerStatus) {
     if let Some(h) = &st.helper {
         println!("helper:  {h} ({})", if st.helper_linked { "linked" } else { "not linked" });
     }
+    if let Some(id) = st.helper_device {
+        let name = st.nodes.iter().find(|n| n.id == id).map_or_else(|| format!("#{id}"), |n| n.hostname.clone());
+        println!("helper:  device {name} ({})", if st.helper_device_linked { "linked" } else { "not linked yet" });
+    }
+    if st.acl.is_some() {
+        println!("access:  limited by rules (`retail server acl`)");
+    }
     if !st.fronts.is_empty() {
         println!("cdn:     {}", st.fronts.join(", "));
     }
@@ -412,11 +563,13 @@ fn print_server(st: &ServerStatus) {
     }
     if !st.nodes.is_empty() {
         println!();
-        println!("{:<5} {:<16} {:<20} {:<8} STATUS", "ID", "IP", "HOSTNAME", "OS");
+        println!("{:<5} {:<16} {:<30} {:<8} STATUS", "ID", "IP", "NAME", "OS");
         for n in &st.nodes {
             let status = if n.online { "online" } else { "offline" };
             let exit = if n.exit_node { " exit node" } else { "" };
-            println!("{:<5} {:<16} {:<20} {:<8} {status}{exit}", n.id, n.ip.to_string(), n.hostname, n.os);
+            let tags = if n.tags.is_empty() { String::new() } else { format!(" [{}]", n.tags.join(", ")) };
+            let name = if n.dns_name.is_empty() { &n.hostname } else { &n.dns_name };
+            println!("{:<5} {:<16} {:<30} {:<8} {status}{exit}{tags}", n.id, n.ip.to_string(), name, n.os);
         }
     }
     let named: Vec<_> = st.invites.iter().filter(|i| i.name.is_some()).collect();
@@ -476,7 +629,8 @@ fn print_status(st: &StatusResponse) {
         println!("server:  {server} ({conn})");
     }
     if let Some(n) = &st.self_node {
-        println!("self:    {} {} key {}", n.ip, n.hostname, n.node_key.short());
+        let name = if n.dns_name.is_empty() { &n.hostname } else { &n.dns_name };
+        println!("self:    {} {} key {}", n.ip, name, n.node_key.short());
         if !n.endpoints.is_empty() {
             let eps: Vec<String> = n.endpoints.iter().map(ToString::to_string).collect();
             println!("         endpoints {}", eps.join(", "));
@@ -534,7 +688,11 @@ fn print_status(st: &StatusResponse) {
         println!(
             "{:<16} {:<20} {:<8} {:<24} {:<12} {} / {}",
             p.ip.to_string(),
-            if p.exit_node { format!("{} [exit]", p.hostname) } else { p.hostname.clone() },
+            {
+                let name = if p.dns_name.is_empty() { p.hostname.clone() } else { p.dns_name.trim_end_matches(".retail.internal").to_string() };
+                let name = if p.restricted { format!("{name} [limited]") } else { name };
+                if p.exit_node { format!("{name} [exit]") } else { name }
+            },
             if p.online { "online" } else { "offline" },
             path,
             hs,

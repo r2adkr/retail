@@ -1275,6 +1275,8 @@ mod preview {
             exit_node: false,
             tx_bytes: 0,
             rx_bytes: 0,
+            dns_name: format!("{name}.retail.internal"),
+            restricted: false,
         }
     }
 
@@ -1308,6 +1310,7 @@ mod preview {
                 ip: std::net::Ipv4Addr::new(100, 64, 0, 1),
                 node_key: Key([1; 32]),
                 endpoints: vec![],
+                dns_name: "work-laptop.retail.internal".into(),
             }),
             peers: if backend == BackendState::Running { peers } else { vec![] },
             last_error: None,
@@ -1408,6 +1411,8 @@ mod preview {
             last_seen: (!online).then(|| {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 3 * 3600
             }),
+            dns_name: format!("{name}.retail.internal"),
+            tags: Vec::new(),
         };
         d.status = Some(Ok(if state == "idle" {
             ServerStatus::default()

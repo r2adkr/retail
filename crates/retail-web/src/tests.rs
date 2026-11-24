@@ -18,6 +18,8 @@ impl Backend for Fake {
                 online: true,
                 exit_node: false,
                 last_seen: None,
+                dns_name: format!("n{id}.retail.internal"),
+                tags: Vec::new(),
             };
             ServerStatus { running: true, nodes: vec![node(1, [100, 64, 0, 1]), node(2, [100, 64, 0, 2])], ..Default::default() }
         })
@@ -62,6 +64,15 @@ impl Backend for Fake {
     }
     fn upload_dir(&self, _: &str) -> Option<PathBuf> {
         None
+    }
+    fn set_acl(&self, _: Option<retail_proto::acl::AclPolicy>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn set_tags(&self, _: i64, _: Vec<String>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn set_helper_device(&self, _: Option<i64>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
     }
     fn fetch_client(&self, _: &str) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async { Err("offline".into()) })

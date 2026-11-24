@@ -65,6 +65,15 @@ impl retail_web::Backend for Glue {
     fn upload_dir(&self, variant: &str) -> Option<PathBuf> {
         STANDARD.contains(&variant).then(|| retail_web::clients_dir(&self.state_dir).join(variant))
     }
+    fn set_acl(&self, acl: Option<retail_proto::acl::AclPolicy>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.set_acl(acl).await.map_err(text) })
+    }
+    fn set_tags(&self, id: i64, tags: Vec<String>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.set_tags(id, &tags).await.map_err(text) })
+    }
+    fn set_helper_device(&self, id: Option<i64>) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.set_helper_device(id).await.map_err(text) })
+    }
     fn fetch_client(&self, variant: &str) -> BoxFut<'_, Result<(), String>> {
         let variant = variant.to_string();
         Box::pin(async move {
@@ -122,7 +131,7 @@ fn wanted(os: &str) -> Vec<String> {
 }
 
 /// Always offered, so the page can ask for the files of a missing one
-const STANDARD: [&str; 3] = ["windows-x86_64", "linux-x86_64", "macos-aarch64"];
+const STANDARD: [&str; 4] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64"];
 
 /// This device's own programs, then any in `<state>/clients/<os>-<arch>/`
 fn clients(state_dir: &Path) -> Vec<ClientSource> {

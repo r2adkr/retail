@@ -401,6 +401,9 @@ impl Ui {
     /// The "⋯" menu of a device, under its button (or above it near the bottom)
     fn device_menu(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, p: &PeerStatus, top: f32) {
         let mut items = vec![MenuItem { label: tr("Copy IP address").into(), action: Action::Copy(p.ip.to_string()) }];
+        if !p.dns_name.is_empty() {
+            items.push(MenuItem { label: tr("Copy name").into(), action: Action::Copy(p.dns_name.clone()) });
+        }
         let in_use = s.prefs.exit_node == Some(p.node_key);
         if in_use {
             items.push(MenuItem { label: tr("Stop using exit node").into(), action: Action::SetExit(String::new()) });

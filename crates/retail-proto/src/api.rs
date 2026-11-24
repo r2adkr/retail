@@ -12,6 +12,10 @@ pub struct RegisterRequest {
     pub node_key: Key,
     pub hostname: String,
     pub os: String,
+    /// The node's current token, when this key is registered already. A key
+    /// alone is public (every member sees it), so it never takes a node over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +39,9 @@ pub enum ClientMessage {
         #[serde(default)]
         exit_node: bool,
     },
+    /// This node as a helper for the server (asked by `NetMap::helper`):
+    /// its helper code once it listens, `None` if it cannot or stopped
+    HelperCode { code: Option<String> },
 }
 
 /// Sent by the control server on the poll WebSocket
@@ -50,6 +57,10 @@ pub struct NetMap {
     pub peers: Vec<Node>,
     /// `host:port` entries. Empty means the control server's host on port 3478.
     pub stun_servers: Vec<String>,
+    /// The server asks this node to be its helper node (the server cannot be
+    /// reached from other networks, and an administrator chose this node)
+    #[serde(default)]
+    pub helper: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,6 +76,12 @@ pub struct Node {
     /// Offers to route other nodes' internet traffic
     #[serde(default)]
     pub exit_node: bool,
+    /// `<name>.retail.internal`, unique in the network
+    #[serde(default)]
+    pub dns_name: String,
+    /// What the netmap's owner accepts from this node
+    #[serde(default)]
+    pub accept: crate::acl::Accept,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +131,15 @@ pub struct ServerStatus {
     pub helper: Option<String>,
     #[serde(default)]
     pub helper_linked: bool,
+    /// A member device acting as the helper node
+    #[serde(default)]
+    pub helper_device: Option<i64>,
+    /// The member device's helper is up and linked
+    #[serde(default)]
+    pub helper_device_linked: bool,
+    /// `None`: every device reaches every other
+    #[serde(default)]
+    pub acl: Option<crate::acl::AclPolicy>,
     pub nodes: Vec<ServerNode>,
     pub invites: Vec<ServerInvite>,
     pub last_error: Option<String>,
@@ -146,6 +172,10 @@ pub struct ServerNode {
     pub online: bool,
     pub exit_node: bool,
     pub last_seen: Option<i64>,
+    #[serde(default)]
+    pub dns_name: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +311,26 @@ pub struct SavedServer {
     pub current: bool,
 }
 
+/// `POST /server/acl`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AclRequest {
+    /// `None` lets every device reach every other
+    pub acl: Option<crate::acl::AclPolicy>,
+}
+
+/// `POST /server/nodes/{id}/tags`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TagsRequest {
+    pub tags: Vec<String>,
+}
+
+/// `POST /server/helper-device`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HelperDeviceRequest {
+    /// The member device to be the helper node, `None` for none
+    pub id: Option<i64>,
+}
+
 /// `POST /servers/switch` and `POST /servers/forget`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerSelect {
@@ -363,6 +413,8 @@ pub struct SelfStatus {
     pub ip: Ipv4Addr,
     pub node_key: Key,
     pub endpoints: Vec<SocketAddr>,
+    #[serde(default)]
+    pub dns_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +435,11 @@ pub struct PeerStatus {
     pub exit_node: bool,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    #[serde(default)]
+    pub dns_name: String,
+    /// This device takes only some traffic from it (an access rule)
+    #[serde(default)]
+    pub restricted: bool,
 }
 
 #[cfg(test)]
@@ -407,14 +464,23 @@ mod tests {
             endpoints: vec![],
             online: true,
             exit_node: false,
+            dns_name: "a.retail.internal".into(),
+            accept: crate::acl::Accept::Ports { ports: vec![crate::acl::PortRule::parse("tcp:22").unwrap()] },
         };
         let nm = ServerMessage::NetMap(NetMap {
             self_node: node.clone(),
             peers: vec![node],
             stun_servers: vec![],
+            helper: false,
         });
         let s = serde_json::to_string(&nm).unwrap();
         assert!(s.starts_with(r#"{"type":"net_map""#));
         assert_eq!(serde_json::from_str::<ServerMessage>(&s).unwrap(), nm);
+
+        // A netmap from an older server: everything accepted, no names
+        let old = r#"{"type":"net_map","self_node":{"id":1,"hostname":"a","os":"linux","node_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","ip":"100.64.0.1","endpoints":[],"online":true},"peers":[],"stun_servers":[]}"#;
+        let ServerMessage::NetMap(nm) = serde_json::from_str::<ServerMessage>(old).unwrap();
+        assert_eq!(nm.self_node.accept, crate::acl::Accept::All);
+        assert!(!nm.helper);
     }
 }

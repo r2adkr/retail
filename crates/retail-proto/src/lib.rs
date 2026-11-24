@@ -2,6 +2,7 @@
 //!
 //! Everything on the wire is JSON. Keys are standard base64, as in WireGuard tools.
 
+pub mod acl;
 pub mod api;
 pub mod invite;
 pub mod package;
@@ -25,6 +26,13 @@ pub const WEB_ADMIN_PORT: u16 = 41180;
 pub const RELEASES: &str = "https://github.com/r2adkr/retail/releases/download";
 pub const LOCAL_API_ADDR: &str = "127.0.0.1:41112";
 pub const TUN_MTU: u16 = 1280;
+
+/// Names of devices are `<hostname>.MAGIC_DNS_DOMAIN` (`.internal` is
+/// reserved for private use)
+pub const MAGIC_DNS_DOMAIN: &str = "retail.internal";
+/// Where each device answers those names, inside the mesh range and never
+/// given to a device
+pub const MAGIC_DNS_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(100, 100, 100, 100);
 
 pub fn in_mesh(ip: std::net::Ipv4Addr) -> bool {
     let mask = u32::MAX << (32 - MESH_PREFIX_LEN);

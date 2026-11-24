@@ -51,13 +51,19 @@ When the server starts, retail **opens ports on the router automatically with PC
 
 ## On a VPS or in Docker
 
-On a server without a screen, install retaild and turn on the server only. The server does not join the network itself, so it needs no TUN device either.
+On a server without a screen, everything works from the command line. Download `retaild` and `retail` for the machine (`linux-x86_64`, `linux-aarch64`, or `linux-arm` for 32-bit ARM) from the [releases](https://github.com/r2adkr/retail/releases), then:
 
 ```sh
-sudo systemctl enable --now retaild                     # packaging/systemd/retaild.service
-retail server start --no-join                           # comes back after a reboot
-retail server invite                                    # invite a device
+chmod +x retaild-* retail-* && mv retaild-* retaild && mv retail-* retail
+sudo ./retaild install --server             # installs both, starts at boot, starts the server, prints an invite
+retail server invite --name family          # more invites; retail server status, acl, tag, helper-device …
+retail tui                                  # the same in a full-screen terminal view
+sudo retaild uninstall                      # removes the service and programs (the server data stays)
 ```
+
+`retaild install --server` copies the programs to `/usr/local/bin` (or `--dir`), registers the daemon with systemd (launchd on macOS, Task Scheduler on Windows), starts a server that does not join its own network (so it needs no TUN device), and prints the first invite. `--port` and `--domain` set the server's port and a name for invites. Without `--server` it only installs the daemon, for a device that joins a network.
+
+On a machine with less than 1 GB of memory the daemon picks its smallest buffers by itself (about 9 MB); `retail set --memory-limit` overrides it. The web admin page is on the server's loopback: `ssh -L 41180:127.0.0.1:41180 server`, then open the link `retail server web --print` prints there.
 
 Docker:
 
@@ -87,7 +93,11 @@ retail server start --reality off                 # turn it off
 
 ## A server behind CGNAT: helper node
 
-At a home behind carrier-grade NAT (the provider shares one public address among customers), opening router ports does not let anyone in from outside. One small server with a public address (a VPS) as a **helper node** solves this. The helper only passes connections through to the server: it cannot read them and stores no network data.
+At a home behind carrier-grade NAT (the provider shares one public address among customers), opening router ports does not let anyone in from outside; the server window and web admin page say so. A **helper node** that other networks can reach solves this. It only passes connections through to the server: it cannot read them and stores no network data.
+
+- **A member device**: if a device already in the network can be reached from the internet (one with a public address, or behind a router that opens ports automatically), open the web admin page, then that device's ⋯ menu → **Use as helper node** (or `retail server helper-device <device>`). The server asks the device over its control connection; the device listens, opens its router's ports, and sends back its helper code. Invite codes made afterwards lead with its address. It stops when you turn it off or the device goes offline.
+- **A VPS** (below), when no member can be reached.
+- **IPv6**: if the server has a global IPv6 address, invites carry it ahead of the local addresses, so devices with IPv6 often connect directly. The router must let inbound IPv6 through to the server.
 
 ```sh
 # On the VPS (with retaild installed)
@@ -122,6 +132,22 @@ retail set --proxy auto                                    # follow the system s
 ```
 
 Proxies that open up TLS are no obstacle either. Such proxies usually refuse self-signed servers, so devices go in through a tunnel over plain HTTP and check the server certificate inside it. This can be slower.
+
+## Names and access control
+
+Every device gets a name, `<device name>.retail.internal`, answered by every device's own daemon at 100.100.100.100. The system sends only that domain there (Windows: a name resolution policy rule, macOS: `/etc/resolver/retail.internal`, Linux: systemd-resolved), so other lookups are untouched. Two devices with the same name get `-2`, `-3`, and so on.
+
+Without rules, every device reaches every other. To limit that, tag devices (web admin page, ⋯ → **Edit tags…**, or `retail server tag <device> <tags>`) and add rules in the **Access** card (or `retail server acl allow --from … --to … [--ports …]`). A rule lets its sources start traffic to its destinations, optionally only to some ports (`tcp:443`, `udp:5000-5100`, `icmp`). Replies always return. Devices with no rule between them in either direction are hidden from each other. **Limit access** starts with one rule that allows everything, so nothing breaks until you change it.
+
+```sh
+retail server tag nas server
+retail server acl allow --from '*' --to tag:server --ports tcp:443 icmp
+retail server acl                    # show the rules
+retail server acl remove 1
+retail server acl off                # everyone reaches everyone again
+```
+
+Rules are enforced by each receiving device; the server only tells each device what to accept from whom.
 
 ## Backups
 

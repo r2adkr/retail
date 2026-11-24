@@ -54,6 +54,10 @@ pub struct AppState {
     next_conn: Arc<AtomicU64>,
     /// Reported on connect, forgotten on disconnect
     exit_nodes: Arc<Mutex<std::collections::HashSet<i64>>>,
+    /// Helper codes of member devices acting as helper nodes, while connected
+    helper_codes: Arc<Mutex<HashMap<i64, String>>>,
+    /// The chosen helper device's code, for the hosting daemon to link to
+    pub(crate) helper_code: Arc<watch::Sender<Option<String>>>,
     /// Upgraded WebSockets live outside the HTTP server's graceful shutdown,
     /// so they watch this.
     shutdown: Arc<watch::Sender<bool>>,
@@ -74,6 +78,8 @@ impl AppState {
             relays: Arc::default(),
             next_conn: Arc::default(),
             exit_nodes: Arc::default(),
+            helper_codes: Arc::default(),
+            helper_code: Arc::new(watch::channel(None).0),
             shutdown: Arc::new(watch::channel(false).0),
             inject: Arc::default(),
             polls: Arc::default(),
@@ -106,6 +112,16 @@ impl AppState {
 
     pub fn notify(&self) {
         self.changes.send_modify(|v| *v += 1);
+    }
+
+    /// Publishes the chosen helper device's code, if it has sent one
+    pub(crate) fn refresh_helper_code(&self) {
+        let code = self.db.helper_device().and_then(|id| self.helper_codes.lock().unwrap().get(&id).cloned());
+        self.helper_code.send_if_modified(|c| {
+            let changed = *c != code;
+            *c = code;
+            changed
+        });
     }
 
     pub(crate) fn is_exit_node(&self, id: i64) -> bool {
@@ -143,29 +159,35 @@ impl AppState {
         let nodes = self.db.all_nodes().await?;
         let online = self.online.lock().unwrap().clone();
         let exits = self.exit_nodes.lock().unwrap().clone();
-        let to_node = |n: NodeRow| Node {
+        let acl = self.db.acl();
+        let Some(me) = nodes.iter().find(|n| n.id == node_id) else { return Ok(None) };
+        let viewer = crate::acl::Member { id: me.id, tags: &me.tags };
+        let to_node = |n: &NodeRow, accept| Node {
             online: online.contains_key(&n.id),
             exit_node: exits.contains(&n.id) && online.contains_key(&n.id),
             id: n.id,
-            hostname: n.hostname,
-            os: n.os,
+            hostname: n.hostname.clone(),
+            os: n.os.clone(),
             node_key: n.node_key,
             ip: n.ip,
-            endpoints: n.endpoints,
+            endpoints: n.endpoints.clone(),
+            dns_name: n.dns_name.clone(),
+            accept,
         };
-        let mut self_node = None;
-        let mut peers = Vec::with_capacity(nodes.len());
-        for n in nodes {
-            if n.id == node_id {
-                self_node = Some(to_node(n));
-            } else {
-                peers.push(to_node(n));
-            }
-        }
-        Ok(self_node.map(|self_node| NetMap {
-            self_node,
+        // Devices that may not talk either way do not see each other at all
+        let peers = nodes
+            .iter()
+            .filter(|n| n.id != node_id)
+            .filter_map(|n| {
+                let accept = crate::acl::view(acl.as_ref(), &viewer, &crate::acl::Member { id: n.id, tags: &n.tags })?;
+                Some(to_node(n, accept))
+            })
+            .collect();
+        Ok(Some(NetMap {
+            self_node: to_node(me, retail_proto::acl::Accept::All),
             peers,
             stun_servers: self.stun_servers.lock().unwrap().clone(),
+            helper: self.db.helper_device() == Some(node_id),
         }))
     }
 }
@@ -219,6 +241,9 @@ async fn register(
         }
         Err(RegisterError::InvalidAuthKey) => {
             api_error(StatusCode::UNAUTHORIZED, "invalid, used or expired auth key")
+        }
+        Err(RegisterError::KeyInUse) => {
+            api_error(StatusCode::CONFLICT, "this device key is registered already; only that device can register it again")
         }
         Err(RegisterError::AddressSpaceExhausted) => {
             api_error(StatusCode::INSUFFICIENT_STORAGE, "no free addresses left")
@@ -290,6 +315,10 @@ async fn serve_node(state: &AppState, node_id: i64, socket: WebSocket) -> Result
         relays.by_key.remove(&key);
         // The exit node offer ends with the node's newest connection
         state.exit_nodes.lock().unwrap().remove(&node_id);
+        // So does a helper node on it
+        if state.helper_codes.lock().unwrap().remove(&node_id).is_some() {
+            state.refresh_helper_code();
+        }
     }
     result
 }
@@ -342,6 +371,17 @@ async fn serve_connection(
                                 tracing::info!(node_id, exit_node, "exit node offer changed");
                                 state.notify();
                             }
+                        }
+                        Ok(ClientMessage::HelperCode { code }) => {
+                            tracing::info!(node_id, ready = code.is_some(), "helper device reported");
+                            {
+                                let mut codes = state.helper_codes.lock().unwrap();
+                                match code {
+                                    Some(c) if c.len() < 4096 => codes.insert(node_id, c),
+                                    _ => codes.remove(&node_id),
+                                };
+                            }
+                            state.refresh_helper_code();
                         }
                         Err(e) => tracing::warn!(node_id, "bad client message: {e}"),
                     },

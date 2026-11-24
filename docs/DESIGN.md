@@ -10,7 +10,7 @@ It reuses WireGuard (boringtun) as the data tunnel and implements the control an
 | `retail-proto` | (library) | Wire types (JSON), key encoding, STUN and relay frames, invite codes, local API token |
 | `retail-control` | (library) | Coordination server: node registration, IP allocation, NetMap push, relay, STUN, REALITY, HTTP tunnels, helper nodes. Runs inside retaild when it hosts a network |
 | `retail-daemon` | `retaild` | Node daemon: TUN, WireGuard data plane, endpoint discovery, the transport race to the server (proxies, tunnels, NAT64), exit node, hosting (server, router ports, helper node), local API |
-| `retail-cli` | `retail` | `up`/`down`/`logout`/`status`/`set`/`server …`/`helper …` (calls the local API) |
+| `retail-cli` | `retail` | `up`/`down`/`logout`/`status`/`set`/`server …`/`helper …` (calls the local API), and `retail tui` (ratatui): devices, server and saved servers in a terminal, redrawn on a key or every 2 s |
 | `retail-web` | (library) | Web admin page and installer packages |
 | `retail-tray` | `retail-tray` | Tray / menu bar app: status popup (⋯ menu per device), settings window, server window |
 
@@ -41,11 +41,12 @@ retail (CLI, tray) ──HTTP 127.0.0.1:41112──► retaild ──HTTPS/WSS (
 | `GET /health` | - | Health check |
 
 - The server port tells TLS from plain HTTP by the first byte. Plain HTTP reaches only the tunnel endpoints; everything else gets 403.
-- Registering again with the same `node_key` keeps the node and its IP and only replaces the token.
+- Registering again with the same `node_key` keeps the node, its IP and its name, and replaces the token. It needs the node's current token as well as an invite: every member sees every key in its netmap, so a key alone never takes a node over. A new hostname gets a free name; it never takes one in use.
 - On every change (registration, endpoint update, connect/disconnect, admin command) the server recomputes each connection's NetMap and sends it unless it is unchanged.
 - Admin commands come in through the hosting device's local API, so they take effect in the same process at once. Connections of deleted nodes are closed.
 - On each connect a node announces whether it offers an exit node with `ClientMessage::Hostinfo { exit_node }`. The server keeps this in memory only and forgets it when the node disconnects.
 - Registration is limited to 10 requests per minute per client address.
+- Handshake initiations must carry a valid mac1 (which needs the device's public key) before the daemon spends a Diffie-Hellman on them; HTTP long-poll tunnels are capped at 256, 16 per client address; a helper node's link lines are bounded and so are the connections picked up at once.
 
 ## 4. Addresses
 
@@ -116,10 +117,15 @@ The last resort for networks where HTTPS to the server is itself blocked (firewa
 - Authentication: the client derives an auth key with HKDF from X25519 (its key share's private key, the server's static public key) and seals version, time and short ID with AES-256-GCM into the session ID (the AAD is the ClientHello with the session ID zeroed). The server checks the time (±120 s), the short ID and replays.
 - Server verification: the one-time certificate's signature field holds HMAC-SHA512(auth key, certificate public key), and the client checks it along with the CertificateVerify signature.
 - The client must choose the session ID and the key share itself, so instead of rustls it uses a small TLS 1.3 client of its own (`retail-daemon/src/reality.rs`). It uses only TLS_AES_128_GCM_SHA256 and X25519, and its ClientHello mimics Chrome's order and GREASE. Unit tests cover interoperation with a rustls server, wrong keys and probes.
-- Switching: in the race of 6.5 it starts 1.5 seconds after plain HTTPS (at once if plain HTTPS fails sooner).
+- Switching: in the race of 6.6 it starts 1.5 seconds after plain HTTPS (at once if plain HTTPS fails sooner).
 - Limits: it does not help against a block of the server's IP. The ServerHello comes from rustls, so it is not identical to the camouflage site's. Authentication fails if clocks are more than 2 minutes apart.
 
-### 6.3 Exit node
+### 6.3 Names and access control
+
+- **MagicDNS**: the server gives every node a unique `dns_name` (`<hostname>.retail.internal`, later duplicates `-2`, `-3`). Packets to 100.100.100.100 (inside the mesh range, never assigned) reach no peer, so the engine hands UDP queries to port 53 to `magicdns.rs`, which answers A and reverse (PTR) lookups from the netmap and writes the reply to TUN. NXDOMAIN for unknown names in the domain, REFUSED outside it. The system is told to send only `retail.internal` there: an NRPT rule on Windows, `/etc/resolver/retail.internal` on macOS, `resolvectl dns/domain` on Linux; undone when the session ends.
+- **Access control** (`retail_proto::acl`, `retail-control/src/acl.rs`, `retail-daemon/src/filter.rs`): the policy is stored with the server data; `None` means everyone reaches everyone. Rules name sources and destinations by `*`, `tag:NAME` or `id:N`, with optional ports. For each pair the server computes what the receiver accepts from the sender (`Accept::All`, or `Ports`), sent with that peer in the receiver's netmap. A pair with no rule either way is left out of both netmaps, so the devices cannot even handshake. When only one side may start traffic, the other gets `Ports { [] }`: replies only. The receiver enforces it after decryption: new traffic must match an allowed port; otherwise it must answer a flow this device started (tracked per peer by protocol, peer address and ports, 10 minutes idle, at most 16k flows). ICMP echo replies match our echo ids; ICMP errors are allowed from peers we have flows with; later fragments of restricted peers are dropped. Packets not addressed to the device itself (exit-node traffic) are not filtered here.
+
+### 6.4 Exit node
 
 Using the internet through another device.
 
@@ -130,7 +136,7 @@ Using the internet through another device.
 - If the chosen exit node goes offline, the internet is blocked (fail closed). The tray and `retail status` say so, and clearing the choice restores it. The control connection stays up.
 - While an exit node is in use DNS goes through the tunnel, so if resolving the server name fails, the last address that worked is used.
 
-### 6.4 Memory limit
+### 6.5 Memory limit
 
 Set with `retail set --memory-limit <MiB|auto>`, `retaild --memory-limit` or `RETAIL_MEMORY_LIMIT` (not in the app). The default is automatic.
 
@@ -139,7 +145,7 @@ Set with `retail set --memory-limit <MiB|auto>`, `retaild --memory-limit` or `RE
 
 The daemon idles at about 12 MiB and peaks around 15 MiB under load, within the 10–20 MB budget. A limit of 9 MB or less drops to one crypto worker and smaller buffers, at roughly half the throughput.
 
-### 6.5 The way to the server (transport race)
+### 6.6 The way to the server (transport race)
 
 So that the server is reachable from any network with internet access, the control connection and registration race every available way (`retail-daemon/src/transport.rs`). Each way starts when its delay has passed, or at once when all earlier ways have failed, and the first to succeed wins. On an ordinary network it connects at plain HTTPS speed; on a blocking one it tries the rest within seconds. The last way that worked is tried first next time.
 
@@ -221,11 +227,15 @@ There is no separate server program. The `retail-control` library runs inside th
 - **Port 80**: besides the server port, port 80 is opened (if free) for the plain HTTP tunnel on networks that let only web ports out.
 - **Router ports**: PCP, then NAT-PMP, then UPnP IGD open the TCP server port and 80, UDP 3478 and the UDP WireGuard port, renew them every half lease, and remove them on stop. If an external port is taken, another one is used and put into invites. Router answers (SSDP, XML) are read with size and time limits. A private external address raises the CGNAT warning. `RETAIL_NO_PORTMAP=1` turns this off.
 - **The hosting device itself**: joins its own server over loopback and reports the WireGuard port the router opened as a public endpoint candidate (its own server's STUN only sees loopback). The invite lists the LAN address of the default-route interface first (ahead of virtual machine and container adapters).
+- **Helper device**: instead of a VPS, an administrator can pick a member device (`helper_device` in the server data). Its netmap then has `helper: true`; the device (`helper_role.rs`) starts a helper listener on 443 (or 8443), opens its own router's ports, and sends `ClientMessage::HelperCode` with its code, which the server links to like any helper and puts in invites. Only the chosen device's code is used, and only while it is connected.
+- **IPv6**: global IPv6 addresses of the server go into invites right after public and helper addresses.
 - **Helper node** (for servers that cannot be reached from outside, such as behind CGNAT): `retail helper start` on a machine with a public address (a VPS) prints a code (`retailh1.…`). With `--helper CODE` the server keeps a connection open to the helper, and for each connection the helper receives it asks the server for a new connection and joins the bytes as they are. TLS, REALITY and tunnels end at the server, so the helper never sees content. The server's own connections are told apart by the TLS SNI `link.retail.invalid` and a secret. The helper answers STUN too, and invite codes carry its address.
 - **CDN**: `--front https://name` goes into invite codes, and devices try a tunnel through the CDN. The CDN must forward to port 443 of the server (or of the helper).
 - **Windows firewall**: an inbound allow rule for the retaild program only, removed on stop.
 - **Stop**: closes all WebSocket (control and relay) connections and releases the ports. Connected devices notice within 0.1 seconds and reconnect within about 1 second when the server starts again.
 - **Updates** (`retail-daemon/src/update.rs`): every 6 hours the daemon reads `VERSION` from the newest release (`releases/latest/download/VERSION`). Installing fetches this system's programs from that release, checks them against `SHA256SUMS`, and replaces the running ones in their folder (Unix: rename over the old file; Windows: the running file is renamed to `.old` first, removed at the next start). The daemon then shuts down cleanly and exits with code 75, on which systemd (`Restart=on-failure`), launchd (`KeepAlive`) and the Windows task restart it (on Windows the task is also started again after a few seconds). The tray app sees the daemon's newer version and a newer file of its own, and starts that one in its place.
+- **Command-line install**: `retaild install [--server]` copies `retaild` and `retail` into place, registers the boot service and, with `--server`, starts a server with `join: false` and prints an invite; `retaild uninstall` undoes it. The boot registration lives in `retail-daemon/src/service.rs` and the tray app's installer calls it (`retaild service register|stop|remove`), so both install the same way.
+- **Small machines**: below 1 GB of memory the daemon uses the smallest data-plane buffers unless a limit is set; releases include `linux-aarch64` (with the tray) and `linux-arm` (32-bit, daemon and CLI).
 - **Packaging**: `packaging/docker` (retaild in server mode, distroless), `packaging/systemd/retaild.service`, and the release workflow that publishes the official clients (`.github/workflows/release.yml`).
 
 ## 11. Tray app
@@ -282,19 +292,20 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 
 | Milestone | Content |
 |---|---|
-| Policy | ACLs between devices (groups/tags), MagicDNS, key expiry and rotation, admin approval of exit nodes |
+| Policy | Key expiry and rotation, admin approval of exit nodes, access rules for exit-node use |
 | Convenience | Subnet routers, IPv6 inside the mesh, mobile |
 | Releases | Code signing, signed update metadata |
 | Performance | Measure the worker count (K) on real many-core hardware, the relay on lossy and high-latency lines (a UDP relay if needed), several relay servers, a faster first REALITY connection |
 | Verification | Exit node routing, NAT and firewall rules on real Windows and macOS machines. Proxy integrated authentication (Kerberos, NTLM) and PAC on a real corporate network |
-| Connectivity | Opening the IPv6 firewall with PCP, entering helper codes and CDN addresses in the tray |
+| Connectivity | Opening the IPv6 firewall with PCP, choosing a helper device in the tray |
 
 ## 14. Known limitations
 
 - Where no direct connection is possible (two symmetric NATs, blocked UDP, ...), traffic relays through the control server, whose line then limits throughput. The control server is the only relay.
 - Virtual (mesh) addresses are IPv4 only; the real paths between devices use IPv6 too. Windows and macOS have no TUN offload and may be slower than Linux (UDP batching applies there).
 - On Windows every user signed in to the computer can control retail (INTERACTIVE can read the local API token), and so can other programs running as those users.
-- There is no access control between devices: every node in a network can reach every other. Offering an exit node needs no admin approval (the using side chooses).
+- Access rules cover traffic to a device itself; internet traffic through an exit node is not filtered by them, and offering an exit node needs no admin approval (the using side chooses).
+- MagicDNS needs systemd-resolved on Linux for the system to use it; elsewhere ask 100.100.100.100 directly.
 - Idle memory is 11.6–12.4 MiB, at most 14.9 MiB under load (within the 10–20 MB budget).
 - Integrated proxy authentication works on Windows only. Linux and macOS use Basic and SOCKS5 passwords only, and Linux reads the system proxy from environment variables only.
 - Losing the server certificate key means inviting every device again.

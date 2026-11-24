@@ -1,0 +1,354 @@
+//! Installing retaild without the tray app: `retaild install [--server]` copies
+//! the programs to their place, has the daemon start at boot (systemd,
+//! launchd, Task Scheduler) and, with `--server`, starts a server that does
+//! not join its own network and prints the first invite. The tray app's
+//! installer uses `retaild service register|stop|remove` for the same boot
+//! registration.
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+
+#[derive(clap::Subcommand)]
+pub enum Cmd {
+    /// Install retaild (and the `retail` CLI next to it) as a service that
+    /// starts at boot. With --server, also start a server here that does not
+    /// join its own network (as on a VPS) and print an invite.
+    Install {
+        /// Host a network on this machine
+        #[arg(long)]
+        server: bool,
+        /// TCP port of the server (default 443)
+        #[arg(long, requires = "server")]
+        port: Option<u16>,
+        /// A host name pointing at this machine, for invites
+        #[arg(long, requires = "server")]
+        domain: Option<String>,
+        /// Where the programs go (default: /usr/local/bin, or %ProgramFiles%\retail)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Start the daemon directly instead of registering a service (tests)
+        #[arg(long, hide = true)]
+        no_service: bool,
+    },
+    /// Stop retaild and remove the service and the programs. The state
+    /// directory (keys, server data) stays.
+    Uninstall {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Boot registration only, for the tray app's installer
+    #[command(hide = true)]
+    Service {
+        #[arg(value_parser = ["register", "stop", "remove"])]
+        action: String,
+    },
+}
+
+pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
+    match cmd {
+        Cmd::Service { action } => {
+            let me = std::env::current_exe()?;
+            match action.as_str() {
+                "register" => register(&me),
+                "stop" => {
+                    stop();
+                    Ok(())
+                }
+                _ => {
+                    stop();
+                    unregister();
+                    Ok(())
+                }
+            }
+        }
+        Cmd::Uninstall { dir } => {
+            require_admin()?;
+            stop();
+            unregister();
+            let dir = dir.unwrap_or_else(default_dir);
+            for name in ["retaild", "retail"] {
+                let _ = std::fs::remove_file(dir.join(exe(name)));
+            }
+            if cfg!(windows) {
+                let _ = std::fs::remove_file(dir.join("wintun.dll"));
+                let _ = std::fs::remove_dir(&dir);
+            }
+            println!("retaild is removed. Its state stays in {}.", state_dir.map_or_else(crate::state::default_state_dir, Path::to_path_buf).display());
+            Ok(())
+        }
+        Cmd::Install { server, port, domain, dir, no_service } => {
+            if !no_service {
+                require_admin()?;
+            }
+            let dir = dir.unwrap_or_else(default_dir);
+            let me = std::env::current_exe()?;
+            let here = me.parent().context("retaild has no folder")?.to_path_buf();
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            if !no_service {
+                stop();
+            }
+            let same = here.canonicalize().ok() == dir.canonicalize().ok();
+            let mut files = vec![exe("retaild"), exe("retail")];
+            if cfg!(windows) {
+                files.push("wintun.dll".into());
+            }
+            for f in &files {
+                let src = if *f == exe("retaild") { me.clone() } else { here.join(f) };
+                if same || !src.is_file() {
+                    if !src.is_file() && *f != exe("retaild") {
+                        eprintln!("note: {f} is not next to retaild; install it to {} yourself", dir.display());
+                    }
+                    continue;
+                }
+                copy(&src, &dir.join(f)).with_context(|| format!("installing {f}"))?;
+            }
+            let daemon = dir.join(exe("retaild"));
+            if no_service {
+                let mut cmd = std::process::Command::new(&daemon);
+                if let Some(s) = state_dir {
+                    cmd.arg("--state-dir").arg(s);
+                }
+                cmd.arg("--api").arg(api.to_string());
+                cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                cmd.spawn().context("starting retaild")?;
+            } else {
+                register(&daemon)?;
+            }
+            wait_for(api)?;
+            println!("retaild is installed in {} and starts at boot.", dir.display());
+            if !server {
+                println!("Join a network with: retail up --invite <code>");
+                return Ok(());
+            }
+            let req = retail_proto::api::ServerStartRequest { join: false, port, domain, ..Default::default() };
+            let st: retail_proto::api::ServerStatus = call(api, "/server/start", &serde_json::to_string(&req)?)?;
+            let inv: retail_proto::api::InviteResponse = call(api, "/server/invite", "{}")?;
+            println!();
+            println!("The server is running and starts again at boot.");
+            match (&st.public, st.lan.is_empty()) {
+                (Some(p), _) => println!("  address:  {p}"),
+                // A VPS has its public address on its own interface
+                (None, false) => println!("  address:  {}", st.lan.join(", ")),
+                (None, true) => println!("  address:  not known yet (`retail server status`)"),
+            }
+            println!("  firewall: allow TCP {} and UDP 3478 in", st.port.unwrap_or(443));
+            if let Some(w) = &st.warning {
+                println!("  note:     {w}");
+            }
+            println!();
+            println!("Invite for the first device (one-time, 24 hours):");
+            println!("  {}", inv.code);
+            println!();
+            println!("Manage it here with `retail server …` (status, invite --name, acl, tag, helper-device),");
+            println!("or open the web admin page from your computer:");
+            println!("  ssh -L 41180:127.0.0.1:41180 <this machine>, then `retail server web --print` here");
+            Ok(())
+        }
+    }
+}
+
+fn exe(name: &str) -> String {
+    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+fn default_dir() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into())).join("retail")
+    } else {
+        PathBuf::from("/usr/local/bin")
+    }
+}
+
+/// Replaces `dest`, which may be running (renamed aside on Windows)
+fn copy(src: &Path, dest: &Path) -> Result<()> {
+    let tmp = dest.with_extension("new");
+    std::fs::copy(src, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(windows)]
+    if dest.exists() {
+        let old = dest.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(dest, &old)?;
+    }
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+fn require_admin() -> Result<()> {
+    #[cfg(unix)]
+    let admin = unsafe { libc::geteuid() } == 0;
+    #[cfg(windows)]
+    let admin = std::process::Command::new("net").arg("session").output().is_ok_and(|o| o.status.success());
+    if !admin {
+        bail!("run this as administrator (Windows) or root (sudo)");
+    }
+    Ok(())
+}
+
+fn wait_for(api: SocketAddr) -> Result<()> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        if TcpStream::connect_timeout(&api, Duration::from_millis(300)).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    bail!("retaild did not start (see its log: journalctl -u retaild, or the Task Scheduler history)")
+}
+
+/// A POST to the local API with the token
+fn call<T: serde::de::DeserializeOwned>(api: SocketAddr, path: &str, body: &str) -> Result<T> {
+    // The daemon writes its token just after it starts listening
+    let token = (0..50)
+        .find_map(|_| retail_proto::local::read_token().or_else(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            None
+        }))
+        .context("no local API token")?;
+    let mut s = TcpStream::connect_timeout(&api, Duration::from_secs(2))?;
+    s.set_read_timeout(Some(Duration::from_secs(60)))?;
+    write!(
+        s,
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Retail-Local: 1\r\nX-Retail-Token: {token}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut raw = Vec::new();
+    s.take(1 << 20).read_to_end(&mut raw)?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").context("malformed answer")?;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let ok = head.split_whitespace().nth(1).is_some_and(|c| c.starts_with('2'));
+    let body = &raw[split + 4..];
+    if !ok {
+        let e = serde_json::from_slice::<retail_proto::api::ApiError>(body).map(|e| e.error).unwrap_or_else(|_| head.lines().next().unwrap_or("").to_string());
+        bail!("{path}: {e}");
+    }
+    Ok(serde_json::from_slice(body)?)
+}
+
+fn run_quiet(program: &str, args: &[&str]) -> Result<()> {
+    let out = std::process::Command::new(program).args(args).output().with_context(|| program.to_string())?;
+    if !out.status.success() {
+        bail!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+const TASK: &str = "retail\\retaild";
+
+/// Task Scheduler defaults would stop the daemon after 72 hours and on
+/// battery, and never restart it, so the task is imported from XML.
+#[cfg(windows)]
+pub fn register(daemon: &Path) -> Result<()> {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>retail node daemon</Description></RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="System"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="System"><Exec><Command>{}</Command></Exec></Actions>
+</Task>"#,
+        daemon.display()
+    );
+    let path = std::env::temp_dir().join("retaild-task.xml");
+    let mut bytes = vec![0xFF, 0xFE];
+    for u in xml.encode_utf16() {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    std::fs::write(&path, bytes).context("writing the task")?;
+    let path_s = path.display().to_string();
+    let created = run_quiet("schtasks", &["/Create", "/TN", TASK, "/XML", &path_s, "/F"]);
+    let _ = std::fs::remove_file(&path);
+    created?;
+    run_quiet("schtasks", &["/Run", "/TN", TASK])
+}
+
+#[cfg(windows)]
+pub fn stop() {
+    let _ = run_quiet("schtasks", &["/End", "/TN", TASK]);
+    // Not this process (`retaild service stop` itself)
+    let _ = run_quiet("taskkill", &["/F", "/FI", &format!("PID ne {}", std::process::id()), "/IM", "retaild.exe"]);
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+#[cfg(windows)]
+pub fn unregister() {
+    let _ = run_quiet("schtasks", &["/Delete", "/TN", TASK, "/F"]);
+}
+
+#[cfg(target_os = "linux")]
+pub fn register(daemon: &Path) -> Result<()> {
+    if run_quiet("systemctl", &["--version"]).is_err() {
+        bail!("systemd was not found; start {} yourself (as root), for example from your init system", daemon.display());
+    }
+    let dir = daemon.parent().map(|d| d.display().to_string()).unwrap_or_else(|| "/usr/local/bin".into());
+    let unit = include_str!("../../../packaging/systemd/retaild.service").replace("/usr/local/bin", &dir);
+    std::fs::write("/etc/systemd/system/retaild.service", unit).context("writing the systemd unit")?;
+    run_quiet("systemctl", &["daemon-reload"])?;
+    run_quiet("systemctl", &["enable", "--now", "retaild"])?;
+    run_quiet("systemctl", &["restart", "retaild"])
+}
+
+#[cfg(target_os = "linux")]
+pub fn stop() {
+    let _ = run_quiet("systemctl", &["stop", "retaild"]);
+}
+
+#[cfg(target_os = "linux")]
+pub fn unregister() {
+    let _ = run_quiet("systemctl", &["disable", "retaild"]);
+    let _ = std::fs::remove_file("/etc/systemd/system/retaild.service");
+    let _ = run_quiet("systemctl", &["daemon-reload"]);
+}
+
+#[cfg(target_os = "macos")]
+const PLIST: &str = "/Library/LaunchDaemons/dev.retail.retaild.plist";
+
+#[cfg(target_os = "macos")]
+pub fn register(daemon: &Path) -> Result<()> {
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.retail.retaild</string>
+<key>ProgramArguments</key><array><string>{}</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+</dict></plist>
+"#,
+        daemon.display()
+    );
+    std::fs::write(PLIST, plist).context("writing the launchd job")?;
+    let _ = run_quiet("launchctl", &["bootout", "system", PLIST]);
+    run_quiet("launchctl", &["bootstrap", "system", PLIST])
+}
+
+#[cfg(target_os = "macos")]
+pub fn stop() {
+    let _ = run_quiet("launchctl", &["bootout", "system", PLIST]);
+}
+
+#[cfg(target_os = "macos")]
+pub fn unregister() {
+    let _ = std::fs::remove_file(PLIST);
+}

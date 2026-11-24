@@ -14,4 +14,7 @@ Everything else is unchanged upstream code.
   session switch that `encapsulate` / `decapsulate` perform per packet, applied
   once per batch. Callers must call them for every batch they process outside
   `Tunn`, or keepalives and rekeying misbehave.
+- `RateLimiter::verify_mac1`: checks only mac1, so retaild can reject forged
+  handshake initiations before `parse_handshake_anon` spends a Diffie-Hellman
+  on them (upstream runs that lookup only inside `decapsulate`, after mac1).
 - `src/lib.rs`: `#![allow(...)]` for upstream warnings (no code change).

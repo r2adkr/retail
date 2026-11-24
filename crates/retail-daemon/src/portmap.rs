@@ -306,7 +306,12 @@ async fn discover() -> Result<(String, String, Ipv4Addr)> {
     sock.send_to(search.as_bytes(), SSDP).await?;
     let mut buf = [0u8; 2048];
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+    let gateway = default_gateway();
     while let Ok(Ok((n, from))) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
+        // Any device on the LAN can answer; only the router counts
+        if gateway.is_some_and(|gw| from.ip() != IpAddr::V4(gw)) {
+            continue;
+        }
         let text = String::from_utf8_lossy(&buf[..n]);
         let Some(location) = header(&text, "location") else { continue };
         // Only follow descriptions served by the device that answered
@@ -317,6 +322,10 @@ async fn discover() -> Result<(String, String, Ipv4Addr)> {
         match description(host, port, &path).await {
             Ok((control, service)) => {
                 let control = if control.starts_with("http://") { control } else { format!("http://{host}:{port}{}", absolute(&control)) };
+                // The control URL may not send us to another host
+                if split_http_url(&control).is_none_or(|(h, _, _)| h != host) {
+                    continue;
+                }
                 let local = local_ipv4_towards(from.ip()).context("finding our LAN address")?;
                 return Ok((control, service, local));
             }

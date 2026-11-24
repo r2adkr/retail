@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum::extract::Path;
 use retail_proto::api::{
-    ApiError, HelperStartRequest, InviteRequest, PrefsRequest, ServerSelect, ServerStartRequest, SystemProxy, UpRequest,
+    ApiError, HelperStartRequest, HelperStatus, InviteRequest, PrefsRequest, ServerSelect, ServerStartRequest, SystemProxy, UpRequest,
 };
 
 use crate::backend::Backend;
@@ -37,12 +37,17 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
         .route("/server/stop", post(server_stop))
         .route("/server/invite", post(server_invite))
         .route("/server/nodes/{id}/delete", post(server_delete_node))
+        .route("/server/nodes/{id}/tags", post(server_tags))
+        .route("/server/acl", post(server_acl))
+        .route("/server/helper-device", post(server_helper_device))
         .route("/server/invites/{id}/revoke", post(server_revoke_invite))
         // POST so the guard asks for the token: the answer is a reusable invite
         .route("/server/invites/{id}/code", post(server_named_code))
         // The installer of a named invite, for the tray's server window
         .route("/server/invites/{id}/package/{variant}", post(server_package))
         .route("/helper", get(helper_status))
+        // POST so the guard asks for the token: the code carries the helper's secret
+        .route("/helper/status", post(helper_status_with_code))
         .route("/helper/start", post(helper_start))
         .route("/helper/stop", post(helper_stop))
         .route("/proxy/system", post(system_proxy))
@@ -175,6 +180,10 @@ async fn server_package(State(b): State<Arc<Backend>>, Path((id, variant)): Path
 }
 
 async fn helper_status(State(b): State<Arc<Backend>>) -> Response {
+    Json(HelperStatus { code: None, ..b.helper.status().await }).into_response()
+}
+
+async fn helper_status_with_code(State(b): State<Arc<Backend>>) -> Response {
     Json(b.helper.status().await).into_response()
 }
 
@@ -217,6 +226,27 @@ async fn server_delete_node(State(b): State<Arc<Backend>>, Path(id): Path<i64>) 
     match b.host.delete_node(id).await {
         Ok(true) => Json(b.server_status().await).into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, "no such device"),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_tags(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::TagsRequest>) -> Response {
+    match b.host.set_tags(id, &req.tags).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_acl(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::AclRequest>) -> Response {
+    match b.host.set_acl(req.acl).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_helper_device(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::HelperDeviceRequest>) -> Response {
+    match b.host.set_helper_device(req.id).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }

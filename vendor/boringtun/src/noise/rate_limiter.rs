@@ -149,6 +149,18 @@ impl RateLimiter {
         Ok(&mut dst[..super::COOKIE_REPLY_SZ])
     }
 
+    /// Whether a handshake message's mac1 is right for this key (retail: a
+    /// cheap check to run before `parse_handshake_anon`, which costs a
+    /// Diffie-Hellman). Counts nothing towards the load limit.
+    pub fn verify_mac1(&self, src: &[u8]) -> bool {
+        if src.len() < 32 {
+            return false;
+        }
+        let (msg, macs) = src.split_at(src.len() - 32);
+        let computed = b2s_keyed_mac_16(&self.mac1_key, msg);
+        verify_slices_are_equal(&computed[..16], &macs[..16]).is_ok()
+    }
+
     /// Verify the MAC fields on the datagram, and apply rate limiting if needed
     pub fn verify_packet<'a, 'b>(
         &self,

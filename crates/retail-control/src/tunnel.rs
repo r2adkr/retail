@@ -33,8 +33,11 @@ const POLL_GATHER: Duration = Duration::from_millis(2);
 /// A session nobody polled for this long is closed
 const POLL_IDLE: Duration = Duration::from_secs(60);
 const MAX_POLL_SESSIONS: usize = 256;
+/// Per client address, so one source cannot take them all
+const MAX_POLL_SESSIONS_PER_IP: usize = 16;
 
 pub struct PollSession {
+    ip: std::net::IpAddr,
     reader: tokio::sync::Mutex<ReadHalf<DuplexStream>>,
     writer: tokio::sync::Mutex<WriteHalf<DuplexStream>>,
     touched: Mutex<Instant>,
@@ -107,7 +110,7 @@ pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): Connect
     {
         let mut polls = state.polls().lock().unwrap();
         polls.retain(|_, s| s.touched.lock().unwrap().elapsed() < POLL_IDLE);
-        if polls.len() >= MAX_POLL_SESSIONS {
+        if polls.len() >= MAX_POLL_SESSIONS || polls.values().filter(|s| s.ip == peer.0.ip()).count() >= MAX_POLL_SESSIONS_PER_IP {
             return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
         }
     }
@@ -119,6 +122,7 @@ pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): Connect
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
     let id: String = id.iter().map(|b| format!("{b:02x}")).collect();
     let session = PollSession {
+        ip: peer.0.ip(),
         reader: tokio::sync::Mutex::new(reader),
         writer: tokio::sync::Mutex::new(writer),
         touched: Mutex::new(Instant::now()),

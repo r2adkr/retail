@@ -3,6 +3,7 @@
 //! the daemon's local API. Devices trust its certificate through the key hash
 //! in invite codes, so no domain or certificate authority is involved.
 
+pub mod acl;
 mod db;
 mod net;
 pub mod reality;
@@ -57,6 +58,8 @@ pub struct NodeInfo {
     pub online: bool,
     pub exit_node: bool,
     pub last_seen: Option<i64>,
+    pub dns_name: String,
+    pub tags: Vec<String>,
 }
 
 pub use db::PreauthRow as KeyInfo;
@@ -209,13 +212,49 @@ impl Server {
             .map(|n| NodeInfo {
                 online: self.state.is_online(n.id),
                 exit_node: self.state.is_exit_node(n.id),
+                dns_name: n.dns_name,
                 id: n.id,
                 hostname: n.hostname,
                 os: n.os,
                 ip: n.ip,
                 last_seen: n.last_seen,
+                tags: n.tags,
             })
             .collect())
+    }
+
+    pub fn acl(&self) -> Option<retail_proto::acl::AclPolicy> {
+        self.state.db.acl()
+    }
+
+    /// `None` lets every device reach every other
+    pub fn set_acl(&self, acl: Option<retail_proto::acl::AclPolicy>) -> Result<()> {
+        self.state.db.set_acl(acl)?;
+        self.state.notify();
+        Ok(())
+    }
+
+    pub fn set_tags(&self, id: i64, tags: &[String]) -> Result<bool> {
+        let found = self.state.db.set_tags(id, tags)?;
+        self.state.notify();
+        Ok(found)
+    }
+
+    pub fn helper_device(&self) -> Option<i64> {
+        self.state.db.helper_device()
+    }
+
+    /// Asks a member device to be this server's helper node (`None` stops it)
+    pub fn set_helper_device(&self, id: Option<i64>) -> Result<()> {
+        self.state.db.set_helper_device(id)?;
+        self.state.refresh_helper_code();
+        self.state.notify();
+        Ok(())
+    }
+
+    /// The chosen helper device's code, once it listens
+    pub fn helper_device_code(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.state.helper_code.subscribe()
     }
 
     /// Closes the device's connection. It needs a new invite to return.

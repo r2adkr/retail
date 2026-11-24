@@ -131,6 +131,11 @@ struct Running {
     helper: Option<retail_proto::invite::HelperCode>,
     helper_link: Option<tokio::task::JoinHandle<()>>,
     helper_linked: Arc<std::sync::atomic::AtomicBool>,
+    /// A member device as helper node: its code once it listens, and the
+    /// task that links to whichever code is current
+    device_helper: Arc<Mutex<Option<retail_proto::invite::HelperCode>>>,
+    device_linked: Arc<std::sync::atomic::AtomicBool>,
+    device_watch: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct Host {
@@ -239,28 +244,32 @@ impl Host {
         let firewall = crate::firewall::allow_inbound();
         let reach = Arc::new(Mutex::new(Reach::default()));
         let mapped = Arc::new(Mutex::new(None));
-        let advertiser = server.stun_advertiser();
-        // The helper answers STUN too, which devices elsewhere can reach
-        let helper_stun: Vec<String> = helper
-            .iter()
-            .flat_map(|h| h.addrs.iter())
-            .filter_map(|a| a.rsplit_once(':').map(|(host, _)| format!("{host}:{DEFAULT_STUN_PORT}")))
-            .collect();
-        advertise(&advertiser, &Reach::default(), server.stun_port(), &helper_stun);
+        let stun = Stun {
+            adv: server.stun_advertiser(),
+            port: server.stun_port(),
+            reach: reach.clone(),
+            helper: helper.iter().flat_map(helper_stun).collect(),
+            device: Arc::default(),
+        };
+        stun.advertise();
         // RETAIL_NO_PORTMAP leaves the router alone (tests, or a VPS with a public address)
         let use_portmap = !req.insecure_http && std::env::var_os("RETAIL_NO_PORTMAP").is_none();
         let portmap = use_portmap.then(|| {
             let mut ports = vec![(Proto::Tcp, server.port()), (Proto::Udp, server.stun_port()), (Proto::Udp, wg_port)];
             ports.extend(server.extra_ports().iter().map(|p| (Proto::Tcp, *p)));
             let public_wg = self.public_wg.clone();
-            let helper_stun = helper_stun.clone();
-            tokio::spawn(keep_ports_open(ports, reach.clone(), mapped.clone(), advertiser, public_wg, helper_stun))
+            tokio::spawn(keep_ports_open(ports, reach.clone(), mapped.clone(), stun.clone(), public_wg))
         });
         let helper_linked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let helper_link = match (&helper, server.injector()) {
             (Some(h), Some(inject)) => Some(tokio::spawn(crate::helper_link::run(h.clone(), inject, helper_linked.clone()))),
             _ => None,
         };
+        let device_helper = Arc::new(Mutex::new(None));
+        let device_linked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let device_watch = server.injector().map(|inject| {
+            tokio::spawn(follow_device_helper(server.helper_device_code(), inject, device_helper.clone(), device_linked.clone(), stun.clone()))
+        });
         *running = Some(Running {
             server,
             reach,
@@ -273,6 +282,9 @@ impl Host {
             helper,
             helper_link,
             helper_linked,
+            device_helper,
+            device_linked,
+            device_watch,
         });
         self.save_config(&HostConfig {
             enabled: true,
@@ -286,6 +298,29 @@ impl Host {
         })?;
         *self.last_error.lock().unwrap() = None;
         Ok(())
+    }
+
+    async fn with_server<T>(&self, f: impl FnOnce(&retail_control::Server) -> Result<T>) -> Result<T> {
+        let running = self.running.lock().await;
+        let r = running.as_ref().context("the server is not running")?;
+        f(&r.server)
+    }
+
+    /// `None` lets every device reach every other
+    pub async fn set_acl(&self, acl: Option<retail_proto::acl::AclPolicy>) -> Result<()> {
+        self.with_server(|s| s.set_acl(acl)).await
+    }
+
+    pub async fn set_tags(&self, id: i64, tags: &[String]) -> Result<()> {
+        if !self.with_server(|s| s.set_tags(id, tags)).await? {
+            anyhow::bail!("there is no device {id}");
+        }
+        Ok(())
+    }
+
+    /// A member device becomes the helper node (`None`: none)
+    pub async fn set_helper_device(&self, id: Option<i64>) -> Result<()> {
+        self.with_server(|s| s.set_helper_device(id)).await
     }
 
     pub fn web_admins(&self) -> Vec<i64> {
@@ -310,6 +345,9 @@ impl Host {
                 t.abort();
             }
             if let Some(t) = r.helper_link {
+                t.abort();
+            }
+            if let Some(t) = r.device_watch {
                 t.abort();
             }
             let mapped = r.mapped.lock().unwrap().take();
@@ -337,12 +375,18 @@ impl Host {
         (public, lan)
     }
 
-    /// Public first, then the helper, then the LAN
+    /// Public first, then the helpers, then global IPv6 (often reachable even
+    /// behind CGNAT), then the rest of the LAN
     fn invite_addrs(r: &Running) -> Vec<String> {
         let (public, lan) = Self::addresses(r);
         let helper = r.helper.iter().flat_map(|h| h.addrs.iter().cloned());
+        let device = r.device_helper.lock().unwrap().clone();
+        let device = device.iter().flat_map(|h| h.addrs.iter().cloned()).collect::<Vec<_>>();
+        let (global, private): (Vec<String>, Vec<String>) = lan.into_iter().partition(|a| {
+            a.parse::<SocketAddr>().is_ok_and(|sa| sa.is_ipv6() && !portmap::is_private(sa.ip()))
+        });
         let mut out: Vec<String> = Vec::new();
-        for a in public.into_iter().chain(helper).chain(lan) {
+        for a in public.into_iter().chain(helper).chain(device).chain(global).chain(private) {
             if !out.contains(&a) {
                 out.push(a);
             }
@@ -359,6 +403,9 @@ impl Host {
         let (public, lan) = Self::addresses(r);
         let reach = r.reach.lock().unwrap().clone();
         let nodes = r.server.nodes().await.unwrap_or_default();
+        // Either helper makes the server reachable whatever the router does
+        let reachable = r.helper_linked.load(std::sync::atomic::Ordering::Relaxed)
+            || r.device_linked.load(std::sync::atomic::Ordering::Relaxed);
         let invites = r.server.keys().await.unwrap_or_default();
         ServerStatus {
             running: true,
@@ -366,15 +413,17 @@ impl Host {
             public,
             lan,
             port_mapping: reach.mapping,
-            // The helper makes the server reachable whatever the router does
-            warning: reach.warning.filter(|_| !r.helper_linked.load(std::sync::atomic::Ordering::Relaxed)),
+            warning: reach.warning.filter(|_| !reachable),
             router: reach.router,
-            notice: reach.notice.filter(|_| !r.helper_linked.load(std::sync::atomic::Ordering::Relaxed)),
+            notice: reach.notice.filter(|_| !reachable),
             domain: r.domain.clone(),
             reality: r.reality.as_ref().map(|x| x.server_name.clone()),
             fronts: r.fronts.clone(),
             helper: r.helper.as_ref().and_then(|h| h.addrs.first().cloned()),
             helper_linked: r.helper_linked.load(std::sync::atomic::Ordering::Relaxed),
+            helper_device: r.server.helper_device(),
+            helper_device_linked: r.device_linked.load(std::sync::atomic::Ordering::Relaxed),
+            acl: r.server.acl(),
             nodes: nodes
                 .into_iter()
                 .map(|n| ServerNode {
@@ -385,6 +434,8 @@ impl Host {
                     online: n.online,
                     exit_node: n.exit_node,
                     last_seen: n.last_seen,
+                    dns_name: n.dns_name,
+                    tags: n.tags,
                 })
                 .collect(),
             invites: invites
@@ -477,14 +528,66 @@ impl Host {
     }
 }
 
-fn advertise(adv: &retail_control::StunAdvertiser, reach: &Reach, stun_port: u16, helper: &[String]) {
-    let mut stun = Vec::new();
-    if let (Some(ip), Some(port)) = (reach.public_ip.filter(|ip| !portmap::is_private(*ip)), reach.stun) {
-        stun.push(SocketAddr::new(ip, port).to_string());
+/// Links to the member device acting as helper node, following its code
+async fn follow_device_helper(
+    mut code: tokio::sync::watch::Receiver<Option<String>>,
+    inject: retail_control::Injector,
+    current: Arc<Mutex<Option<retail_proto::invite::HelperCode>>>,
+    linked: Arc<std::sync::atomic::AtomicBool>,
+    stun: Stun,
+) {
+    let mut link: Option<tokio::task::JoinHandle<()>> = None;
+    loop {
+        let decoded = code.borrow_and_update().as_deref().and_then(|c| retail_proto::invite::HelperCode::decode(c).ok());
+        if let Some(t) = link.take() {
+            t.abort();
+        }
+        linked.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = &decoded {
+            tracing::info!(helper = ?h.addrs.first(), "linking to the helper device");
+            link = Some(tokio::spawn(crate::helper_link::run(h.clone(), inject.clone(), linked.clone())));
+        }
+        *stun.device.lock().unwrap() = decoded.iter().flat_map(helper_stun).collect();
+        stun.advertise();
+        *current.lock().unwrap() = decoded;
+        if code.changed().await.is_err() {
+            break;
+        }
     }
-    stun.extend(helper.iter().cloned());
-    stun.extend(lan_ips().into_iter().map(|ip| SocketAddr::new(ip, stun_port).to_string()));
-    adv.set(stun);
+    if let Some(t) = link {
+        t.abort();
+    }
+}
+
+/// What the STUN servers advertised to devices come from: the router's
+/// mapping, helper nodes (which answer STUN too, reachable from elsewhere),
+/// and the LAN
+#[derive(Clone)]
+struct Stun {
+    adv: retail_control::StunAdvertiser,
+    port: u16,
+    reach: Arc<Mutex<Reach>>,
+    helper: Vec<String>,
+    device: Arc<Mutex<Vec<String>>>,
+}
+
+impl Stun {
+    fn advertise(&self) {
+        let reach = self.reach.lock().unwrap().clone();
+        let mut stun = Vec::new();
+        if let (Some(ip), Some(port)) = (reach.public_ip.filter(|ip| !portmap::is_private(*ip)), reach.stun) {
+            stun.push(SocketAddr::new(ip, port).to_string());
+        }
+        stun.extend(self.helper.iter().cloned());
+        stun.extend(self.device.lock().unwrap().iter().cloned());
+        stun.extend(lan_ips().into_iter().map(|ip| SocketAddr::new(ip, self.port).to_string()));
+        self.adv.set(stun);
+    }
+}
+
+/// `host:3478` for each address of a helper code
+fn helper_stun(code: &retail_proto::invite::HelperCode) -> Vec<String> {
+    code.addrs.iter().filter_map(|a| a.rsplit_once(':').map(|(host, _)| format!("{host}:{DEFAULT_STUN_PORT}"))).collect()
 }
 
 /// An `https://` URL without a trailing slash
@@ -501,9 +604,8 @@ async fn keep_ports_open(
     ports: Vec<(Proto, u16)>,
     reach: Arc<Mutex<Reach>>,
     mapped: Arc<Mutex<Option<portmap::Outcome>>>,
-    adv: retail_control::StunAdvertiser,
+    stun_servers: Stun,
     public_wg: tokio::sync::watch::Sender<Option<SocketAddr>>,
-    helper_stun: Vec<String>,
 ) {
     loop {
         let previous = mapped.lock().unwrap().clone();
@@ -549,7 +651,7 @@ async fn keep_ports_open(
                 }
                 *mapped.lock().unwrap() = Some(o);
                 *reach.lock().unwrap() = now.clone();
-                advertise(&adv, &now, ports[1].1, &helper_stun);
+                stun_servers.advertise();
                 let wg = now.public_ip.filter(|ip| !portmap::is_private(*ip)).zip(now.wg);
                 public_wg.send_replace(wg.map(|(ip, port)| SocketAddr::new(ip, port)));
                 tokio::time::sleep(portmap::LEASE / 2).await;
@@ -575,6 +677,17 @@ async fn keep_ports_open(
         }
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
+}
+
+/// Whether `ip` is one of this machine's addresses (refreshed every few seconds)
+pub fn is_own(ip: std::net::Ipv4Addr) -> bool {
+    static CACHE: Mutex<Option<(std::time::Instant, Vec<IpAddr>)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap();
+    if c.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(5)) {
+        let all = if_addrs::get_if_addrs().map(|v| v.into_iter().map(|i| i.ip()).collect()).unwrap_or_default();
+        *c = Some((std::time::Instant::now(), all));
+    }
+    c.as_ref().is_some_and(|(_, all)| all.contains(&IpAddr::V4(ip)))
 }
 
 pub fn lan_ips() -> Vec<IpAddr> {

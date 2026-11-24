@@ -21,7 +21,7 @@ const FIRST_CHECK: Duration = Duration::from_secs(60);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// Systems with official builds
-const OFFICIAL: [&str; 3] = ["windows-x86_64", "linux-x86_64", "macos-aarch64"];
+const OFFICIAL: [&str; 5] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "linux-arm", "macos-aarch64"];
 
 pub struct Updater {
     status: Mutex<UpdateStatus>,
@@ -142,6 +142,8 @@ impl Updater {
         let dir = self.state_dir.join("update").join(format!("v{version}"));
         // Only the programs that are installed here: a server-only machine may have no tray
         let files: Vec<String> = programs().into_iter().filter(|f| bin.join(f).is_file()).collect();
+        // Every file is fetched and checked now; none already there is trusted
+        let _ = std::fs::remove_dir_all(&dir);
         releases::fetch_version(version, &variant(), &files, &dir).await?;
         for f in &files {
             replace(&dir.join(f), &bin.join(f)).with_context(|| format!("replacing {}", bin.join(f).display()))?;

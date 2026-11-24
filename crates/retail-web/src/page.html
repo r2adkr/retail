@@ -59,6 +59,13 @@ details.menu>summary::-webkit-details-marker{display:none}
 .share .qr svg{width:100%;height:100%;display:block}
 .share .text{flex:1 1 200px;min-width:0;display:grid;gap:8px}
 .files{display:grid;gap:8px;margin:12px 0}
+.rule{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line)}
+.rule:first-child{border-top:0}
+.rule .what{flex:1;min-width:0}
+.addrule{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
+.addrule select,.addrule input{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:9px;padding:6px 8px}
+.addrule input{flex:1 1 160px}
+.tag{font-size:12px;padding:1px 7px;border-radius:99px;background:var(--chip);color:var(--dim)}
 .file{display:flex;align-items:center;justify-content:space-between;gap:10px}
 dialog{border:1px solid var(--line);border-radius:16px;background:var(--card);color:var(--text);padding:22px;width:min(440px,92vw)}
 dialog::backdrop{background:#0006}
@@ -79,6 +86,8 @@ dialog h3{margin:0 0 4px;font-size:17px}
 <div class="head"><h2 data-t>Devices</h2><span id="count" class="muted small"></span></div>
 <div class="card"><div id="nodes"></div></div>
 <p id="meshNote" class="muted small" style="margin:10px 4px 0"></p>
+<div class="head"><h2 data-t>Access</h2></div>
+<div class="card pad"><div id="access"></div></div>
 </div>
 </main>
 
@@ -113,7 +122,6 @@ const TR={
 "Automatic opening is off":["자동 열기 꺼짐","自動開放はオフ","自动打开已关闭","Apertura automática desactivada"],
 "Opened with {method} (TCP {tcp}, UDP {udp})":["{method}로 열림 (TCP {tcp}, UDP {udp})","{method} で開放 (TCP {tcp}, UDP {udp})","已通过 {method} 打开 (TCP {tcp}, UDP {udp})","Abiertos con {method} (TCP {tcp}, UDP {udp})"],
 "Could not open automatically":["자동으로 열지 못함","自動で開放できませんでした","无法自动打开","No se pudieron abrir automáticamente"],
-"The router's external address ({ip}) is private (CGNAT). Devices on other networks can't reach this server without a helper node; devices on the same network can still join.":["공유기의 외부 주소({ip})가 사설 주소입니다(CGNAT). 다른 네트워크의 기기는 보조 노드 없이 이 서버에 접속할 수 없고, 같은 네트워크의 기기는 참여할 수 있습니다.","ルーターの外部アドレス（{ip}）はプライベートアドレスです（CGNAT）。他のネットワークのデバイスは補助ノードなしではこのサーバーに接続できません。同じネットワークのデバイスは参加できます。","路由器的外部地址（{ip}）是私有地址（CGNAT）。其他网络中的设备需要辅助节点才能连接到此服务器；同一网络中的设备仍可加入。","La dirección externa del router ({ip}) es privada (CGNAT). Los dispositivos de otras redes no pueden llegar a este servidor sin un nodo auxiliar; los de la misma red sí pueden unirse."],
 "The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.":["공유기가 포트를 자동으로 열지 않았습니다. 다른 네트워크의 기기가 접속하려면 공유기에서 TCP {tcp}와 UDP {udp}를 이 컴퓨터로 포트포워딩하거나 도메인을 지정하세요.","ルーターがポートを自動で開放しませんでした。他のネットワークのデバイスから接続するには、ルーターで TCP {tcp} と UDP {udp} をこのコンピューターに転送するか、ドメインを設定してください。","路由器未自动打开端口。要让其他网络中的设备连接，请在路由器上将 TCP {tcp} 和 UDP {udp} 转发到这台电脑，或设置域名。","El router no abrió los puertos automáticamente. Para que se conecten dispositivos de otras redes, redirige TCP {tcp} y UDP {udp} a este equipo en el router o configura un dominio."],
 "Copy code":["코드 복사","コードをコピー","复制代码","Copiar código"],
 "Running":["실행 중","実行中","运行中","En marcha"],
@@ -191,6 +199,32 @@ const TR={
 "All files are ready.":["모든 파일이 준비됐습니다.","すべてのファイルが揃いました。","所有文件均已就绪。","Todos los archivos están listos."],
 "Uploading {name}…":["{name} 올리는 중…","{name} をアップロード中…","正在上传 {name}…","Subiendo {name}…"],
 "Uploaded {name}":["{name}을(를) 올렸습니다","{name} をアップロードしました","已上传 {name}","{name} subido"],
+"Access":["접근 제어","アクセス","访问控制","Acceso"],
+"Every device can reach every other device.":["모든 기기가 서로 접속할 수 있습니다.","すべてのデバイスが互いに接続できます。","所有设备都可以互相访问。","Todos los dispositivos pueden conectarse entre sí."],
+"Limit access":["접근 제한하기","アクセスを制限","限制访问","Limitar el acceso"],
+"Devices reach only what these rules allow. Replies always come back.":["기기는 아래 규칙이 허용하는 곳에만 접속할 수 있습니다. 응답은 항상 돌아옵니다.","デバイスは以下のルールで許可された相手にだけ接続できます。応答は常に戻ります。","设备只能访问这些规则允许的目标，回复始终可以返回。","Los dispositivos solo llegan a lo que permiten estas reglas. Las respuestas siempre vuelven."],
+"No rules: devices cannot reach each other.":["규칙이 없어 기기끼리 접속할 수 없습니다.","ルールがないため、デバイス同士は接続できません。","没有规则：设备之间无法互相访问。","Sin reglas: los dispositivos no pueden conectarse entre sí."],
+"Everyone":["모든 기기","すべてのデバイス","所有设备","Todos"],
+"all ports":["모든 포트","すべてのポート","所有端口","todos los puertos"],
+"Ports, e.g. tcp:22, 443, udp:5000-5100 (empty: all)":["포트 예: tcp:22, 443, udp:5000-5100 (비우면 전체)","ポート 例: tcp:22, 443, udp:5000-5100（空欄ですべて）","端口，例如 tcp:22, 443, udp:5000-5100（留空为全部）","Puertos, p. ej. tcp:22, 443, udp:5000-5100 (vacío: todos)"],
+"Allow":["허용","許可","允许","Permitir"],
+"Remove rule":["규칙 삭제","ルールを削除","删除规则","Quitar regla"],
+"Let every device reach every other":["모든 기기끼리 다시 허용","すべてのデバイス間を許可に戻す","恢复为所有设备互通","Volver a permitir todo entre dispositivos"],
+"Access limited by rules":["규칙으로 접근을 제한했습니다","ルールでアクセスを制限しました","已按规则限制访问","Acceso limitado por reglas"],
+"Every device reaches every other again":["다시 모든 기기끼리 접속할 수 있습니다","再びすべてのデバイスが互いに接続できます","所有设备又可以互相访问了","Todos los dispositivos vuelven a conectarse entre sí"],
+"Rule added":["규칙을 추가했습니다","ルールを追加しました","已添加规则","Regla añadida"],
+"Rule removed":["규칙을 삭제했습니다","ルールを削除しました","已删除规则","Regla quitada"],
+"Edit tags…":["태그 편집…","タグを編集…","编辑标签…","Editar etiquetas…"],
+"Tags for {host}, separated by commas (e.g. server, family):":["{host}의 태그를 쉼표로 구분해 입력하세요 (예: server, family):","{host} のタグをカンマ区切りで入力してください（例: server, family）:","输入 {host} 的标签，用逗号分隔（例如 server, family）：","Etiquetas de {host}, separadas por comas (p. ej. server, family):"],
+"Tags saved":["태그를 저장했습니다","タグを保存しました","标签已保存","Etiquetas guardadas"],
+"Use as helper node":["보조 노드로 쓰기","補助ノードとして使う","用作辅助节点","Usar como nodo auxiliar"],
+"Stop using as helper node":["보조 노드 해제","補助ノードの使用をやめる","停止用作辅助节点","Dejar de usar como nodo auxiliar"],
+"Helper node":["보조 노드","補助ノード","辅助节点","Nodo auxiliar"],
+"Linking…":["연결 중…","接続中…","正在连接…","Enlazando…"],
+"{host} will relay connections to this server for devices on other networks. It has to be reachable from the internet: a public address, or a router that opens ports for it. Continue?":["{host}이(가) 다른 네트워크의 기기를 이 서버로 이어 줍니다. 이 기기는 인터넷에서 접속할 수 있어야 합니다(공인 주소이거나, 공유기가 포트를 열어 줄 수 있는 곳). 계속할까요?","{host} が他のネットワークのデバイスからこのサーバーへの接続を中継します。このデバイスはインターネットから到達できる必要があります（グローバルアドレス、またはルーターがポートを開けられる環境）。続けますか？","{host} 将为其他网络中的设备中继到此服务器的连接。它必须能从互联网访问（公网地址，或路由器能为它打开端口）。继续吗？","{host} retransmitirá a este servidor las conexiones de dispositivos de otras redes. Debe ser accesible desde internet: una dirección pública o un router que le abra puertos. ¿Continuar?"],
+"{host} is the helper node now":["이제 {host}이(가) 보조 노드입니다","{host} が補助ノードになりました","{host} 现在是辅助节点","{host} es ahora el nodo auxiliar"],
+"Helper node removed":["보조 노드를 해제했습니다","補助ノードを解除しました","已移除辅助节点","Nodo auxiliar quitado"],
+"The router's external address ({ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Pick a device they can reach and choose \"Use as helper node\" in its ⋯ menu; devices on the same network can join as they are.":["공유기의 외부 주소({ip})가 사설 주소(CGNAT)라 다른 네트워크의 기기는 이 서버에 바로 접속할 수 없습니다. 인터넷에서 접속할 수 있는 기기 하나를 골라 ⋯ 메뉴에서 \"보조 노드로 쓰기\"를 선택하세요. 같은 네트워크의 기기는 그대로 참여할 수 있습니다.","ルーターの外部アドレス（{ip}）はプライベートアドレス（CGNAT）のため、他のネットワークのデバイスはこのサーバーに直接接続できません。インターネットから到達できるデバイスを選び、⋯ メニューで「補助ノードとして使う」を選んでください。同じネットワークのデバイスはそのまま参加できます。","路由器的外部地址（{ip}）是私有地址（CGNAT），其他网络中的设备无法直接访问此服务器。请选一台能从互联网访问的设备，在其 ⋯ 菜单中选择“用作辅助节点”；同一网络中的设备可以直接加入。","La dirección externa del router ({ip}) es privada (CGNAT), así que los dispositivos de otras redes no llegan a este servidor directamente. Elige un dispositivo al que sí lleguen y pulsa «Usar como nodo auxiliar» en su menú ⋯; los de la misma red pueden unirse tal cual."],
 };
 const LANGS=["ko","ja","zh","es"];
 const LANG=(navigator.languages||[navigator.language]).map(l=>String(l).slice(0,2).toLowerCase()).find(l=>l==="en"||LANGS.includes(l))||"en";
@@ -221,7 +255,7 @@ const menu=(label,items,cls="")=>`<details class="menu"><summary class="btn ${cl
 function expires(at){if(at>=9e18)return t("Never expires");const h=Math.round((at-Date.now()/1000)/3600);return h<=0?t("Expired"):h<48?t("Expires in {n} h",{n:h}):t("Expires in {n} d",{n:Math.round(h/24)})}
 function ago(at){if(!at)return t("Never connected");const m=Math.floor((Date.now()/1000-at)/60);return m<1?t("Seen just now"):m<60?t("Seen {n} min ago",{n:m}):m<1440?t("Seen {n} h ago",{n:Math.floor(m/60)}):t("Seen {n} d ago",{n:Math.floor(m/1440)})}
 function routerText(r){if(!r)return t("Automatic opening is off");return r.kind==="opened"?t("Opened with {method} (TCP {tcp}, UDP {udp})",r):t("Could not open automatically")}
-function noticeText(n){if(!n)return"";if(n.kind==="cgnat")return t("The router's external address ({ip}) is private (CGNAT). Devices on other networks can't reach this server without a helper node; devices on the same network can still join.",{ip:n.router_ip});return t("The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",n)}
+function noticeText(n){if(!n)return"";if(n.kind==="cgnat")return t("The router's external address ({ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Pick a device they can reach and choose \"Use as helper node\" in its ⋯ menu; devices on the same network can join as they are.",{ip:n.router_ip});return t("The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",n)}
 async function shareBlock(code){let svg="";try{svg=await api("/api/qr",{text:code})}catch{}return`<div class="qr">${svg}</div><div class="text"><div class="code">${esc(code)}</div><div><button onclick="copy(this.closest('.text').querySelector('.code').textContent)">${esc(t("Copy code"))}</button></div></div>`}
 async function showShare(title,code){closeMenus();$("#shareTitle").textContent=title;$("#shareBody").innerHTML=await shareBlock(code);$("#shareDlg").showModal()}
 // A translated string with one bolded label in it
@@ -237,6 +271,7 @@ function render(){
   const rows=[[t("Address from outside"),s.public||t("Not reachable from other networks")],[t("This network"),(s.lan||[]).slice(0,3).join(", ")||"-"],[t("Router ports"),routerText(s.router)]];
   if(s.reality)rows.push(["REALITY",t("On · looks like {site}",{site:s.reality})]);
   if(s.helper)rows.push([t("Helper node"),`${s.helper} · ${t(s.helper_linked?"Connected":"Not connected")}`]);
+  if(s.helper_device!=null){const h=(s.nodes||[]).find(n=>n.id===s.helper_device);rows.push([t("Helper node"),`${h?h.hostname:"#"+s.helper_device} · ${t(s.helper_device_linked?"Connected":"Linking…")}`])}
   if((s.fronts||[]).length)rows.push(["CDN",s.fronts.join(", ")]);
   const notice=noticeText(s.notice);
   $("#server").innerHTML=`<div class="card pad"><dl class="rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${notice?`<div class="notice">${esc(notice)}</div>`:""}<button class="danger" onclick="stopServer()">${esc(t("Turn off server"))}</button></div>`;
@@ -262,9 +297,12 @@ function render(){
   const online=nodes.filter(n=>n.online).length;
   $("#count").textContent=nodes.length?t("{online} of {total} connected",{online,total:nodes.length}):"";
   $("#nodes").innerHTML=nodes.length?nodes.map((n,k)=>{const self=view.own_ip===n.ip;const allowed=view.admins.includes(n.id);
-    return`<div class="item"><div class="main"><div class="name"><span class="dot${n.online?" on":""}"></span>${esc(n.hostname)}${self?`<span class="pill">${esc(t("This device"))}</span>`:""}${n.exit_node?'<span class="pill">Exit node</span>':""}${allowed&&!self?`<span class="pill on">${esc(t("Can manage"))}</span>`:""}</div>
-    <div class="meta">${esc(n.ip)} · ${esc(n.os)} · ${esc(n.online?t("Connected"):ago(n.last_seen))}</div></div>
-    ${self?"":`<div class="side">${menu("⋯",`<button onclick="setAdmin(${k},${!allowed})">${esc(t(allowed?"Stop allowing management":"Allow managing from this device"))}</button><button class="danger" onclick="removeNode(${k})">${esc(t("Remove device"))}</button>`,"icon")}</div>`}</div>`}).join(""):`<div class="empty">${esc(t("No devices have joined yet."))}</div>`;
+    const helper=s.helper_device===n.id;
+    const tags=(n.tags||[]).map(g=>`<span class="tag">#${esc(g)}</span>`).join("");
+    return`<div class="item"><div class="main"><div class="name"><span class="dot${n.online?" on":""}"></span>${esc(n.hostname)}${self?`<span class="pill">${esc(t("This device"))}</span>`:""}${n.exit_node?'<span class="pill">Exit node</span>':""}${helper?`<span class="pill on">${esc(t("Helper node"))}</span>`:""}${allowed&&!self?`<span class="pill on">${esc(t("Can manage"))}</span>`:""}${tags}</div>
+    <div class="meta">${esc(n.dns_name||n.ip)} · ${esc(n.ip)} · ${esc(n.os)} · ${esc(n.online?t("Connected"):ago(n.last_seen))}</div></div>
+    <div class="side">${menu("⋯",`<button onclick="editTags(${k})">${esc(t("Edit tags…"))}</button>${self?"":`<button onclick="setAdmin(${k},${!allowed})">${esc(t(allowed?"Stop allowing management":"Allow managing from this device"))}</button><button onclick="setHelper(${k},${!helper})">${esc(t(helper?"Stop using as helper node":"Use as helper node"))}</button><button class="danger" onclick="removeNode(${k})">${esc(t("Remove device"))}</button>`}`,"icon")}</div></div>`}).join(""):`<div class="empty">${esc(t("No devices have joined yet."))}</div>`;
+  renderAccess(s);
   $("#meshNote").textContent=view.mesh_url?t("Devices allowed to manage can open this page at {url} while connected to retail.",{url:view.mesh_url}):"";
 }
 async function load(force){if(!force&&(document.querySelector("details.menu[open]")||document.querySelector("dialog[open]")))return;
@@ -275,6 +313,28 @@ async function codeOf(k,how){closeMenus();const i=invites[k];try{const j=await a
 function regen(k){const i=invites[k];if(confirm(t("Make a new code for '{name}'? The old code and installers that contain it stop working; devices that already joined stay.",{name:i.name})))act("/api/invites",{name:i.name},t("New code made"))}
 function revoke(k){const i=invites[k];if(confirm(i.name?t("Expire the invite '{name}'? Devices that already joined stay.",{name:i.name}):t("Expire this invite? Devices that already joined stay.")))act(`/api/invites/${i.id}/revoke`,{},t("Invite expired"))}
 function setAdmin(k,allowed){const n=nodes[k];act(`/api/nodes/${n.id}/admin`,{allowed},allowed?t("{host} can open this page now",{host:n.hostname}):t("Management turned off"))}
+function editTags(k){const n=nodes[k];const v=prompt(t("Tags for {host}, separated by commas (e.g. server, family):",{host:n.hostname}),(n.tags||[]).join(", "));if(v===null)return;act(`/api/nodes/${n.id}/tags`,{tags:v.split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)},t("Tags saved"))}
+function setHelper(k,on){const n=nodes[k];if(on&&!confirm(t("{host} will relay connections to this server for devices on other networks. It has to be reachable from the internet: a public address, or a router that opens ports for it. Continue?",{host:n.hostname})))return;act("/api/helper-device",{id:on?n.id:null},on?t("{host} is the helper node now",{host:n.hostname}):t("Helper node removed"))}
+
+// Access between devices: off (everyone reaches everyone) or a list of rules
+function selectorName(sel){if(sel==="*")return t("Everyone");if(sel.startsWith("id:")){const n=(view.server.nodes||[]).find(x=>"id:"+x.id===sel);return n?n.hostname:sel}return"#"+sel.slice(4)}
+function selectorOptions(){const all=view.server.nodes||[];const tags=[...new Set(all.flatMap(n=>n.tags||[]))].sort();
+  return[`<option value="*">${esc(t("Everyone"))}</option>`,...tags.map(g=>`<option value="tag:${esc(g)}">#${esc(g)}</option>`),...all.map(n=>`<option value="id:${n.id}">${esc(n.hostname)}</option>`)].join("")}
+function renderAccess(s){
+  const acl=s.acl;
+  if(!acl){$("#access").innerHTML=`<p style="margin:0 0 12px">${esc(t("Every device can reach every other device."))}</p><button onclick="limitAccess()">${esc(t("Limit access"))}</button>`;return}
+  const rules=acl.rules.map((r,i)=>`<div class="rule"><div class="what">${r.from.map(x=>esc(selectorName(x))).join(", ")} → ${r.to.map(x=>esc(selectorName(x))).join(", ")} <span class="muted small">· ${esc(r.ports.length?r.ports.join(", "):t("all ports"))}</span></div><button class="icon danger" title="${esc(t("Remove rule"))}" onclick="removeRule(${i})">✕</button></div>`).join("");
+  $("#access").innerHTML=`<p class="muted small" style="margin:0 0 8px">${esc(t("Devices reach only what these rules allow. Replies always come back."))}</p>
+  ${rules||`<p class="muted">${esc(t("No rules: devices cannot reach each other."))}</p>`}
+  <div class="addrule"><select id="rFrom">${selectorOptions()}</select><span>→</span><select id="rTo">${selectorOptions()}</select><input id="rPorts" placeholder="${esc(t("Ports, e.g. tcp:22, 443, udp:5000-5100 (empty: all)"))}"><button class="primary" onclick="addRule()">${esc(t("Allow"))}</button></div>
+  <div class="actions" style="justify-content:flex-start"><button onclick="openAccess()">${esc(t("Let every device reach every other"))}</button></div>`;
+}
+// Starts with a rule allowing everything, so nothing breaks until rules change
+function limitAccess(){act("/api/acl",{acl:{rules:[{from:["*"],to:["*"],ports:[]}]}},t("Access limited by rules"))}
+function openAccess(){act("/api/acl",{acl:null},t("Every device reaches every other again"))}
+function addRule(){const acl=structuredClone(view.server.acl||{rules:[]});const ports=$("#rPorts").value.split(",").map(x=>x.trim()).filter(Boolean);
+  acl.rules.push({from:[$("#rFrom").value],to:[$("#rTo").value],ports});act("/api/acl",{acl},t("Rule added"))}
+function removeRule(i){const acl=structuredClone(view.server.acl);acl.rules.splice(i,1);act("/api/acl",{acl},t("Rule removed"))}
 function removeNode(k){const n=nodes[k];if(confirm(t("Remove {host} from the network? It will need an invite to come back.",{host:n.hostname})))act(`/api/nodes/${n.id}/delete`,{},t("Device removed"))}
 
 // Creating an invite: one dialog for both kinds

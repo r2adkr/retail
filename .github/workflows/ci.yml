@@ -20,3 +20,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # The small-machine builds the release ships: 64-bit ARM natively, 32-bit ARM cross-compiled
+  arm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04
+            target: armv7-unknown-linux-gnueabihf
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Cross toolchain
+        if: matrix.target
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gcc-arm-linux-gnueabihf
+          rustup target add ${{ matrix.target }}
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+          echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --locked -p retail-daemon -p retail-cli --target ${{ matrix.target }}
+          else
+            cargo test --workspace --locked
+          fi

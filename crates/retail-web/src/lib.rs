@@ -52,6 +52,11 @@ pub trait Backend: Send + Sync + 'static {
     fn upload_dir(&self, variant: &str) -> Option<PathBuf>;
     /// Fetches a client's missing files from the official release
     fn fetch_client(&self, variant: &str) -> BoxFut<'_, Result<(), String>>;
+    /// Access between devices; `None` lets every device reach every other
+    fn set_acl(&self, acl: Option<retail_proto::acl::AclPolicy>) -> BoxFut<'_, Result<(), String>>;
+    fn set_tags(&self, id: i64, tags: Vec<String>) -> BoxFut<'_, Result<(), String>>;
+    /// A member device as the helper node (`None`: none)
+    fn set_helper_device(&self, id: Option<i64>) -> BoxFut<'_, Result<(), String>>;
 }
 
 /// Uploaded program files may be this large
@@ -123,6 +128,9 @@ impl WebAdmin {
             .route("/api/invites/{id}/revoke", post(revoke))
             .route("/api/nodes/{id}/delete", post(delete_node))
             .route("/api/nodes/{id}/admin", post(set_admin))
+            .route("/api/nodes/{id}/tags", post(set_tags))
+            .route("/api/acl", post(set_acl))
+            .route("/api/helper-device", post(set_helper_device))
             .route("/api/qr", post(qr))
             .route("/api/clients/{variant}/fetch", post(fetch_client))
             .route(
@@ -316,6 +324,24 @@ struct AdminReq {
 
 async fn set_admin(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<AdminReq>) -> Response {
     done(ctx.web.backend.set_admin(id, req.allowed))
+}
+
+async fn set_tags(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::TagsRequest>) -> Response {
+    done(ctx.web.backend.set_tags(id, req.tags).await)
+}
+
+async fn set_acl(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::AclRequest>) -> Response {
+    done(ctx.web.backend.set_acl(req.acl).await)
+}
+
+async fn set_helper_device(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::HelperDeviceRequest>) -> Response {
+    // The device hosting the server cannot be its own helper
+    if let (Some(id), Some(own)) = (req.id, ctx.web.backend.own_ip().await)
+        && ctx.web.backend.status().await.nodes.iter().any(|n| n.id == id && n.ip == own)
+    {
+        return deny(StatusCode::BAD_REQUEST, "the device hosting the server cannot be its helper node");
+    }
+    done(ctx.web.backend.set_helper_device(req.id).await)
 }
 
 /// Stores one program file for a client variant (a macOS build, say), so

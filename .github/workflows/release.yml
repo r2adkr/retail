@@ -20,6 +20,17 @@ jobs:
           - os: ubuntu-22.04
             variant: linux-x86_64
             ext: ""
+          # Raspberry Pi 3/4/5 and other 64-bit ARM boards, built natively
+          - os: ubuntu-24.04-arm
+            variant: linux-aarch64
+            ext: ""
+          # 32-bit ARM (Raspberry Pi Zero 2 / 2 / 3 on a 32-bit OS, routers):
+          # daemon and CLI only, cross-compiled
+          - os: ubuntu-22.04
+            variant: linux-arm
+            target: armv7-unknown-linux-gnueabihf
+            programs: retaild retail
+            ext: ""
           - os: windows-latest
             variant: windows-x86_64
             ext: ".exe"
@@ -35,20 +46,36 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $version"; exit 1; }
       - run: rustup show active-toolchain || rustup toolchain install
+      - name: Cross toolchain
+        if: matrix.target
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gcc-arm-linux-gnueabihf
+          rustup target add ${{ matrix.target }}
+          echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
+          echo "CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p retail-daemon -p retail-cli -p retail-tray
+      - name: Build
+        shell: bash
+        run: |
+          programs="${{ matrix.programs || 'retail-tray retaild retail' }}"
+          packages=$(for b in $programs; do case $b in retaild) echo -n "-p retail-daemon ";; retail) echo -n "-p retail-cli ";; retail-tray) echo -n "-p retail-tray ";; esac; done)
+          target="${{ matrix.target }}"
+          cargo build --release --locked $packages ${target:+--target $target}
       - name: Collect
         shell: bash
         run: |
           mkdir dist
-          for b in retail-tray retaild retail; do
-            cp "target/release/$b${{ matrix.ext }}" "dist/$b-${{ matrix.variant }}${{ matrix.ext }}"
+          out=target/${{ matrix.target || '' }}/release
+          for b in ${{ matrix.programs || 'retail-tray retaild retail' }}; do
+            cp "$out/$b${{ matrix.ext }}" "dist/$b-${{ matrix.variant }}${{ matrix.ext }}"
           done
       - name: wintun.dll
         if: matrix.variant == 'windows-x86_64'
         shell: bash
         run: |
           curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          # The hash wintun.net publishes for 0.14.1: a changed download fails the release
+          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  wintun.zip" | sha256sum -c -
           unzip -q wintun.zip
           cp wintun/bin/amd64/wintun.dll dist/wintun-windows-x86_64.dll
       - uses: actions/upload-artifact@v4

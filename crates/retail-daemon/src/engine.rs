@@ -152,6 +152,7 @@ fn data_receiver_index(p: &[u8]) -> Option<u32> {
 
 struct PeerInfo {
     hostname: String,
+    dns_name: String,
     ip: Ipv4Addr,
     online: bool,
     /// The peer offers to route internet traffic
@@ -231,6 +232,8 @@ pub struct Peer {
     /// This peer is our selected exit node: packets from it may carry any
     /// internet (non-mesh) source address.
     is_exit: AtomicBool,
+    /// What we take from it (access rules)
+    filter: crate::filter::Filter,
 }
 
 impl Peer {
@@ -577,6 +580,18 @@ pub struct Engine {
     control_addr: Mutex<Option<SocketAddr>>,
     /// How the control connection reaches the server, while connected
     control_via: Mutex<Option<String>>,
+    /// Checks handshake initiations' mac1 before the expensive part
+    mac1: boringtun::noise::rate_limiter::RateLimiter,
+    /// MagicDNS names of this device and its peers
+    names: RwLock<crate::magicdns::Names>,
+    self_dns_name: Mutex<String>,
+    /// Queries to the MagicDNS address, for `dns_loop`
+    dns_queries: mpsc::Sender<Vec<u8>>,
+    dns_queries_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+    /// The server asks this device to be its helper node
+    helper_role: watch::Sender<bool>,
+    /// Our helper code while we are one, for the control connection to send
+    helper_code: watch::Sender<Option<String>>,
 }
 
 impl Engine {
@@ -624,6 +639,7 @@ impl Engine {
 
         let public = PublicKey::from(&cfg.private_key);
         let (relay_out, relay_out_rx) = mpsc::channel(RELAY_OUT_QUEUE);
+        let (dns_queries, dns_queries_rx) = mpsc::channel(64);
         #[cfg(target_os = "linux")]
         let vnet_hdr = tun.tcp_gso();
         #[cfg(not(target_os = "linux"))]
@@ -656,6 +672,13 @@ impl Engine {
             stun_now: tokio::sync::Notify::new(),
             control_addr: Mutex::default(),
             control_via: Mutex::default(),
+            names: RwLock::default(),
+            mac1: boringtun::noise::rate_limiter::RateLimiter::new(&public, 0),
+            self_dns_name: Mutex::default(),
+            dns_queries,
+            dns_queries_rx: Mutex::new(Some(dns_queries_rx)),
+            helper_role: watch::channel(false).0,
+            helper_code: watch::channel(None).0,
         })
     }
 
@@ -729,6 +752,13 @@ impl Engine {
             self.stun_now.notify_one();
         }
 
+        let names = crate::magicdns::Names::new(
+            std::iter::once((nm.self_node.dns_name.as_str(), self.self_ip)).chain(nm.peers.iter().map(|n| (n.dns_name.as_str(), n.ip))),
+        );
+        *self.names.write().unwrap() = names;
+        *self.self_dns_name.lock().unwrap() = nm.self_node.dns_name.clone();
+        self.helper_role.send_if_modified(|h| std::mem::replace(h, nm.helper) != nm.helper);
+
         let mut kick = Vec::new();
         let table = {
             let old = self.peers.read().unwrap();
@@ -748,11 +778,13 @@ impl Engine {
                         let mut info = p.info.lock().unwrap();
                         let changed = info.candidates != candidates || (node.online && !info.online);
                         info.hostname = node.hostname.clone();
+                        info.dns_name = node.dns_name.clone();
                         info.ip = node.ip;
                         info.online = node.online;
                         info.exit_node = node.exit_node;
                         info.candidates = candidates;
                         drop(info);
+                        p.filter.set(&node.accept);
                         if changed {
                             kick.push(p.clone());
                         }
@@ -804,13 +836,17 @@ impl Engine {
             index,
             None,
         );
+        let filter = crate::filter::Filter::default();
+        filter.set(&node.accept);
         Peer {
             key: node.node_key,
             index,
             tunn: Mutex::new(tunn),
             is_exit: AtomicBool::new(false),
+            filter,
             info: Mutex::new(PeerInfo {
                 hostname: node.hostname.clone(),
+                dns_name: node.dns_name.clone(),
                 ip: node.ip,
                 online: node.online,
                 exit_node: node.exit_node,
@@ -996,6 +1032,10 @@ impl Engine {
         let peers = self.peers.read().unwrap();
         match Tunn::parse_incoming_packet(pkt).ok()? {
             Packet::HandshakeInit(h) => {
+                // Only senders who know our public key get a Diffie-Hellman out of us
+                if !self.mac1.verify_mac1(pkt) {
+                    return None;
+                }
                 let half = parse_handshake_anon(&self.private, &self.public, &h).ok()?;
                 peers.by_key.get(&Key(half.peer_static_public)).cloned()
             }
@@ -1144,8 +1184,18 @@ impl Engine {
                 }
             };
             let Some(peer) = peer else {
+                if dst == retail_proto::MAGIC_DNS_IP {
+                    for j in range {
+                        let _ = self.dns_queries.try_send(bufs[j][..sizes[j]].to_vec());
+                    }
+                }
                 continue;
             };
+            if peer.filter.restricted() {
+                for j in range.clone() {
+                    peer.filter.outbound(&bufs[j][..sizes[j]]);
+                }
+            }
             let session = {
                 let mut tunn = peer.tunn.lock().unwrap();
                 tunn.current_send_session().map(|s| {
@@ -1450,6 +1500,10 @@ impl Engine {
             for (i, r) in results.iter().enumerate() {
                 match *r {
                     crate::crypto::Decrypted::Packet(len) => {
+                        authenticated = true;
+                        if !peer.filter.inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], *self.advertise_exit.borrow()) {
+                            continue;
+                        }
                         b.bufs.swap(first + i, b.len);
                         b.len += 1;
                         bytes += len;
@@ -1514,6 +1568,9 @@ impl Engine {
                     return false;
                 }
                 self.note_rx(&peer, src, true);
+                if !peer.filter.inbound(&out[start..start + len], *self.advertise_exit.borrow()) {
+                    return false;
+                }
                 if start != TUN_OFFSET {
                     out.copy_within(start..start + len, TUN_OFFSET);
                 }
@@ -1563,6 +1620,38 @@ impl Engine {
         }
     }
 
+    /// Answers MagicDNS queries (see `magicdns`)
+    pub async fn dns_loop(self: Arc<Self>) -> Result<()> {
+        let Some(mut queries) = self.dns_queries_rx.lock().unwrap().take() else { return Ok(()) };
+        while let Some(q) = queries.recv().await {
+            let Some(reply) = crate::magicdns::answer(&q, &self.names.read().unwrap()) else { continue };
+            if self.vnet_hdr {
+                let mut buf = vec![0u8; TUN_OFFSET];
+                buf.extend_from_slice(&reply);
+                self.tun_send(&buf).await;
+            } else {
+                self.tun_send(&reply).await;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn subscribe_helper_role(&self) -> watch::Receiver<bool> {
+        self.helper_role.subscribe()
+    }
+
+    pub fn set_helper_code(&self, code: Option<String>) {
+        self.helper_code.send_if_modified(|c| std::mem::replace(c, code.clone()) != code);
+    }
+
+    pub fn subscribe_helper_code(&self) -> watch::Receiver<Option<String>> {
+        self.helper_code.subscribe()
+    }
+
+    pub fn self_dns_name(&self) -> String {
+        self.self_dns_name.lock().unwrap().clone()
+    }
+
     async fn tun_send(&self, buf: &[u8]) {
         Stats::add(&self.stats.tun_writes, 1);
         if let Err(e) = self.tun.send(buf).await {
@@ -1590,6 +1679,9 @@ impl Engine {
             }
             if last_stats.elapsed() >= Duration::from_secs(10) {
                 last_stats = Instant::now();
+                for p in self.peers.read().unwrap().by_key.values() {
+                    p.filter.expire();
+                }
                 if let Some(line) = self.stats.take_line() {
                     tracing::debug!("batching: {line}");
                     tracing::debug!("stages: {}", self.stats.take_stages(Duration::from_secs(10)));
@@ -1773,6 +1865,8 @@ impl Engine {
                     (None, false) => None,
                 };
                 PeerStatus {
+                    dns_name: info.dns_name.clone(),
+                    restricted: p.filter.restricted(),
                     hostname: info.hostname.clone(),
                     ip: info.ip,
                     node_key: p.key,

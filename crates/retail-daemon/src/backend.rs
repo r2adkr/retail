@@ -34,6 +34,8 @@ struct Session {
     /// Exit-node routing (we use an exit) and forwarding (we are one), undone on drop
     exit_routes: Option<ClientRoutes>,
     exit_nat: Option<ExitNat>,
+    /// The system sends MagicDNS names to us while this lives
+    _dns: Option<crate::magicdns::SystemDns>,
 }
 
 pub struct Backend {
@@ -200,6 +202,8 @@ impl Backend {
                     node_key: Key(PublicKey::from(&secret).to_bytes()),
                     hostname: hostname.clone(),
                     os: std::env::consts::OS.to_string(),
+                    // Proves this device is the one registered with the key
+                    token: p.token.clone().filter(|_| p.server.as_deref() == Some(server.as_str())),
                 },
             )
             .await;
@@ -463,6 +467,8 @@ impl Backend {
             threads.push(self.spawn_thread(name, task, stop.subscribe())?);
         }
         self.spawn(&mut tasks, "timers", engine.clone().timer_loop());
+        self.spawn(&mut tasks, "magicdns", engine.clone().dns_loop());
+        self.spawn(&mut tasks, "helper-role", crate::helper_role::run(engine.clone(), self.opts.state_dir.join("helper-device")));
         self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun));
         self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token));
         // While hosting, the router's mapping is this device's public endpoint
@@ -477,7 +483,10 @@ impl Backend {
                 }
             }
         });
-        let mut session = Session { engine, tasks, threads, stop, exit_routes: None, exit_nat: None };
+        // Registering the domain runs system tools, which can take a moment
+        let tun = engine.tun_device().0;
+        let dns = tokio::task::spawn_blocking(move || crate::magicdns::SystemDns::configure(&tun)).await.ok().flatten();
+        let mut session = Session { engine, tasks, threads, stop, exit_routes: None, exit_nat: None, _dns: dns };
         if let Err(e) = apply_exit_prefs(&mut session, &p.prefs) {
             // The mesh still works, so only report the exit-node problem
             tracing::warn!("{e:#}");
@@ -559,6 +568,7 @@ impl Backend {
                 ip,
                 node_key,
                 endpoints: engine.map(|e| e.current_endpoints()).unwrap_or_default(),
+                dns_name: engine.map(|e| e.self_dns_name()).unwrap_or_default(),
             }),
             _ => None,
         };
@@ -569,7 +579,11 @@ impl Backend {
             self_node,
             peers: engine.map(|e| e.peer_status()).unwrap_or_default(),
             last_error: self.last_error.lock().unwrap().clone(),
-            prefs: p.prefs.clone(),
+            prefs: Prefs {
+                // Without the password: status needs no token
+                proxy: p.prefs.proxy.as_deref().map(|u| crate::proxy::Proxy::parse(u).map_or_else(|| u.to_string(), |x| x.label())),
+                ..p.prefs.clone()
+            },
             memory_peak: crate::memory::peak(),
             control_via: engine.and_then(|e| e.control_via()),
             servers: saved_servers(&p),

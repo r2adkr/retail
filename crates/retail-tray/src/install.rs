@@ -179,7 +179,8 @@ fn privileged(me: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
     let dir = bin_dir(o);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     if o.service {
-        stop_daemon();
+        // A daemon installed before is stopped by its own program
+        let _ = daemon_service(&dir.join(exe("retaild")), "stop");
     }
     let mut src = File::open(me).map_err(|e| format!("reading the installer: {e}"))?;
     copy_range(&mut src, 0, m.base_len, &dir.join(exe("retail-tray")))?;
@@ -191,7 +192,7 @@ fn privileged(me: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
     }
     let daemon = dir.join(exe("retaild"));
     if o.service {
-        register_daemon(&daemon)?;
+        daemon_service(&daemon, "register")?;
     } else {
         let state = o.prefix.as_ref().map(|p| p.join("state"));
         let mut cmd = std::process::Command::new(&daemon);
@@ -254,11 +255,10 @@ fn uninstall(o: &Opts) -> Result<(), String> {
     if !is_admin() {
         return Err("run the uninstaller as administrator/root".into());
     }
-    if o.service {
-        stop_daemon();
-        unregister_daemon();
-    }
     let dir = bin_dir(o);
+    if o.service {
+        let _ = daemon_service(&dir.join(exe("retaild")), "remove");
+    }
     for name in ["retaild", "retail", "retail-tray"] {
         let _ = std::fs::remove_file(dir.join(exe(name)));
     }
@@ -279,114 +279,18 @@ fn run_quiet(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-#[cfg(windows)]
-const TASK: &str = "retail\\retaild";
-
-/// Task Scheduler defaults would stop the daemon after 72 hours and on
-/// battery, and never restart it, so the task is imported from XML.
-#[cfg(windows)]
-fn register_daemon(daemon: &Path) -> Result<(), String> {
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>retail node daemon</Description></RegistrationInfo>
-  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
-  <Principals><Principal id="System"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
-  </Settings>
-  <Actions Context="System"><Exec><Command>{}</Command></Exec></Actions>
-</Task>"#,
-        daemon.display()
-    );
-    let path = std::env::temp_dir().join("retaild-task.xml");
-    let mut bytes = vec![0xFF, 0xFE];
-    for u in xml.encode_utf16() {
-        bytes.extend_from_slice(&u.to_le_bytes());
+/// Boot registration of the daemon (systemd, launchd, Task Scheduler), done
+/// by retaild itself: `retaild service register|stop|remove`
+fn daemon_service(daemon: &Path, action: &str) -> Result<(), String> {
+    if !daemon.is_file() {
+        return Err(format!("{} is missing", daemon.display()));
     }
-    std::fs::write(&path, bytes).map_err(|e| format!("writing the task: {e}"))?;
-    let path_s = path.display().to_string();
-    let created = run_quiet("schtasks", &["/Create", "/TN", TASK, "/XML", &path_s, "/F"]);
-    let _ = std::fs::remove_file(&path);
-    created?;
-    run_quiet("schtasks", &["/Run", "/TN", TASK])
-}
-
-#[cfg(windows)]
-fn stop_daemon() {
-    let _ = run_quiet("schtasks", &["/End", "/TN", TASK]);
-    let _ = run_quiet("taskkill", &["/F", "/IM", "retaild.exe"]);
-    std::thread::sleep(Duration::from_millis(500));
-}
-
-#[cfg(windows)]
-fn unregister_daemon() {
-    let _ = run_quiet("schtasks", &["/Delete", "/TN", TASK, "/F"]);
-}
-
-#[cfg(target_os = "linux")]
-fn register_daemon(daemon: &Path) -> Result<(), String> {
-    if run_quiet("systemctl", &["--version"]).is_err() {
-        return Err(format!("systemd was not found; start {} yourself (as root) and run this installer again", daemon.display()));
+    let out = std::process::Command::new(daemon).args(["service", action]).output().map_err(|e| format!("{}: {e}", daemon.display()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("Error: ").to_string())
     }
-    let dir = daemon.parent().map(|d| d.display().to_string()).unwrap_or_else(|| "/usr/local/bin".into());
-    let unit = include_str!("../../../packaging/systemd/retaild.service").replace("/usr/local/bin", &dir);
-    std::fs::write("/etc/systemd/system/retaild.service", unit).map_err(|e| format!("writing the systemd unit: {e}"))?;
-    run_quiet("systemctl", &["daemon-reload"])?;
-    run_quiet("systemctl", &["enable", "--now", "retaild"])?;
-    run_quiet("systemctl", &["restart", "retaild"])
-}
-
-#[cfg(target_os = "linux")]
-fn stop_daemon() {
-    let _ = run_quiet("systemctl", &["stop", "retaild"]);
-}
-
-#[cfg(target_os = "linux")]
-fn unregister_daemon() {
-    let _ = run_quiet("systemctl", &["disable", "retaild"]);
-    let _ = std::fs::remove_file("/etc/systemd/system/retaild.service");
-    let _ = run_quiet("systemctl", &["daemon-reload"]);
-}
-
-#[cfg(target_os = "macos")]
-const PLIST: &str = "/Library/LaunchDaemons/dev.retail.retaild.plist";
-
-#[cfg(target_os = "macos")]
-fn register_daemon(daemon: &Path) -> Result<(), String> {
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>dev.retail.retaild</string>
-<key>ProgramArguments</key><array><string>{}</string></array>
-<key>RunAtLoad</key><true/>
-<key>KeepAlive</key><true/>
-</dict></plist>
-"#,
-        daemon.display()
-    );
-    std::fs::write(PLIST, plist).map_err(|e| format!("writing the launchd job: {e}"))?;
-    let _ = run_quiet("launchctl", &["bootout", "system", PLIST]);
-    run_quiet("launchctl", &["bootstrap", "system", PLIST])
-}
-
-#[cfg(target_os = "macos")]
-fn stop_daemon() {
-    let _ = run_quiet("launchctl", &["bootout", "system", PLIST]);
-}
-
-#[cfg(target_os = "macos")]
-fn unregister_daemon() {
-    let _ = std::fs::remove_file(PLIST);
 }
 
 /// Done from the user's own process: a raised process may run as another

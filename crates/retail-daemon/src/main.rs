@@ -3,21 +3,25 @@ mod control;
 mod crypto;
 mod engine;
 mod exit;
+mod filter;
 mod firewall;
 mod gro;
 mod happy;
 mod helper_host;
 mod helper_link;
+mod helper_role;
 mod host;
 mod http;
 mod http1;
 mod local_api;
 mod local_token;
+mod magicdns;
 mod memory;
 mod portmap;
 mod proxy;
 mod reality;
 mod releases;
+mod service;
 mod sspi;
 mod state;
 mod transport;
@@ -35,6 +39,8 @@ use retail_proto::{DEFAULT_WG_PORT, LOCAL_API_ADDR};
 #[derive(Parser)]
 #[command(name = "retaild", version, about = "retail node daemon (run as Administrator/root)")]
 struct Args {
+    #[command(subcommand)]
+    cmd: Option<service::Cmd>,
     /// Directory holding state.json (private key and registration)
     #[arg(long, env = "RETAIL_STATE_DIR")]
     state_dir: Option<PathBuf>,
@@ -102,6 +108,9 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args = Args::parse();
+    if let Some(cmd) = args.cmd {
+        return service::run(cmd, args.state_dir.as_deref(), args.api);
+    }
     if !args.api.ip().is_loopback() {
         tracing::warn!("local API is listening on a non-loopback address; anyone who can reach it controls this node");
     }
@@ -112,7 +121,13 @@ async fn main() -> Result<()> {
         state_dir: state_dir.clone(),
         listen_port: args.port,
         tun_name: args.tun_name.or_else(default_tun_name),
-        memory_limit_mb: args.memory_limit.filter(|&mb| mb > 0),
+        memory_limit_mb: args.memory_limit.filter(|&mb| mb > 0).or_else(|| {
+            let small = memory::default_limit_mb();
+            if let Some(mb) = small {
+                tracing::info!("small machine: data plane sized for {mb} MiB (`retail set --memory-limit` changes it)");
+            }
+            small
+        }),
     })?);
     backend.spawn_supervisor();
     if let Some(web) = web::start(backend.clone(), state_dir.clone(), args.web_port).await {

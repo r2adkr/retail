@@ -39,6 +39,12 @@ struct Data {
     nodes: Vec<NodeRec>,
     #[serde(default)]
     keys: Vec<KeyRec>,
+    /// `None`: every device reaches every other
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acl: Option<retail_proto::acl::AclPolicy>,
+    /// The member device that is this server's helper node
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    helper_device: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,6 +60,12 @@ struct NodeRec {
     endpoints: Vec<SocketAddr>,
     #[serde(default)]
     last_seen: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    /// MagicDNS label, unique, kept once given so a later rename cannot take
+    /// another device's name
+    #[serde(default)]
+    label: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -84,6 +96,9 @@ pub struct NodeRow {
     pub ip: Ipv4Addr,
     pub endpoints: Vec<SocketAddr>,
     pub last_seen: Option<i64>,
+    pub tags: Vec<String>,
+    /// `<label>.retail.internal`
+    pub dns_name: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -103,6 +118,8 @@ pub const NEVER: i64 = i64::MAX;
 #[derive(Debug)]
 pub enum RegisterError {
     InvalidAuthKey,
+    /// The key belongs to a node and the request lacks its token
+    KeyInUse,
     AddressSpaceExhausted,
     Internal(anyhow::Error),
 }
@@ -168,6 +185,14 @@ impl Db {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         let mut data: Data = data;
+        // Labels for nodes from before they were stored, oldest first
+        data.nodes.sort_by_key(|n| n.id);
+        for i in 0..data.nodes.len() {
+            if data.nodes[i].label.is_empty() {
+                let base = data.nodes[i].hostname.clone();
+                data.nodes[i].label = unique_label(&data.nodes, &base, data.nodes[i].id);
+            }
+        }
         data.next_id = data.next_id.max(data.nodes.iter().map(|n| n.id).chain(data.keys.iter().map(|k| k.id)).max().unwrap_or(0));
         Ok(Db { inner: Arc::new(Mutex::new(Store { path: path.to_path_buf(), data })) })
     }
@@ -229,11 +254,21 @@ impl Db {
         let now = now_unix();
         let mut s = self.inner.lock().unwrap();
         let key_hash = hash_secret(req.auth_key.trim());
+        if !s.data.keys.iter().any(|k| k.key_hash == key_hash && k.expires_at > now && (k.reusable || !k.used)) {
+            return Err(RegisterError::InvalidAuthKey);
+        }
+        // A key everyone can read in their netmap is no proof: re-registering
+        // a node needs its current token too, checked before the invite counts
+        if let Some(n) = s.data.nodes.iter().find(|n| n.node_key == req.node_key)
+            && req.token.as_deref().map(hash_secret).as_deref() != Some(n.token_hash.as_str())
+        {
+            return Err(RegisterError::KeyInUse);
+        }
         let key = s
             .data
             .keys
             .iter_mut()
-            .find(|k| k.key_hash == key_hash && k.expires_at > now && (k.reusable || !k.used))
+            .find(|k| k.key_hash == key_hash)
             .ok_or(RegisterError::InvalidAuthKey)?;
         key.used = true;
         key.uses += 1;
@@ -241,26 +276,36 @@ impl Db {
         let token = random_secret();
         let token_hash = hash_secret(&token);
         let hostname = sanitize_hostname(&req.hostname);
-        let (node_id, ip) = match s.data.nodes.iter_mut().find(|n| n.node_key == req.node_key) {
-            Some(n) => {
+        let os = sanitize_os(&req.os);
+        let existing = s.data.nodes.iter().position(|n| n.node_key == req.node_key);
+        let (node_id, ip) = match existing {
+            Some(i) => {
+                let id = s.data.nodes[i].id;
+                // A new name gets a free label; it never takes one in use
+                let label = if s.data.nodes[i].hostname == hostname { s.data.nodes[i].label.clone() } else { unique_label(&s.data.nodes, &hostname, id) };
+                let n = &mut s.data.nodes[i];
                 n.token_hash = token_hash;
                 n.hostname = hostname;
-                n.os = req.os.clone();
+                n.os = os;
+                n.label = label;
                 (n.id, n.ip)
             }
             None => {
                 let ip = allocate_ip(&s.data.nodes)?;
                 let id = s.next_id();
+                let label = unique_label(&s.data.nodes, &hostname, id);
                 s.data.nodes.push(NodeRec {
                     id,
                     node_key: req.node_key,
                     token_hash,
                     hostname,
-                    os: req.os.clone(),
+                    label,
+                    os,
                     ip,
                     created_at: now,
                     endpoints: Vec::new(),
                     last_seen: None,
+                    tags: Vec::new(),
                 });
                 (id, ip)
             }
@@ -320,6 +365,8 @@ impl Db {
                 ip: n.ip,
                 endpoints: n.endpoints.clone(),
                 last_seen: n.last_seen,
+                tags: n.tags.clone(),
+                dns_name: format!("{}.{}", n.label, retail_proto::MAGIC_DNS_DOMAIN),
             })
             .collect();
         rows.sort_by_key(|r| r.id);
@@ -351,11 +398,57 @@ impl Db {
         }
     }
 
+    pub fn acl(&self) -> Option<retail_proto::acl::AclPolicy> {
+        self.inner.lock().unwrap().data.acl.clone()
+    }
+
+    pub fn set_acl(&self, acl: Option<retail_proto::acl::AclPolicy>) -> Result<()> {
+        if let Some(a) = &acl {
+            a.check().map_err(anyhow::Error::msg)?;
+        }
+        let mut s = self.inner.lock().unwrap();
+        s.data.acl = acl;
+        s.save()
+    }
+
+    /// `false` if there is no such device
+    pub fn set_tags(&self, id: i64, tags: &[String]) -> Result<bool> {
+        let mut tags: Vec<String> = tags.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
+        for t in &tags {
+            retail_proto::acl::check_tag(t).map_err(anyhow::Error::msg)?;
+        }
+        tags.sort();
+        tags.dedup();
+        let mut s = self.inner.lock().unwrap();
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        n.tags = tags;
+        s.save()?;
+        Ok(true)
+    }
+
+    pub fn helper_device(&self) -> Option<i64> {
+        self.inner.lock().unwrap().data.helper_device
+    }
+
+    pub fn set_helper_device(&self, id: Option<i64>) -> Result<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(id) = id
+            && !s.data.nodes.iter().any(|n| n.id == id)
+        {
+            anyhow::bail!("there is no device {id}");
+        }
+        s.data.helper_device = id;
+        s.save()
+    }
+
     pub async fn delete_node(&self, id: i64) -> Result<bool> {
         let mut s = self.inner.lock().unwrap();
         let before = s.data.nodes.len();
         s.data.nodes.retain(|n| n.id != id);
         let deleted = s.data.nodes.len() != before;
+        if s.data.helper_device == Some(id) {
+            s.data.helper_device = None;
+        }
         if deleted {
             s.save()?;
         }
@@ -366,6 +459,9 @@ impl Db {
 fn allocate_ip(nodes: &[NodeRec]) -> Result<Ipv4Addr, RegisterError> {
     let (first, last) = ip_range();
     let mut used: Vec<u32> = nodes.iter().map(|n| u32::from(n.ip)).collect();
+    used.sort_unstable();
+    // The MagicDNS address is never a device's
+    used.push(u32::from(retail_proto::MAGIC_DNS_IP));
     used.sort_unstable();
     let mut candidate = first;
     for ip in used {
@@ -380,6 +476,25 @@ fn allocate_ip(nodes: &[NodeRec]) -> Result<Ipv4Addr, RegisterError> {
         return Err(RegisterError::AddressSpaceExhausted);
     }
     Ok(Ipv4Addr::from(candidate))
+}
+
+/// `base`, or `base-2`, `base-3`, … if another node has it
+fn unique_label(nodes: &[NodeRec], base: &str, id: i64) -> String {
+    let base = if base.is_empty() { "node" } else { base };
+    let taken = |l: &str| nodes.iter().any(|n| n.id != id && n.label == l);
+    let mut label = base.to_string();
+    let mut i = 2;
+    while taken(&label) {
+        label = format!("{base}-{i}");
+        i += 1;
+    }
+    label
+}
+
+/// Shown to every member, so short and plain
+fn sanitize_os(os: &str) -> String {
+    let s: String = os.trim().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(16).collect();
+    if s.is_empty() { "unknown".into() } else { s }
 }
 
 fn sanitize_hostname(name: &str) -> String {
@@ -409,7 +524,30 @@ mod tests {
             node_key: Key([key_byte; 32]),
             hostname: "My Laptop".into(),
             os: "linux".into(),
+            token: None,
         }
+    }
+
+    #[tokio::test]
+    async fn names_are_unique_and_kept() {
+        let (db, path) = temp_db().await;
+        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let host = |name: &str, byte: u8| RegisterRequest { hostname: name.into(), ..req(&key, byte) };
+        let a = db.register(&host("nas", 1)).await.unwrap();
+        db.register(&host("nas", 2)).await.unwrap();
+        let c = db.register(&host("laptop", 3)).await.unwrap();
+        let names = |db: &Db| {
+            let db = db.clone();
+            async move { db.all_nodes().await.unwrap().into_iter().map(|n| n.dns_name).collect::<Vec<_>>() }
+        };
+        assert_eq!(names(&db).await, ["nas.retail.internal", "nas-2.retail.internal", "laptop.retail.internal"]);
+        // Renaming to a name in use gets a free one instead of taking it
+        db.register(&RegisterRequest { token: Some(c.token.clone()), ..host("nas", 3) }).await.unwrap();
+        assert_eq!(names(&db).await[2], "nas-3.retail.internal");
+        // a keeps its name when it registers again with the same hostname
+        db.register(&RegisterRequest { token: Some(a.token.clone()), ..host("nas", 1) }).await.unwrap();
+        assert_eq!(names(&Db::open(&path).await.unwrap()).await[0], "nas.retail.internal");
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -422,7 +560,13 @@ mod tests {
         assert_eq!(a.ip, Ipv4Addr::new(100, 64, 0, 1));
         assert_eq!(b.ip, Ipv4Addr::new(100, 64, 0, 2));
 
-        let a2 = db.register(&req(&key, 1)).await.unwrap();
+        // Someone else with an invite and a's public key cannot take a over
+        assert!(matches!(db.register(&req(&key, 1)).await, Err(RegisterError::KeyInUse)));
+        let wrong = RegisterRequest { token: Some("rtl-guess".into()), ..req(&key, 1) };
+        assert!(matches!(db.register(&wrong).await, Err(RegisterError::KeyInUse)));
+        assert_eq!(db.node_id_by_token(&a.token).await.unwrap(), Some(a.node_id));
+        // a itself can, with its token
+        let a2 = db.register(&RegisterRequest { token: Some(a.token.clone()), ..req(&key, 1) }).await.unwrap();
         assert_eq!((a2.node_id, a2.ip), (a.node_id, a.ip));
         assert_ne!(a2.token, a.token);
         assert_eq!(db.node_id_by_token(&a.token).await.unwrap(), None);

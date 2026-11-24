@@ -53,6 +53,20 @@
 #   helper        B hosts the network behind a router that opens nothing; a
 #                 helper node on the internet makes it reachable, and A joins
 #                 through it
+#   magicdns      A looks up B by name at 100.100.100.100: the name answers
+#                 with B's address, an unknown one with NXDOMAIN, and B's
+#                 address back to its name
+#   acl           B is tagged `web` and only TCP 5201 to `tag:web` is allowed:
+#                 A reaches B's port but cannot ping it, B cannot start
+#                 anything towards A, with no rules they no longer see each
+#                 other, and turning access control off restores everything
+#   helper-device B hosts behind a router that opens nothing (as behind
+#                 CGNAT); C, a member on a public address, becomes its helper
+#                 node, and A on another network joins through C
+#   server-cli    the server set up with the CLI only, as on a VPS:
+#                 `retaild install --server` copies the programs, starts the
+#                 daemon and a server that does not join, and prints an
+#                 invite; A and B join with it
 #   switch        a second server in its own namespace: A and B join it with
 #                 an invite, then switch back to the first without one and get
 #                 their old addresses back; a forgotten server leaves the list
@@ -405,6 +419,73 @@ web_checks() {  # ip_b
     return 0
 }
 
+# A DNS query to MagicDNS from host A: the answer's address, or rcode=N
+dns_query() {  # name [type]
+    nsx hA python3 -c '
+import socket, struct, sys
+name, qtype = sys.argv[1], int(sys.argv[2])
+q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+q += b"".join(bytes([len(l)]) + l.encode() for l in name.split(".")) + b"\0" + struct.pack(">HH", qtype, 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(2)
+s.sendto(q, ("100.100.100.100", 53))
+r = s.recv(512)
+if r[3] & 15 or r[7] == 0:
+    print("rcode=%d answers=%d" % (r[3] & 15, r[7]))
+elif qtype == 12:
+    out, i = [], len(r) - 1
+    labels, j = [], r.index(b"\xc0\x0c", 12) + 12
+    while r[j]:
+        labels.append(r[j + 1:j + 1 + r[j]].decode()); j += 1 + r[j]
+    print(".".join(labels))
+else:
+    print(".".join(map(str, r[-4:])))' "$1" "${2:-1}" 2>&1
+}
+
+magicdns_checks() {  # ip_b
+    local ip_b=$1 got ok=1
+    got=$(dns_query b.retail.internal)
+    echo "  b.retail.internal -> $got"
+    [ "$got" = "$ip_b" ] || ok=0
+    got=$(dns_query B.Retail.Internal)
+    [ "$got" = "$ip_b" ] || { echo "  names are not case-insensitive ($got)"; ok=0; }
+    got=$(dns_query nobody.retail.internal)
+    echo "  nobody.retail.internal -> $got"
+    [[ $got == rcode=3* ]] || ok=0
+    local rev
+    rev=$(echo "$ip_b" | awk -F. '{print $4"."$3"."$2"."$1".in-addr.arpa"}')
+    got=$(dns_query "$rev" 12)
+    echo "  $ip_b -> $got"
+    [ "$got" = b.retail.internal ] || ok=0
+    [ "$(cli A status --json | jq -r '.peers[0].dns_name')" = b.retail.internal ] || { echo "  status lacks the name"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
+acl_checks() {  # ip_b
+    local ip_b=$1 ip_a ok=1
+    ip_a=$(cli A ip)
+    srv server tag b web >/dev/null || { echo "  tagging failed"; return 1; }
+    srv server acl allow --from '*' --to tag:web --ports tcp:5201 >/dev/null || { echo "  adding the rule failed"; return 1; }
+    sleep 1
+    nsx hB iperf3 -s -D -B "$ip_b" >/dev/null; sleep 0.3
+    if nsx hA timeout 10 iperf3 -c "$ip_b" -t 1 >/dev/null 2>&1; then echo "  A reaches B on tcp:5201"; else echo "  A cannot reach B on tcp:5201"; ok=0; fi
+    pkill -x iperf3 || true
+    if nsx hA ping -c2 -W1 -q "$ip_b" >/dev/null 2>&1; then echo "  A pinged B, which no rule allows"; ok=0; else echo "  A cannot ping B"; fi
+    if nsx hB ping -c2 -W1 -q "$ip_a" >/dev/null 2>&1; then echo "  B pinged A, which no rule allows"; ok=0; else echo "  B cannot ping A"; fi
+    [ "$(cli A status --json | jq -r '.peers[0].restricted')" = true ] || { echo "  A does not show B as limited"; ok=0; }
+    srv server acl remove 1 >/dev/null
+    local peers=
+    for _ in $(seq 50); do
+        peers=$(cli A status --json | jq '.peers | length')
+        [ "$peers" = 0 ] && break
+        sleep 0.1
+    done
+    [ "$peers" = 0 ] && echo "  with no rules A no longer sees B" || { echo "  A still sees $peers peers"; ok=0; }
+    srv server acl off >/dev/null
+    wait_ping "$ip_b" 15 >/dev/null && echo "  access control off: A pings B again" || { echo "  no ping after turning it off"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
 invite_first_addr() {
     python3 -c 'import sys,json,base64; c=sys.argv[1].split(".",1)[1]; print(json.loads(base64.urlsafe_b64decode(c+"="*(-len(c)%4)))["a"][0])' "$1"
 }
@@ -675,7 +756,7 @@ run_scenario() {
         udp-blocked | symmetric | tcp443-only | udp443-only | recover | idle-relay | control-drop | exit-relay | reality) expect="relay" ;;
         proxy | inspect | cdn) expect="relay" ;;
         ipv6) expect="direct6" ;;
-        nat64 | helper) expect="any" ;;
+        nat64 | helper | helper-device) expect="any" ;;
     esac
     cleanup
     rm -rf "$WORK" && mkdir -p "$WORK"
@@ -719,6 +800,62 @@ run_scenario() {
         invite=$(cli B server invite 2>/dev/null)
         echo "  invite leads with $(invite_first_addr "$invite")"
         cli A up --invite "$invite" --hostname a >/dev/null || { echo "  A could not join through the helper"; return 1; }
+    elif [ "$sc" = server-cli ]; then
+        # Without a service manager here (--no-service); the rest as on a VPS
+        local out
+        out=$(RETAIL_API_TOKEN_FILE="$WORK/server.token" RETAIL_NO_PORTMAP=1 RETAIL_API=$SERVER_API \
+            "$BIN/retaild" --state-dir "$WORK/server" install --server --dir "$WORK/sbin" --no-service 2>&1)
+        echo "$out" | sed 's/^/  | /' | grep -vE "^  \| +retail1\." | head -8
+        invite=$(echo "$out" | grep -oE 'retail1\.[A-Za-z0-9_-]+' | head -1)
+        [ -n "$invite" ] || { echo "  no invite printed"; return 1; }
+        [ -x "$WORK/sbin/retaild" ] && [ -x "$WORK/sbin/retail" ] || { echo "  programs not installed"; return 1; }
+        [ "$(srv server status --json | jq -r .running)" = true ] || { echo "  server not running"; return 1; }
+        [ "$(srv status --json | jq -r .state)" = needs_login ] || { echo "  the server joined its own network"; return 1; }
+        local second
+        second=$(srv server invite 2>/dev/null)
+        for s in A B; do
+            RUST_LOG="${RUST_LOG:-retaild=debug}" start_node "$s"
+            pid[$s]=$NODE_PID
+        done
+        cli A up --invite "$invite" --hostname a >/dev/null || { echo "  A could not join"; return 1; }
+        cli B up --invite "$second" --hostname b >/dev/null || { echo "  B could not join"; return 1; }
+    elif [ "$sc" = helper-device ]; then
+        for s in A B; do
+            RUST_LOG="${RUST_LOG:-retaild=debug,retail_control=info}" start_node "$s"
+            pid[$s]=$NODE_PID
+        done
+        sleep 0.5
+        cli B server start >/dev/null || { echo "  hosting on B failed"; return 1; }
+        # C joined earlier (here: through a port forward that is taken away again)
+        for t in "-t nat -I PREROUTING 1 -i wanB -p tcp --dport 443 -j DNAT --to-destination 192.168.2.10:443" \
+                 "-I FORWARD 1 -i wanB -p tcp -d 192.168.2.10 --dport 443 -j ACCEPT"; do
+            # shellcheck disable=SC2086
+            nsx rB iptables $t
+        done
+        local code_b
+        code_b=$(cli B server invite --reusable 2>/dev/null)
+        code_b=$(python3 -c 'import sys,json,base64; p,c=sys.argv[1].split(".",1); d=json.loads(base64.urlsafe_b64decode(c+"="*(-len(c)%4))); d["a"]=["198.51.101.2:443"]; print(p+"."+base64.urlsafe_b64encode(json.dumps(d,separators=(",",":")).encode()).decode().rstrip("="))' "$code_b")
+        RETAIL_API_TOKEN_FILE="$WORK/C.token" RETAIL_NO_PORTMAP=1 RUST_LOG="${RUST_LOG:-retaild=debug,retail_control=info}" \
+            "$BIN/retaild" --state-dir "$WORK/C" --api 127.0.0.1:41193 --port 41693 --web-port 0 >"$WORK/nodeC.log" 2>&1 &
+        pid[C]=$!
+        cc() { RETAIL_API_TOKEN_FILE="$WORK/C.token" "$BIN/retail" --api 127.0.0.1:41193 "$@"; }
+        for _ in $(seq 50); do cc status >/dev/null 2>&1 && break; sleep 0.1; done
+        cc up --invite "$code_b" --hostname c >/dev/null || { echo "  C could not join"; tail -5 "$WORK/nodeC.log"; return 1; }
+        nsx rB iptables -t nat -D PREROUTING -i wanB -p tcp --dport 443 -j DNAT --to-destination 192.168.2.10:443
+        nsx rB iptables -D FORWARD -i wanB -p tcp -d 192.168.2.10 --dport 443 -j ACCEPT
+        echo "  C joined; B's server is unreachable from outside again"
+        cli B server helper-device c >/dev/null || { echo "  making C the helper failed"; return 1; }
+        local linked=
+        for _ in $(seq 150); do
+            linked=$(cli B server status --json | jq -r '.helper_device_linked')
+            [ "$linked" = true ] && break
+            sleep 0.1
+        done
+        echo "  B linked to its helper device C: $linked"
+        [ "$linked" = true ] || { grep -i helper "$WORK/nodeC.log" | tail -5; return 1; }
+        invite=$(cli B server invite 2>/dev/null)
+        echo "  invite leads with $(invite_first_addr "$invite")"
+        cli A up --invite "$invite" --hostname a >/dev/null || { echo "  A could not join through C"; return 1; }
     elif [[ $sc == host-* ]]; then
         NATPMP=yes; [ "$sc" = host-upnp ] && NATPMP=no
         start_upnp_router B
@@ -769,7 +906,7 @@ run_scenario() {
     [ "$sc" = reality ] && limit=40
     # HTTP polling starts after the faster ways have failed
     [ "$sc" = inspect ] && limit=20
-    [ "$sc" = nat64 ] || [ "$sc" = helper ] && limit=15
+    [ "$sc" = nat64 ] || [[ $sc == helper* ]] && limit=15
     if took=$(wait_ping "$ip_b" "$limit"); then
         path=$(path_of A)
         printf "  connected after %ss, path: %s\n" "$took" "$path"
@@ -819,6 +956,12 @@ run_scenario() {
         fi
         ip netns exec hA env RETAIL_API_TOKEN_FILE=/nonexistent "$BIN/retail" status >/dev/null || { echo "  status needs no token"; ok=0; }
         lifecycle_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = magicdns ] && [ "$ok" = 1 ]; then
+        magicdns_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = acl ] && [ "$ok" = 1 ]; then
+        acl_checks "$ip_b" || ok=0
     fi
     if [ "$sc" = switch ] && [ "$ok" = 1 ]; then
         switch_checks "$ip_b" || ok=0
@@ -948,7 +1091,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper switch install update
+    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device magicdns acl server-cli switch install update
 else
     set -- "$WHICH"
 fi

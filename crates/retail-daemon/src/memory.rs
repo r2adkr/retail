@@ -71,6 +71,28 @@ pub fn current() -> Option<u64> {
 }
 
 /// Releases freed heap memory to the OS (glibc only)
+/// Installed memory, where the OS says (Linux)
+pub fn total() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: u64 = info.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// On a small machine (a router, a Raspberry Pi Zero, a 512 MB VPS) the
+/// smallest data-plane buffers, unless a limit was set: throughput there is
+/// bound by the CPU anyway, and memory is what runs out
+pub fn default_limit_mb() -> Option<u32> {
+    const SMALL: u64 = 1 << 30;
+    (total()? < SMALL).then_some(9)
+}
+
 pub fn trim() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {

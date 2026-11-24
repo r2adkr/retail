@@ -171,6 +171,14 @@ where
     };
     let offer = *advertise.borrow_and_update();
     send(&mut tx, hostinfo(offer)?).await?;
+    let mut helper_code = engine.subscribe_helper_code();
+    let helper_msg = |code| -> Result<Message> {
+        Ok(Message::text(serde_json::to_string(&ClientMessage::HelperCode { code })?))
+    };
+    let code = helper_code.borrow_and_update().clone();
+    if code.is_some() {
+        send(&mut tx, helper_msg(code)?).await?;
+    }
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_inbound = Instant::now();
@@ -206,6 +214,11 @@ where
                 changed?;
                 let offer = *advertise.borrow_and_update();
                 send(&mut tx, hostinfo(offer)?).await?;
+            }
+            changed = helper_code.changed() => {
+                changed?;
+                let code = helper_code.borrow_and_update().clone();
+                send(&mut tx, helper_msg(code)?).await?;
             }
             () = engine.control_reset.notified() => {
                 bail!("reconnecting: routes changed");

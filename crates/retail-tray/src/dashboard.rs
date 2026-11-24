@@ -24,7 +24,7 @@ const MAX_INVITES: usize = 4;
 const FIELD_H: f32 = 36.0;
 const MENU_ITEM_H: f32 = 34.0;
 /// Systems an installer can be made for: (`<os>-<arch>`, label)
-pub const CLIENTS: [(&str, &str); 3] = [("windows-x86_64", "Windows"), ("linux-x86_64", "Linux"), ("macos-aarch64", "macOS")];
+pub const CLIENTS: [(&str, &str); 4] = [("windows-x86_64", "Windows"), ("linux-x86_64", "Linux"), ("linux-aarch64", "Linux ARM64"), ("macos-aarch64", "macOS")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DashAction {
@@ -679,7 +679,7 @@ fn draw_qr(c: &mut Canvas, data: &str, x: f32, y: f32, size: f32) {
 fn notice_text(n: &ServerNotice) -> String {
     match n {
         ServerNotice::Cgnat { router_ip } => trf(
-            "The router's external address ({router_ip}) is private. Your provider or another router shares one public address (CGNAT), so devices on other networks can't reach this server without a helper node. Devices on the same network can still join.",
+            "The router's external address ({router_ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Make a device they can reach the helper node: Manage on the web, then that device's ⋯ menu. Devices on the same network can join as they are.",
             &[("router_ip", router_ip)],
         ),
         ServerNotice::ForwardPorts { tcp, udp } => trf(
