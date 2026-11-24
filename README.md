@@ -1,101 +1,85 @@
 # retail
 
-A **self-hosted mesh VPN**, written in Rust, with WireGuard (boringtun) as the data tunnel.
+[![ci](https://github.com/r2adkr/retail/actions/workflows/ci.yml/badge.svg)](https://github.com/r2adkr/retail/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-- Every device gets a `100.64.x.y` virtual IP and talks to the others **directly**, wherever they are. STUN and UDP hole punching (IPv4 and IPv6) get through NATs.
-- When a direct connection is impossible (blocked UDP, symmetric NAT), traffic **switches to a relay** over the server's HTTPS port 443 on its own, and goes back to direct once a path opens. If the direct path dies mid-transfer (even in one direction only), the relay takes over within about 3 seconds. The way to the server races several methods too: when HTTPS is blocked it uses **REALITY** (looking like a visit to another website), company **proxies** (signing in with the Windows account automatically), **HTTP tunnels** through firewalls that open TLS, **CDNs**, and **NAT64** on IPv6-only networks.
-- **No separate server program.** One button in the tray's server window makes this device the network's server; other devices join with an invite code or QR code. Router ports open automatically (PCP, NAT-PMP, UPnP). Behind carrier-grade NAT, add one VPS as a **helper node**. The **web admin page** opens on the server PC and on devices you allow; from there you download an **installer** that carries an invite, and whoever runs it joins.
-- **Several networks**: the device remembers every server it joined and switches between them from Settings without new invites. An installer from another server asks before switching.
-- **Names (MagicDNS)**: every device answers to `<name>.retail.internal`, so `ssh nas.retail.internal` works anywhere in the network.
-- **Access control**: tag devices and write rules such as "everyone may reach `tag:server` on TCP 443"; without rules every device reaches every other. Replies always come back, and devices with nothing allowed between them do not even see each other.
-- **Behind CGNAT**: a server whose provider shares one public address can use any member device that other networks reach (a public address, or a router that opens ports) as its helper node, chosen in the web admin page. A VPS works too, and a server's global IPv6 address goes into invites.
-- **Exit node**: reach the internet through another device. Turn it on from the ⋯ menu next to a device.
-- **Small machines**: builds for 64-bit and 32-bit ARM (Raspberry Pi, routers), a terminal UI (`retail tui`) that draws only when something changes, and on machines under 1 GB of memory the daemon sizes itself down on its own.
-- **Light**: the daemon idles at about 12 MB of memory and outruns wireguard-go in the same environment (measured twice in one session: single stream +34–37%, 4 streams +28–94%). You can also set a memory limit (`retail set --memory-limit`). The numbers are in the [design document](docs/DESIGN.md).
-- **Updates**: retail checks for new releases and tells you when one is out; turn on automatic updates in Settings and it installs them itself (checked against the release's checksums).
-- The app follows the system's light or dark theme and speaks English, Korean, Japanese, Simplified Chinese and Spanish.
+A self-hosted mesh VPN. Your devices reach each other directly over WireGuard, from any network, through a server you run yourself: on one of your own devices or on a small VPS.
 
-| Tray popup | Server window | Saved servers |
+| Tray | Server window | Saved servers |
 |---|---|---|
-| ![](docs/img/tray-connected-dark.png) | ![](docs/img/server-running-light.png) | ![](docs/img/settings-servers-light.png) |
+| ![Tray popup](docs/img/tray-connected-dark.png) | ![Server window](docs/img/server-running-light.png) | ![Saved servers](docs/img/settings-servers-light.png) |
 
-## Programs
+## Features
 
-| Binary | Role |
+- **Direct connections** through NATs (STUN and hole punching, IPv4 and IPv6), with an automatic relay over HTTPS when no direct path exists.
+- **Gets through restrictive networks**: blocked UDP, TLS-inspecting firewalls, company proxies (with Windows sign-in), CDNs, NAT64, and REALITY camouflage.
+- **No separate server to install**: any device hosts the network from the tray app. Invite others with a code, a QR code, or an installer that joins on its own.
+- **Works behind CGNAT** with a helper node: any member device that other networks can reach, or a VPS.
+- **MagicDNS**: reach devices by name, such as `nas.retail.internal`.
+- **Access control** with device tags and rules.
+- **Exit nodes**, several saved networks per device, and automatic updates.
+- **Small and fast**: about 12 MB of memory, faster than wireguard-go in our [measurements](docs/DESIGN.md), and builds for Raspberry Pi and other ARM machines.
+- Desktop app for Windows, macOS and Linux in English, Korean, Japanese, Chinese and Spanish, plus a CLI and a terminal UI.
+
+## Install
+
+Download the programs for your system from [Releases](https://github.com/r2adkr/retail/releases).
+
+| Program | What it is |
 |---|---|
-| `retaild` | The daemon on each device (needs administrator/root). When it hosts the network, the server runs inside it too |
-| `retail-tray` | Tray (Windows/Linux) and menu bar (macOS) app: status, connection, exit node, server window, settings |
-| `retail` | CLI, and `retail tui`: a full-screen terminal view of devices, the server and saved servers |
+| `retaild` | The daemon on each device (runs as administrator/root); also the server when the device hosts |
+| `retail-tray` | Tray / menu bar app |
+| `retail` | CLI and `retail tui` |
 
-## Getting started
+**Desktop**: the easiest way is an installer from your network's server. On the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page). Running it installs retail and joins the network.
 
-The easiest way: on the device that will be the server, open the server window, create an invite, and from its ⋯ menu save the installer for the other person's system (or do the same in the web admin page). They only have to run it.
-
-On a server without a screen (a VPS, a Raspberry Pi): `sudo ./retaild install --server` installs the daemon and CLI, starts a server at boot and prints an invite. See [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
-
-By hand:
-
-1. On each device run `retaild` and open `retail-tray`.
-   - Windows: put [wintun.dll](https://www.wintun.net/) (amd64) next to `retaild.exe` and run it as administrator.
-   - Linux: use `packaging/systemd/retaild.service`.
-2. On one device: tray → gear → **Manage server** → **Open server**, then **Create invite**.
-3. On the others: tray → gear → **Settings**, paste the invite code and click **Connect**.
-
-Running only the server on a VPS or in Docker, and setting up REALITY, are covered in [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md).
-
-The CLI does the same:
+**Server without a screen** (Linux VPS, Raspberry Pi):
 
 ```sh
-retail server start && retail server invite   # open a network on this device
-retail up --invite retail1....                # join from another device
-retail status
-retail set --exit-node <device>               # use an exit node (none: stop)
-retail server acl allow --from '*' --to tag:server --ports tcp:443   # access rules (retail server acl)
-retail server tag nas server                  # tag a device
-retail server helper-device <device>          # a member as helper node, behind CGNAT
-retail set --advertise-exit-node              # offer this device as an exit node
-retail servers                                # servers joined before; retail switch / retail forget <server>
-retail update                                 # install a newer release (--check only looks)
-retail set --auto-update                      # install new releases automatically
-retail down       # disconnect (registration kept)
-retail logout     # leave the current server
+sudo ./retaild install --server
 ```
 
-Commands that change things need the local API token: on Windows any user signed in to the computer, on Linux root or the `retail` group, on macOS administrators.
+This installs `retaild` and `retail`, starts them at boot, starts the server and prints the first invite. Docker works too; see [Self-hosting](docs/SELF-HOSTING.md).
 
-## Building
+## Quick start
+
+On the device that will be the server, in the tray app: **⚙ → Manage server → Open server**, then **Create invite**. Or:
 
 ```sh
-cargo build --release
+retail server start
+retail server invite
 ```
 
-## Testing
+On the other devices, paste the code in **⚙ → Settings** and click **Connect**. Or:
 
 ```sh
-cargo test --workspace
+retail up --invite retail1.…
+retail status            # devices, paths and names
+retail tui               # the same in a terminal UI
 ```
 
-End-to-end tests run in Linux network namespaces, across two NATs. They need root, `iptables`, `iperf3`, `jq`, `python3` and `openssl`; the router port scenarios also need `miniupnpd`, the proxy scenarios `tinyproxy`, and the NAT64 scenario `tayga` (`scripts/wsl.sh setup` installs them all on Debian/Ubuntu or WSL).
+Then, for example:
 
 ```sh
-sudo scripts/netns-test.sh target/release all      # 30 scenarios: paths, failover, exit node, hosting, web admin,
-                                                   # REALITY, proxies, CDN, NAT64, helper nodes, MagicDNS, access rules,
-                                                   # switching servers, installer, self-update
-sudo scripts/netns-test.sh target/release ipv6     # one scenario (DEBUG=1 keeps it running and shows node state)
-sudo SOAK_SECONDS=240 scripts/netns-test.sh target/release rekey   # long transfer across WireGuard rekeys
-sudo RUNS=3 scripts/bench.sh target/release        # throughput against wireguard-go and kernel WireGuard, if installed
+retail set --exit-node <device>                                       # send internet traffic through another device
+retail server acl allow --from '*' --to tag:server --ports tcp:443    # access rules
+retail server helper-device <device>                                  # helper node behind CGNAT
+retail server web                                                     # open the web admin page
 ```
 
-The tray's screens render to PNG without opening a window:
+`retail --help` lists every command. Commands that change things need the local API token: on Windows any signed-in user, on Linux root or the `retail` group, on macOS administrators.
 
-```sh
-retail-tray --preview popup.png --state connected --dark
-retail-tray --preview settings.png --settings --state login --lang ja
-retail-tray --preview server.png --server --state running
-```
+## Documentation
 
-## Scope and next steps
+- [Self-hosting](docs/SELF-HOSTING.md): servers, helper nodes, CDN and REALITY, access rules, updates, backups
+- [Design](docs/DESIGN.md): how it works, security model, performance, known limitations
+- [Development](docs/DEVELOPMENT.md): building, tests, releases
 
-The programs are not code-signed yet, and there are no mobile apps. See the milestones and known limitations in the [design document](docs/DESIGN.md).
+## Notes
 
-> retail uses the `100.64.0.0/10` address range. Do not run it at the same time as another VPN that uses that range on the same device.
+- retail uses the `100.64.0.0/10` address range. Do not run it on a device together with another VPN that uses that range.
+- The programs are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper may warn on first launch. There are no mobile apps yet.
+
+## License
+
+[Apache-2.0](LICENSE). The vendored [boringtun](vendor/boringtun) is BSD-3-Clause.
