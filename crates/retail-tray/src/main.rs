@@ -15,6 +15,7 @@
 
 mod api;
 mod app_entry;
+mod chrome;
 mod config;
 mod dashboard;
 mod draw;
@@ -301,7 +302,8 @@ impl App {
             .with_title("retail Settings")
             .with_resizable(false)
             .with_theme(theme)
-            .with_inner_size(LogicalSize::new(settings::WIDTH as f64, self.settings.height() as f64));
+            .with_inner_size(LogicalSize::new(settings::WIDTH as f64, (self.settings.height() + chrome::top()) as f64));
+        attrs = chrome::attributes(attrs);
         if let Some(m) = el.primary_monitor() {
             let ms = m.size().to_logical::<f64>(m.scale_factor());
             let mp = m.position().to_logical::<f64>(m.scale_factor());
@@ -312,6 +314,7 @@ impl App {
         }
         match Canvas::new(el, attrs) {
             Ok(c) => {
+                chrome::opened(&c.window);
                 c.window.focus_window();
                 c.window.request_redraw();
                 self.settings_win = Some(c);
@@ -336,9 +339,12 @@ impl App {
 
     fn redraw_settings(&mut self) {
         let (st, fonts) = (&mut self.settings, &self.fonts);
-        let h = st.height();
+        let h = st.height() + chrome::top();
+        let (dark, pointer) = (st.dark, st.cursor.map(chrome::to_window));
         if let Some(w) = &mut self.settings_win {
-            w.present(settings::WIDTH, h, |pix, scale| st.render(fonts, pix, scale));
+            w.present(settings::WIDTH, h, |pix, scale| {
+                chrome::frame(pix, fonts, scale, settings::WIDTH, dark, pointer, |pix| st.render(fonts, pix, scale))
+            });
         }
     }
 
@@ -362,7 +368,8 @@ impl App {
             .with_title("retail Server")
             .with_resizable(false)
             .with_theme(theme)
-            .with_inner_size(LogicalSize::new(dashboard::WIDTH as f64, self.dashboard.height() as f64));
+            .with_inner_size(LogicalSize::new(dashboard::WIDTH as f64, (self.dashboard.height() + chrome::top()) as f64));
+        attrs = chrome::attributes(attrs);
         if let Some(m) = el.primary_monitor() {
             let ms = m.size().to_logical::<f64>(m.scale_factor());
             let mp = m.position().to_logical::<f64>(m.scale_factor());
@@ -373,6 +380,7 @@ impl App {
         }
         match Canvas::new(el, attrs) {
             Ok(c) => {
+                chrome::opened(&c.window);
                 c.window.focus_window();
                 c.window.request_redraw();
                 self.dashboard_win = Some(c);
@@ -401,7 +409,10 @@ impl App {
         let (d, fonts) = (&mut self.dashboard, &self.fonts);
         if let Some(w) = &mut self.dashboard_win {
             let mut changed = false;
-            w.present(dashboard::WIDTH, d.height(), |pix, scale| changed = d.render(fonts, pix, scale));
+            let (dark, pointer) = (d.dark, d.cursor.map(chrome::to_window));
+            w.present(dashboard::WIDTH, d.height() + chrome::top(), |pix, scale| {
+                chrome::frame(pix, fonts, scale, dashboard::WIDTH, dark, pointer, |pix| changed = d.render(fonts, pix, scale))
+            });
             if changed {
                 w.window.request_redraw();
             }
@@ -950,7 +961,7 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::RedrawRequested => self.redraw_dashboard(),
                 WindowEvent::CloseRequested => self.close_dashboard(),
                 WindowEvent::CursorMoved { position, .. } => {
-                    self.dashboard.cursor = Some(((position.x / scale) as f32, (position.y / scale) as f32));
+                    self.dashboard.cursor = Some(chrome::to_content(((position.x / scale) as f32, (position.y / scale) as f32)));
                     self.redraw_dashboard();
                 }
                 WindowEvent::CursorLeft { .. } => {
@@ -958,8 +969,24 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw_dashboard();
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    if let Some(a) = self.dashboard.cursor.and_then(|(x, y)| self.dashboard.action_at(x, y)) {
-                        self.run_dashboard_action(a);
+                    let Some(at) = self.dashboard.cursor else { return };
+                    match chrome::button_at(dashboard::WIDTH, chrome::to_window(at)) {
+                        Some(chrome::Button::Close) => return self.close_dashboard(),
+                        Some(chrome::Button::Minimize) => {
+                            self.dashboard.cursor = None;
+                            if let Some(d) = &self.dashboard_win {
+                                d.window.set_minimized(true);
+                            }
+                        }
+                        None => match self.dashboard.action_at(at.0, at.1) {
+                            Some(a) => self.run_dashboard_action(a),
+                            None if chrome::drags(chrome::to_window(at)) => {
+                                if let Some(d) = &self.dashboard_win {
+                                    let _ = d.window.drag_window();
+                                }
+                            }
+                            None => {}
+                        },
                     }
                     self.redraw_dashboard();
                 }
@@ -1002,7 +1029,7 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::RedrawRequested => self.redraw_settings(),
                 WindowEvent::CloseRequested => self.close_settings(),
                 WindowEvent::CursorMoved { position, .. } => {
-                    self.settings.cursor = Some(((position.x / scale) as f32, (position.y / scale) as f32));
+                    self.settings.cursor = Some(chrome::to_content(((position.x / scale) as f32, (position.y / scale) as f32)));
                     self.redraw_settings();
                 }
                 WindowEvent::CursorLeft { .. } => {
@@ -1010,7 +1037,19 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw_settings();
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    let action = self.settings.cursor.and_then(|(x, y)| self.settings.action_at(x, y));
+                    let Some(at) = self.settings.cursor else { return };
+                    match chrome::button_at(settings::WIDTH, chrome::to_window(at)) {
+                        Some(chrome::Button::Close) => return self.close_settings(),
+                        Some(chrome::Button::Minimize) => {
+                            self.settings.cursor = None;
+                            if let Some(s) = &self.settings_win {
+                                s.window.set_minimized(true);
+                            }
+                            return self.redraw_settings();
+                        }
+                        None => {}
+                    }
+                    let action = self.settings.action_at(at.0, at.1);
                     // Any click closes the language list; its own button toggles it
                     let was_open = std::mem::take(&mut self.settings.lang_open);
                     let menu = self.settings.server_menu.take();
@@ -1018,7 +1057,14 @@ impl ApplicationHandler<UserEvent> for App {
                         Some(SettingsAction::LangMenu) => self.settings.lang_open = !was_open,
                         Some(SettingsAction::ServerMenu(i)) => self.settings.server_menu = (menu != Some(i)).then_some(i),
                         Some(a) => self.run_settings_action(a),
-                        None => self.settings.focus = None,
+                        None => {
+                            self.settings.focus = None;
+                            if chrome::drags(chrome::to_window(at))
+                                && let Some(s) = &self.settings_win
+                            {
+                                let _ = s.window.drag_window();
+                            }
+                        }
                     }
                     self.redraw_settings();
                 }
@@ -1540,7 +1586,10 @@ mod preview {
         if state == "login" {
             st.message = Some(("registration rejected (HTTP 401): invalid, used or expired auth key".into(), true));
         }
-        save(out, crate::settings::WIDTH, st.height(), |pix, s| st.render(&fonts, pix, s))
+        let w = crate::settings::WIDTH;
+        save(out, w, st.height() + crate::chrome::top(), |pix, s| {
+            crate::chrome::frame(pix, &fonts, s, w, dark, None, |pix| st.render(&fonts, pix, s))
+        })
     }
 
     /// `--state idle` (not hosting) or `running` (with devices and an invite)
@@ -1625,8 +1674,11 @@ mod preview {
         // Lay out once to learn the height, then draw at that size
         let mut probe = Pixmap::new(1, 1).ok_or("bad size")?;
         d.render(&fonts, &mut probe, 1.0);
-        save(out, crate::dashboard::WIDTH, d.height(), |pix, s| {
-            d.render(&fonts, pix, s);
+        let w = crate::dashboard::WIDTH;
+        save(out, w, d.height() + crate::chrome::top(), |pix, s| {
+            crate::chrome::frame(pix, &fonts, s, w, dark, None, |pix| {
+                d.render(&fonts, pix, s);
+            })
         })
     }
 

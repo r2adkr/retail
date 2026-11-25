@@ -537,20 +537,28 @@ fn uninstall(o: &Opts, me: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(dir.join("wintun.dll"));
         let _ = std::fs::remove_dir(&dir);
     }
-    // Run from the folder it removes (Settings → Installed apps): Windows
-    // keeps a running program's file, so the folder goes once this has ended
+    // Run from the folder it removes (Settings → Installed apps), or a
+    // program in it still ending: Windows keeps a running program's file, so
+    // the folder goes a moment after this has ended
     #[cfg(windows)]
-    if dir.exists() && me.starts_with(&dir) {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", &format!("ping -n 3 127.0.0.1 >NUL & rmdir /S /Q \"{}\"", dir.display())])
-            .creation_flags(0x0800_0000)
-            .spawn();
+    if dir.exists() {
+        let _ = remove_dir_later(&dir, 3);
     }
-    #[cfg(not(windows))]
     let _ = me;
     remove_autostart();
     Ok(())
+}
+
+/// Removes `dir` after about `pings - 1` seconds, from a process of its own
+#[cfg(windows)]
+fn remove_dir_later(dir: &Path, pings: u32) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    // cmd reads its command line as it is: Rust's quoting (\" for a quote)
+    // would leave it a path it cannot find
+    std::process::Command::new("cmd")
+        .raw_arg(format!("/C ping -n {pings} 127.0.0.1 >NUL & rmdir /S /Q \"{}\"", dir.display()))
+        .creation_flags(0x0800_0000)
+        .spawn()
 }
 
 /// The tray apps still running, every signed-in user's, but not this
@@ -786,6 +794,18 @@ fn confirm(title: &str, text: &str, yes: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As under "C:\Program Files": a path with a space
+    #[cfg(windows)]
+    #[test]
+    fn removes_a_folder_with_a_space_later() {
+        let dir = std::env::temp_dir().join(format!("retail test {}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("file.txt"), "x").unwrap();
+        let status = remove_dir_later(&dir, 1).unwrap().wait().unwrap();
+        assert!(status.success());
+        assert!(!dir.exists());
+    }
 
     #[test]
     fn extracts_ranges() {
