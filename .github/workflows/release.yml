@@ -1,7 +1,7 @@
 # Official releases, built when a version tag (v0.1.0, ...) is pushed. A
 # release holds one installer per system, with every program inside:
 #   retail-windows-x86_64.exe, retail-macos.dmg (Apple silicon and Intel),
-#   retail-linux-x86_64, retail-linux-aarch64, retail-linux-arm
+#   retail-linux-x86_64.deb, retail-linux-aarch64.deb, retail-linux-arm.deb
 # plus `VERSION` and `SHA256SUMS`. Daemons update themselves from these, and
 # servers take other systems' programs out of them for their client packages.
 name: release
@@ -111,31 +111,53 @@ jobs:
           path: dist
           pattern: programs-*
           merge-multiple: true
+      # Windows: the installer itself. Linux: a .deb per processor that runs
+      # it (data uncompressed, so daemons and servers read the installer in place)
       - name: Bundle
         run: |
-          mkdir out
-          for v in linux-x86_64 linux-aarch64 linux-arm; do
-            python3 scripts/bundle.py "out/retail-$v" "dist/retail-tray-$v" "retaild=dist/retaild-$v" "retail=dist/retail-$v"
+          mkdir out inst
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          for pair in linux-x86_64:amd64 linux-aarch64:arm64 linux-arm:armhf; do
+            v=${pair%%:*}; arch=${pair##*:}
+            python3 scripts/bundle.py "inst/retail-$v" "dist/retail-tray-$v" "retaild=dist/retaild-$v" "retail=dist/retail-$v"
+            python3 scripts/bundle.py --deb "out/retail-$v.deb" "inst/retail-$v" "$arch" "$version"
+            dpkg-deb --info "out/retail-$v.deb" | sed -n '1,12p'
           done
           v=windows-x86_64
           python3 scripts/bundle.py "out/retail-$v.exe" "dist/retail-tray-$v.exe" \
             "retaild.exe=dist/retaild-$v.exe" "retail.exe=dist/retail-$v.exe" "wintun.dll=dist/wintun-$v.dll"
           ls -l out
-      # The installer on this machine: it unpacks, starts the daemon, and the CLI it installed answers
-      - name: Try the Linux installer
+      - name: The daemon's reader finds the installer in the .deb
         run: |
-          ./out/retail-linux-x86_64 --package-info
-          sudo ./out/retail-linux-x86_64 --yes --prefix "$RUNNER_TEMP/r" --no-service --no-autostart
-          ls -l "$RUNNER_TEMP/r/bin"
-          "$RUNNER_TEMP/r/bin/retail" status
-          # A change from another user than the daemon's (root), not in the
-          # retail group: the listener check passes (root's socket) and the
-          # daemon then refuses for want of its token
-          out=$("$RUNNER_TEMP/r/bin/retail" set --auto-update false 2>&1) && { echo "a non-member changed settings: $out"; exit 1; }
-          echo "$out"
-          echo "$out" | grep -q "not allowed" || { echo "expected the daemon's refusal"; exit 1; }
-          sudo "$RUNNER_TEMP/r/bin/retail" set --auto-update false
-          sudo pkill -f "$RUNNER_TEMP/r/bin/retaild"
+          rustup show active-toolchain || rustup toolchain install
+          RETAIL_BUNDLE_DEB="$PWD/out/retail-linux-x86_64.deb" cargo test --locked -p retail-proto bundle_py_deb -- --nocapture
+      # As a user would: the package through apt (the daemon then runs from
+      # systemd), and after removing it, the one-line script without apt
+      - name: Try the Linux package and the install script
+        run: |
+          id
+          sudo apt-get install -y ./out/retail-linux-x86_64.deb
+          systemctl is-active retaild
+          getent group retail
+          retail status
+          # Root may change settings; a member of the retail group (the
+          # runner is one if it is in sudo) without the token, from the kernel's
+          # socket table; anyone else is refused by the daemon
+          sudo retail set --auto-update false
+          if id -nG | grep -qw sudo; then
+            retail set --auto-update false
+          else
+            out=$(retail set --auto-update false 2>&1) && { echo "a non-member changed settings: $out"; exit 1; }
+            echo "$out" | grep -q "not allowed"
+          fi
+          sudo apt-get remove -y retail
+          if systemctl is-active --quiet retaild; then echo "still running after removal"; exit 1; fi
+          test ! -e /usr/local/bin/retaild
+          mkdir rel && cp out/retail-linux-x86_64.deb rel/ && (cd rel && sha256sum * > SHA256SUMS)
+          RETAIL_RELEASES="file://$PWD/rel" RETAIL_NO_APT=1 sh scripts/install.sh
+          systemctl is-active retaild
+          retail status
+          sudo /usr/local/bin/retail-tray --uninstall
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installers-other
@@ -200,6 +222,15 @@ jobs:
           # check must find root's socket, and the admin group may control retail
           "$RUNNER_TEMP/r/bin/retail" set --auto-update false
           sudo pkill -f "$RUNNER_TEMP/r/bin/retaild"
+      # The one-line script as a Mac user would run it: the disk image,
+      # checked, mounted, installed with launchd
+      - name: Try the install script
+        run: |
+          mkdir rel && cp out/retail-macos.dmg rel/ && (cd rel && shasum -a 256 * > SHA256SUMS)
+          RETAIL_RELEASES="file://$PWD/rel" sh scripts/install.sh
+          sleep 2
+          /usr/local/bin/retail status
+          sudo /usr/local/bin/retail-tray --uninstall
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installers-macos

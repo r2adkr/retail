@@ -32,22 +32,32 @@ Download the installer for your system from [Releases](https://github.com/r2adkr
 |---|---|
 | Windows | `retail-windows-x86_64.exe` |
 | macOS (Apple silicon and Intel) | `retail-macos.dmg`: open it, then open `retail.app` |
-| Linux | `retail-linux-x86_64` |
-| Linux on 64-bit ARM (Raspberry Pi 3/4/5) | `retail-linux-aarch64` |
-| Linux on 32-bit ARM (Raspberry Pi OS 32-bit, routers) | `retail-linux-arm` |
+| Ubuntu, Debian (PC) | `retail-linux-x86_64.deb` |
+| Ubuntu, Debian on 64-bit ARM (Raspberry Pi 3/4/5) | `retail-linux-aarch64.deb` |
+| 32-bit ARM (Raspberry Pi OS 32-bit) | `retail-linux-arm.deb` |
 
-Run it: a short setup in retail's own look installs everything, asks for administrator rights once, and offers to join a network with an invite code (or skip and join later from the tray icon). It ends by showing where retail's icon lives on your system. On a Linux desktop: `chmod +x retail-linux-* && ./retail-linux-*` (without sudo, so the tray app is yours). The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time. Running a newer installer over an installed retail updates it, though installed devices also update themselves.
+**Windows and macOS**: run it. A short setup in retail's own look installs everything (Windows asks for administrator rights as it opens, macOS for your password) and offers to join a network with an invite code, or skip and join later from the tray icon. It ends by showing where retail's icon lives. The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time.
 
-**Joining later**: paste an invite code in the tray app. Or use an installer from your network's server, which also joins: on the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page).
+**Ubuntu and Debian**: open the `.deb` (App Center installs it), then open **retail** from the app menu and paste an invite code. Administrators of the computer (the `sudo` group) may control retail from the tray app.
 
-**Server without a screen** (Linux VPS, Raspberry Pi):
+**Any Linux, or from a terminal** (also macOS):
 
 ```sh
-chmod +x retail-linux-x86_64 && sudo ./retail-linux-x86_64 --yes
-sudo retaild install --server
+curl -fsSL https://raw.githubusercontent.com/r2adkr/retail/main/scripts/install.sh | sh                       # install
+curl -fsSL https://raw.githubusercontent.com/r2adkr/retail/main/scripts/install.sh | sh -s -- --invite <code>  # and join a network
 ```
 
-The first command installs retail and starts it at boot; the second starts a server and prints the first invite. Or run the server image:
+Running a newer installer over an installed retail updates it, though installed devices also update themselves.
+
+**Joining later**: paste an invite code in the tray app (or `retail up --invite <code>`). Or use an installer from your network's server, which also joins: on the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page).
+
+**Server without a screen** (Linux VPS, Raspberry Pi), one command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/r2adkr/retail/main/scripts/install.sh | sh -s -- --server
+```
+
+It installs retail, starts it at boot, starts a server that does not join its own network and prints the first invite. Or run the server image:
 
 ```sh
 docker run -d -p 443:443 -p 80:80 -p 3478:3478/udp -v retail-data:/data ghcr.io/r2adkr/retail

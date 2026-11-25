@@ -57,6 +57,8 @@ use crate::ui::{Action, Ui, View};
 #[allow(clippy::large_enum_variant)]
 pub enum UserEvent {
     TrayClicked(Anchor),
+    /// Started again (the app menu entry): show the popup
+    Show,
     Api(ApiEvent),
 }
 
@@ -829,6 +831,11 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
         match event {
+            UserEvent::Show => {
+                if !self.popup_visible() {
+                    self.show_popup(self.last_anchor);
+                }
+            }
             UserEvent::TrayClicked(anchor) => {
                 self.last_anchor = anchor;
                 // Clicking the icon first takes focus from the popup and hides it,
@@ -1220,8 +1227,16 @@ fn main() {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         builder.with_activation_policy(ActivationPolicy::Accessory);
     }
+    #[cfg(unix)]
+    let single = match single::claim() {
+        Some(l) => l,
+        // Another runs: it shows its popup instead
+        None => return,
+    };
     let event_loop = builder.build().expect("creating the event loop");
     let proxy = event_loop.create_proxy();
+    #[cfg(unix)]
+    single::serve(single, proxy.clone());
 
     let fast_poll = Arc::new(AtomicBool::new(false));
     let dashboard_poll = Arc::new(AtomicBool::new(false));
@@ -1256,6 +1271,52 @@ fn main() {
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("retail-tray: {e}");
+    }
+}
+
+/// One tray app per user. Started again (the app menu entry, while it runs
+/// from sign-in), it asks the running one to show its popup and exits.
+#[cfg(unix)]
+mod single {
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
+
+    use winit::event_loop::EventLoopProxy;
+
+    use crate::UserEvent;
+
+    fn path() -> PathBuf {
+        let uid = unsafe { libc::geteuid() };
+        match std::env::var_os("XDG_RUNTIME_DIR") {
+            Some(d) => PathBuf::from(d).join("retail-tray.sock"),
+            None => std::env::temp_dir().join(format!("retail-tray-{uid}.sock")),
+        }
+    }
+
+    /// `None` when another tray app took the request to show itself.
+    /// `Some(None)`: this is the only one, but others cannot reach it.
+    pub fn claim() -> Option<Option<UnixListener>> {
+        let p = path();
+        if let Ok(mut s) = UnixStream::connect(&p) {
+            let _ = s.write_all(b"show");
+            return None;
+        }
+        // A socket left by a tray app that did not end cleanly
+        let _ = std::fs::remove_file(&p);
+        Some(UnixListener::bind(&p).ok())
+    }
+
+    pub fn serve(listener: Option<UnixListener>, proxy: EventLoopProxy<UserEvent>) {
+        let Some(listener) = listener else { return };
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8];
+                if stream.read(&mut buf).is_ok_and(|n| &buf[..n] == b"show") {
+                    let _ = proxy.send_event(UserEvent::Show);
+                }
+            }
+        });
     }
 }
 

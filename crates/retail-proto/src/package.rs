@@ -14,7 +14,8 @@
 //! disk image holding `retail.app`, whose program is the plain tray app with
 //! the package among its resources; the same package also sits in front of
 //! the image's data (see `dmg_prefix`), where code can read it without
-//! mounting anything.
+//! mounting anything. For Linux it is a Debian package whose (uncompressed)
+//! data holds the installer at `DEB_INSTALLER` (see `deb_entry`).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -127,6 +128,70 @@ impl<R: Seek> Seek for Window<R> {
         self.pos = pos.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start"))?;
         Ok(self.pos)
     }
+}
+
+/// Where a Linux release's `.deb` keeps the installer, which its install
+/// script runs
+pub const DEB_INSTALLER: &str = "usr/lib/retail/retail-installer";
+
+/// Where a file's bytes are in a Debian package: offset and length. The
+/// package is an `ar` archive whose `data.tar` member must be uncompressed,
+/// as `scripts/bundle.py --deb` makes it.
+pub fn deb_entry<R: Read + Seek>(r: &mut R, path: &str) -> Option<(u64, u64)> {
+    let total = r.seek(SeekFrom::End(0)).ok()?;
+    r.seek(SeekFrom::Start(0)).ok()?;
+    let mut magic = [0u8; 8];
+    r.read_exact(&mut magic).ok()?;
+    if &magic != b"!<arch>\n" {
+        return None;
+    }
+    let mut at = 8u64;
+    while at + 60 <= total {
+        r.seek(SeekFrom::Start(at)).ok()?;
+        let mut h = [0u8; 60];
+        r.read_exact(&mut h).ok()?;
+        let name = std::str::from_utf8(&h[..16]).ok()?.trim_end().trim_end_matches('/');
+        let size: u64 = std::str::from_utf8(&h[48..58]).ok()?.trim().parse().ok()?;
+        let body = at + 60;
+        if body.checked_add(size)? > total {
+            return None;
+        }
+        if name == "data.tar" {
+            return tar_entry(r, body, size, path);
+        }
+        at = body + size + size % 2;
+    }
+    None
+}
+
+/// A file in an uncompressed tar from `start` to `start + len`
+fn tar_entry<R: Read + Seek>(r: &mut R, start: u64, len: u64, path: &str) -> Option<(u64, u64)> {
+    let octal = |b: &[u8]| -> Option<u64> {
+        let s = std::str::from_utf8(b).ok()?.trim_matches(|c: char| c == '\0' || c == ' ');
+        if s.is_empty() { Some(0) } else { u64::from_str_radix(s, 8).ok() }
+    };
+    let text = |b: &[u8]| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or(&[])).into_owned();
+    let mut at = start;
+    while at + 512 <= start + len {
+        r.seek(SeekFrom::Start(at)).ok()?;
+        let mut h = [0u8; 512];
+        r.read_exact(&mut h).ok()?;
+        if h.iter().all(|&b| b == 0) {
+            return None;
+        }
+        let size = octal(&h[124..136])?;
+        let mut name = text(&h[..100]);
+        let prefix = text(&h[345..500]);
+        if &h[257..262] == b"ustar" && !prefix.is_empty() {
+            name = format!("{prefix}/{name}");
+        }
+        let data = at + 512;
+        if name.trim_start_matches("./") == path && matches!(h[156], b'0' | 0) {
+            return (data + size <= start + len).then_some((data, size));
+        }
+        at = data + size.div_ceil(512) * 512;
+    }
+    None
 }
 
 /// The length of what comes before a disk image's data: the package
@@ -244,6 +309,18 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("retaild")).unwrap(), b"daemon");
         let _ = std::fs::remove_dir_all(dir);
         assert!(dmg_prefix(&mut std::io::Cursor::new(&pkg)).is_none(), "not an image");
+    }
+
+    /// A Debian package made by `scripts/bundle.py --deb` (given in
+    /// RETAIL_BUNDLE_DEB, as the release workflow and the tests do) holds a
+    /// readable installer where the install script looks
+    #[test]
+    fn bundle_py_deb() {
+        let Some(path) = std::env::var_os("RETAIL_BUNDLE_DEB") else { return };
+        let mut f = std::fs::File::open(path).unwrap();
+        let (start, len) = deb_entry(&mut f, DEB_INSTALLER).expect("the installer in the package's data");
+        let m = read_manifest(&mut Window::new(f, start, len)).expect("it is a package");
+        assert!(m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"), "{m:?}");
     }
 
     /// A disk image made by `scripts/bundle.py --dmg` (given in

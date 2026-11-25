@@ -1,5 +1,5 @@
 //! Official releases from GitHub Releases: a release holds one installer per
-//! system (`retail-windows-x86_64.exe`, `retail-linux-aarch64`,
+//! system (`retail-windows-x86_64.exe`, `retail-linux-aarch64.deb`,
 //! `retail-macos.dmg`, ...) with every program inside, plus `VERSION` and
 //! `SHA256SUMS`. The installer is checked against the checksums and its
 //! programs taken out: by the updater for this device, and by a server for
@@ -27,12 +27,12 @@ pub fn base() -> Option<String> {
 }
 
 /// The release's installer for `<os>-<arch>`. macOS has one for both
-/// processors, a disk image.
+/// processors, a disk image; Linux a Debian package per processor.
 pub fn installer_asset(variant: &str) -> String {
     match variant.split_once('-').map(|(os, _)| os) {
         Some("windows") => format!("retail-{variant}.exe"),
         Some("macos") => "retail-macos.dmg".to_string(),
-        _ => format!("retail-{variant}"),
+        _ => format!("retail-{variant}.deb"),
     }
 }
 
@@ -110,16 +110,20 @@ pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: 
     .context("fetching took too long")?
 }
 
-/// Writes `files` out of the installer at `path` (for macOS, in front of a disk image)
+/// Writes `files` out of the installer at `path`: in front of a disk image
+/// (macOS), in a Debian package (Linux), or the file itself (Windows)
 fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
-    use retail_proto::package::{Window, dmg_prefix, extract, read_manifest};
+    use retail_proto::package::{DEB_INSTALLER, Window, deb_entry, dmg_prefix, extract, read_manifest};
     let mut f = std::fs::File::open(path)?;
-    let len = if path.to_string_lossy().ends_with(".dmg.download") {
-        dmg_prefix(&mut f).context("the disk image carries no installer")?
+    let name = path.to_string_lossy();
+    let (start, len) = if name.ends_with(".dmg.download") {
+        (0, dmg_prefix(&mut f).context("the disk image carries no installer")?)
+    } else if name.ends_with(".deb.download") {
+        deb_entry(&mut f, DEB_INSTALLER).context("the package carries no installer")?
     } else {
-        f.metadata()?.len()
+        (0, f.metadata()?.len())
     };
-    let mut w = Window::new(f, 0, len);
+    let mut w = Window::new(f, start, len);
     let m = read_manifest(&mut w).context("not a retail installer")?;
     let written = extract(&mut w, &m, dir, |n| files.iter().any(|f| f == n))?;
     if let Some(missing) = files.iter().find(|f| !written.contains(f)) {
@@ -250,7 +254,7 @@ mod tests {
 
     #[test]
     fn installer_names() {
-        assert_eq!(installer_asset("linux-x86_64"), "retail-linux-x86_64");
+        assert_eq!(installer_asset("linux-x86_64"), "retail-linux-x86_64.deb");
         assert_eq!(installer_asset("windows-x86_64"), "retail-windows-x86_64.exe");
         assert_eq!(installer_asset("macos-aarch64"), "retail-macos.dmg");
         assert_eq!(installer_asset("macos-x86_64"), "retail-macos.dmg");

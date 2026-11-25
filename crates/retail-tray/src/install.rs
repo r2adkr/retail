@@ -253,7 +253,6 @@ pub fn run(args: &[String]) -> Option<i32> {
 }
 
 /// What the raised window writes once it has installed
-#[cfg(any(windows, test))]
 const INSTALLED: &str = "installed";
 
 /// Runs the installer window as administrator and waits for it. When it
@@ -365,6 +364,11 @@ fn privileged(source: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
         }
         copy_range(&mut src, f.offset, f.len, &dir.join(&f.name))?;
     }
+    // Before the daemon starts, so it gives the group its token file
+    #[cfg(target_os = "linux")]
+    if o.service {
+        let_user_control();
+    }
     let daemon = dir.join(exe("retaild"));
     if o.service {
         daemon_service(&daemon, "register")?;
@@ -380,6 +384,31 @@ fn privileged(source: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
     match &o.invite {
         Some(invite) => join(invite, o.switch),
         None => wait_for_daemon().map(|_| ()),
+    }
+}
+
+/// On Linux the users who may control retail are root and the `retail`
+/// group: the group is made if missing, and the user who ran the installer
+/// (through pkexec or sudo) joins it, so their tray app works
+#[cfg(target_os = "linux")]
+fn let_user_control() {
+    let quiet = |cmd: &str, args: &[&str]| std::process::Command::new(cmd).args(args).output().is_ok_and(|o| o.status.success());
+    if !quiet("getent", &["group", "retail"]) && !quiet("groupadd", &["--system", "retail"]) {
+        eprintln!("retail: could not make the retail group");
+        return;
+    }
+    let user = match std::env::var("PKEXEC_UID") {
+        Ok(uid) => std::process::Command::new("id")
+            .args(["-nu", &uid])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        Err(_) => std::env::var("SUDO_USER").ok(),
+    };
+    if let Some(user) = user.filter(|u| !u.is_empty() && u != "root")
+        && !quiet("usermod", &["-aG", "retail", &user])
+    {
+        eprintln!("retail: could not add {user} to the retail group");
     }
 }
 

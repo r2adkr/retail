@@ -3628,6 +3628,7 @@ dependencies = [
  "ab_glyph",
  "arboard",
  "ksni",
+ "libc",
  "qrcode",
  "retail-proto",
  "serde",

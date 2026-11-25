@@ -27,7 +27,7 @@ pub const LOCAL_HEADER: &str = "x-retail-local";
 #[derive(Clone, Copy)]
 struct Admin(bool);
 
-pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>) -> Router {
+pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api: std::net::SocketAddr) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/up", post(up))
@@ -64,11 +64,11 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>) -> 
         .route("/proxy/system", post(system_proxy))
         .route("/web/login", post(web_login))
         .route("/shutdown", post(shutdown))
-        .layer(middleware::from_fn(move |req: Request, next: Next| guard(token.clone(), admin.clone(), req, next)))
+        .layer(middleware::from_fn(move |req: Request, next: Next| guard(token.clone(), admin.clone(), api, req, next)))
         .with_state(backend)
 }
 
-async fn guard(token: Arc<String>, admin: Arc<String>, mut req: Request, next: Next) -> Response {
+async fn guard(token: Arc<String>, admin: Arc<String>, api: std::net::SocketAddr, mut req: Request, next: Next) -> Response {
     let host_ok = req
         .headers()
         .get(header::HOST)
@@ -78,9 +78,11 @@ async fn guard(token: Arc<String>, admin: Arc<String>, mut req: Request, next: N
     if !host_ok || !req.headers().contains_key(LOCAL_HEADER) {
         return error(StatusCode::FORBIDDEN, "forbidden");
     }
+    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0);
+    let user = peer.and_then(|p| local_user(p, api));
     if req.method() != axum::http::Method::GET {
         let given = req.headers().get(retail_proto::local::TOKEN_HEADER).map(|v| v.as_bytes());
-        let ok = given.is_some_and(|g| same_secret(g, token.as_bytes()));
+        let ok = given.is_some_and(|g| same_secret(g, token.as_bytes())) || user.is_some();
         if !ok {
             return error(
                 StatusCode::FORBIDDEN,
@@ -88,9 +90,54 @@ async fn guard(token: Arc<String>, admin: Arc<String>, mut req: Request, next: N
             );
         }
     }
-    let is_admin = req.headers().get(retail_proto::local::ADMIN_HEADER).is_some_and(|g| same_secret(g.as_bytes(), admin.as_bytes()));
+    let is_admin = req.headers().get(retail_proto::local::ADMIN_HEADER).is_some_and(|g| same_secret(g.as_bytes(), admin.as_bytes()))
+        || user == Some(LocalUser::Root);
     req.extensions_mut().insert(Admin(is_admin));
     next.run(req).await
+}
+
+#[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum LocalUser {
+    Root,
+    Member,
+}
+
+/// On Linux, who is asking, from the kernel's socket table: root, or a
+/// member of the `retail` group as /etc/group says now. A user added to the
+/// group can use the tray app at once, before signing in again gives their
+/// processes the group (and the token file). Elsewhere the token decides.
+#[cfg(target_os = "linux")]
+fn local_user(peer: std::net::SocketAddr, api: std::net::SocketAddr) -> Option<LocalUser> {
+    let uid = retail_proto::listener::peer_uid(peer, api)?;
+    if uid == 0 {
+        return Some(LocalUser::Root);
+    }
+    in_group(uid, "retail").then_some(LocalUser::Member)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_user(_peer: std::net::SocketAddr, _api: std::net::SocketAddr) -> Option<LocalUser> {
+    None
+}
+
+/// Whether the user is in `group`, by name in its member list or as their
+/// primary group
+#[cfg(target_os = "linux")]
+fn in_group(uid: u32, group: &str) -> bool {
+    let (Ok(passwd), Ok(groups)) = (std::fs::read_to_string("/etc/passwd"), std::fs::read_to_string("/etc/group")) else {
+        return false;
+    };
+    let Some((name, primary)) = passwd.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.len() > 3 && f[2].parse() == Ok(uid)).then(|| (f[0].to_string(), f[3].to_string()))
+    }) else {
+        return false;
+    };
+    groups.lines().any(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        f.len() > 3 && f[0] == group && (f[2] == primary || f[3].split(',').any(|m| m == name))
+    })
 }
 
 /// Ends the daemon the way a service stop would, undoing its system changes

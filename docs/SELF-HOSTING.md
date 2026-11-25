@@ -52,17 +52,16 @@ When the server starts, retail **opens ports on the router automatically with PC
 
 ## On a VPS or in Docker
 
-On a server without a screen, everything works from the command line. Download the installer for the machine (`retail-linux-x86_64`, `retail-linux-aarch64`, or `retail-linux-arm` for 32-bit ARM) from the [releases](https://github.com/r2adkr/retail/releases), then:
+On a server without a screen, everything works from the command line. One command installs retail from the newest release (checked against its `SHA256SUMS`), starts it at boot, starts a server that does not join its own network and prints the first invite:
 
 ```sh
-chmod +x retail-linux-* && sudo ./retail-linux-* --yes   # installs retail, starts the daemon at boot
-sudo retaild install --server               # starts a server here, prints an invite
+curl -fsSL https://raw.githubusercontent.com/r2adkr/retail/main/scripts/install.sh | sh -s -- --server
 retail server invite --name family          # more invites; retail server status, acl, tag, helper-device …
 retail tui                                  # the same in a full-screen terminal view
 sudo retaild uninstall                      # removes the service and programs (the server data stays)
 ```
 
-The installer puts `retaild`, `retail` and the tray app in `/usr/local/bin` and registers the daemon with systemd (launchd on macOS, Task Scheduler on Windows); without a desktop it starts no tray app. `--invite <code>` joins a network right away. `retaild install --server` then starts a server that does not join its own network (so it needs no TUN device) and prints the first invite; `--port` and `--domain` set the server's port and a name for invites.
+On Debian and Ubuntu the script installs the release's `.deb` with apt (`sudo apt install ./retail-linux-x86_64.deb` does the same by hand, and `sudo apt remove retail` removes it); elsewhere it takes the installer out of the package and runs it. Either way the programs go to `/usr/local/bin` and the daemon is registered with systemd (launchd on macOS). `retaild install --server` starts the server on an installed device; `--port` and `--domain` set the server's port and a name for invites.
 
 On a machine with less than 1 GB of memory the daemon picks its smallest buffers by itself (about 9 MB); `retail set --memory-limit` overrides it. The web admin page is on the server's loopback: `ssh -L 41180:127.0.0.1:41180 server`, then open the link `retail server web --print` prints there.
 

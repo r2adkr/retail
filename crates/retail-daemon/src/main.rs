@@ -190,7 +190,9 @@ async fn main() -> Result<()> {
     let updater = backend.updater.clone();
     let token = Arc::new(local_token::write_new().context("writing the local API token")?);
     let admin = Arc::new(local_token::write_admin().context("writing the administrator token")?);
-    axum::serve(listener, local_api::router(backend, token, admin))
+    // The peer's address lets Linux tell who is asking (local_api::local_user)
+    let app = local_api::router(backend, token, admin, args.api).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = shutdown_signal() => {}

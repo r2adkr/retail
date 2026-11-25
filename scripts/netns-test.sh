@@ -805,8 +805,11 @@ install_test() {
         echo "  local API installer: $api_pkg, $(stat -c %s "$WORK/pkg-api") bytes against $web_pkg"; ok=0
     fi
     local refused
-    refused=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'X-Retail-Local: 1' "http://$SERVER_API/server/invites/$id/package/linux-x86_64")
-    [ "$refused" = 403 ] && echo "  and refuses it without the token" || { echo "  without the token: HTTP $refused"; ok=0; }
+    # From a user who is neither root nor in the retail group (on Linux the
+    # daemon lets those two in by the socket's owner, token or not)
+    refused=$(runuser -u nobody -- curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'X-Retail-Local: 1' \
+        "http://$SERVER_API/server/invites/$id/package/linux-x86_64")
+    [ "$refused" = 403 ] && echo "  and refuses it to other users without the token" || { echo "  without the token: HTTP $refused"; ok=0; }
     [ "$ok" = 1 ]
 }
 
@@ -824,7 +827,8 @@ update_test() {
     # So the replaced files can be told from the old ones
     printf 'new' >>"$new/retail"
     # The release's one installer for this system, made as the release workflow makes it
-    python3 "$SCRIPTS/bundle.py" "$rel/v9.9.9/retail-linux-x86_64" "$new/retail-tray" retaild="$new/retaild" retail="$new/retail"
+    python3 "$SCRIPTS/bundle.py" "$new/installer" "$new/retail-tray" retaild="$new/retaild" retail="$new/retail"
+    python3 "$SCRIPTS/bundle.py" --deb "$rel/v9.9.9/retail-linux-x86_64.deb" "$new/installer" amd64 9.9.9
     echo 9.9.9 >"$rel/latest/VERSION"
     (cd "$rel/v9.9.9" && sha256sum -- * >SHA256SUMS)
     # A private CA (trusted through RETAIL_CA_FILE) and the mirror's certificate from it
@@ -867,7 +871,7 @@ s.serve_forever()' "$rel" "$WORK/rel.crt" "$WORK/rel.key" >"$WORK/mirror.log" 2>
     ls "$bin" | grep -qE '\.(new|old)$' && { echo "  leftovers: $(ls "$bin")"; ok=0; }
 
     # A release whose installer does not match its checksum is refused
-    printf 'tampered' >>"$rel/v9.9.9/retail-linux-x86_64"
+    printf 'tampered' >>"$rel/v9.9.9/retail-linux-x86_64.deb"
     cp "$BIN/retaild" "$bin/retaild.copy" && mv "$bin/retaild.copy" "$bin/retaild"
     RETAIL_RELEASES=https://127.0.0.1:9443 RETAIL_CA_FILE="$WORK/ca.crt" RETAIL_API_TOKEN_FILE="$WORK/u.token" RETAIL_NO_PORTMAP=1 \
         "$bin/retaild" --state-dir "$WORK/ustate" --api "$api" --port 41695 --web-port 0 >>"$WORK/update.log" 2>&1 &
@@ -1103,11 +1107,15 @@ run_scenario() {
         pkill -x iperf3 || true
     fi
     if [ "$sc" = direct ] && [ "$ok" = 1 ]; then
-        # Changes without the API token are refused, but reads are not
-        if ip netns exec hA env RETAIL_API_TOKEN_FILE=/nonexistent "$BIN/retail" down 2>&1 | grep -q "not allowed"; then
-            echo "  local API refuses changes without the token"
+        # Changes from users other than root and the retail group, without
+        # the API token, are refused
+        local code
+        code=$(ip netns exec hA runuser -u nobody -- curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'X-Retail-Local: 1' \
+            http://127.0.0.1:41112/down)
+        if [ "$code" = 403 ]; then
+            echo "  local API refuses other users' changes without the token"
         else
-            echo "  local API accepted a change without the token"; ok=0
+            echo "  local API answered another user's change with HTTP $code"; ok=0
         fi
         ip netns exec hA env RETAIL_API_TOKEN_FILE=/nonexistent "$BIN/retail" status >/dev/null || { echo "  status needs no token"; ok=0; }
         lifecycle_checks "$ip_b" || ok=0

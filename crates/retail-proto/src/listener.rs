@@ -12,6 +12,14 @@ pub fn check(addr: SocketAddr) -> Result<(), String> {
     imp::check(addr)
 }
 
+/// The user owning the client end of a loopback connection from `client` to
+/// `server`, from the kernel's socket table (Linux)
+#[cfg(target_os = "linux")]
+pub fn peer_uid(client: SocketAddr, server: SocketAddr) -> Option<u32> {
+    let table = if server.is_ipv4() { "/proc/net/tcp" } else { "/proc/net/tcp6" };
+    imp::socket_uid(&std::fs::read_to_string(table).ok()?, client, server)
+}
+
 fn refuse(addr: SocketAddr, who: &str) -> String {
     format!("the program listening on {addr} is not retaild ({who}); not sending it anything")
 }
@@ -28,15 +36,29 @@ mod imp {
         if uid == 0 || uid == me { Ok(()) } else { Err(refuse(addr, &format!("user id {uid}"))) }
     }
 
-    /// The owner of the listening socket for `addr` in a `/proc/net/tcp` table
-    pub(super) fn listener_uid(table: &str, addr: SocketAddr) -> Option<u32> {
-        let want = match addr {
+    /// How `/proc/net/tcp` writes an address
+    fn hex(addr: SocketAddr) -> String {
+        match addr {
             SocketAddr::V4(a) => format!("{:08X}:{:04X}", u32::from_ne_bytes(a.ip().octets()), a.port()),
             SocketAddr::V6(a) => {
                 let words: String = a.ip().octets().chunks(4).map(|c| format!("{:08X}", u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))).collect();
                 format!("{words}:{:04X}", a.port())
             }
-        };
+        }
+    }
+
+    /// The owner of the socket from `local` to `remote`
+    pub(super) fn socket_uid(table: &str, local: SocketAddr, remote: SocketAddr) -> Option<u32> {
+        let (l, r) = (hex(local), hex(remote));
+        table.lines().skip(1).find_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            (f.len() > 7 && f[1] == l && f[2] == r).then(|| f[7].parse().ok()).flatten()
+        })
+    }
+
+    /// The owner of the listening socket for `addr` in a `/proc/net/tcp` table
+    pub(super) fn listener_uid(table: &str, addr: SocketAddr) -> Option<u32> {
+        let want = hex(addr);
         table.lines().skip(1).find_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
             // local, remote, state (0A is LISTEN), ..., uid
@@ -191,6 +213,11 @@ mod tests {
         assert_eq!(imp::listener_uid(table, addr), Some(1000));
         // Not listening (state 01): no owner
         assert_eq!(imp::listener_uid(table, "127.0.0.1:41129".parse().unwrap()), None);
+        let conn = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             0: 0100007F:D431 0100007F:A0A8 01 00000000:00000000 00:00000000 00000000  1001        0 12347 1\n";
+        let (client, server) = ("127.0.0.1:54321".parse().unwrap(), "127.0.0.1:41128".parse().unwrap());
+        assert_eq!(imp::socket_uid(conn, client, server), Some(1001));
+        assert_eq!(imp::socket_uid(conn, server, client), None);
     }
 
     #[test]
