@@ -108,8 +108,11 @@ fn default_tun_name() -> Option<String> {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    // Task Scheduler and launchd keep nothing a service writes to stderr
-    let log_file = (args.cmd.is_none() && cfg!(any(windows, target_os = "macos")) && !std::io::IsTerminal::is_terminal(&std::io::stderr()))
+    // Task Scheduler and launchd keep nothing a service writes to stderr.
+    // On Windows a task's stderr is a console nobody sees, so the file is
+    // always written there.
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let log_file = (args.cmd.is_none() && (cfg!(windows) || (cfg!(target_os = "macos") && !terminal)))
         .then(|| args.state_dir.clone().unwrap_or_else(state::default_state_dir))
         .and_then(|dir| {
             // Its own folder before anything is written there
@@ -260,9 +263,9 @@ fn init_logging(file: Option<logfile::LogFile>) {
         .ok()
         .and_then(|s| s.parse::<Targets>().ok())
         .unwrap_or_else(|| Targets::new().with_target("retaild", tracing::Level::INFO));
-    let to_stderr = file.is_none().then(|| {
-        tracing_subscriber::fmt::layer().with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())).with_writer(std::io::stderr)
-    });
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let to_stderr = (file.is_none() || terminal)
+        .then(|| tracing_subscriber::fmt::layer().with_ansi(terminal).with_writer(std::io::stderr));
     let to_file = file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(move || f.clone()));
     tracing_subscriber::registry().with(to_stderr).with(to_file).with(filter).init();
     // A panic says where, before the service manager's exit code is all that is left
