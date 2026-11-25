@@ -76,7 +76,17 @@ fn default_hostname() -> String {
 impl Backend {
     pub fn new(opts: Options) -> Result<Self> {
         let state_path = opts.state_dir.join("state.json");
-        let persisted = Persisted::load(&state_path)?;
+        let mut persisted = Persisted::load(&state_path)?;
+        // 1.0.2 and earlier saved it even where it cannot work
+        if persisted.prefs.advertise_exit_node
+            && let Err(e) = crate::exit::check_gateway(true)
+        {
+            tracing::warn!("no longer offering this device as an exit node: {e:#}");
+            persisted.prefs.advertise_exit_node = false;
+            if let Err(e) = persisted.save(&state_path) {
+                tracing::warn!("saving settings: {e:#}");
+            }
+        }
         crate::proxy::set_preference(persisted.prefs.proxy.as_deref(), persisted.prefs.proxy_sign_in);
         let host = crate::host::Host::new(&opts.state_dir);
         let helper = crate::helper_host::HelperHost::new(&opts.state_dir);
@@ -396,6 +406,12 @@ impl Backend {
         }
         if prefs.exit_node.is_some() && prefs.advertise_exit_node {
             anyhow::bail!("a device cannot use an exit node and be one at the same time");
+        }
+        // Refused before it is saved, so the switch does not stay on
+        if prefs.advertise_exit_node && !p.prefs.advertise_exit_node {
+            crate::exit::check_gateway(true).context("offering this device as an exit node")?;
+        } else if !prefs.advertise_routes.is_empty() && prefs.advertise_routes != p.prefs.advertise_routes {
+            crate::exit::check_gateway(false).context("routing networks for the mesh")?;
         }
         let restart = prefs.memory_limit_mb != p.prefs.memory_limit_mb;
         p.prefs = prefs;

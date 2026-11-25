@@ -185,7 +185,7 @@ Nothing changes until the server's administrator approves it, since a route send
 - A device on the routed LAN itself keeps using its own LAN directly.
 - Access rules: a device reaches routed networks only if it has full access (all ports) to the router device.
 - `0.0.0.0/0` is what an exit node is for.
-- The router device turns on IP forwarding and NAT for the approved networks: iptables on Linux, `New-NetNat` on Windows, pf (anchor `com.apple/retail`) on macOS.
+- The router device turns on IP forwarding and NAT for the approved networks: iptables on Linux, `New-NetNat` on Windows, pf (anchor `com.apple/retail`) on macOS. Windows Home has no `New-NetNat` (WinNAT comes with Hyper-V), so a Home PC can be neither a router nor an exit node; Settings says so and the switch stays off.
 
 ## Lost devices and old devices
 

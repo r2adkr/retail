@@ -71,12 +71,58 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         .output()
         .with_context(|| format!("running {program} (is it installed?)"))?;
     if !out.status.success() {
-        bail!(
-            "{program} {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // netsh says why on stdout
+        let said = if out.stderr.iter().all(u8::is_ascii_whitespace) { &out.stdout } else { &out.stderr };
+        // The first line says what failed; PowerShell adds where in the script
+        let text = decode(said);
+        let why = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        // Not a script's text
+        let what = if program == "powershell" { program.to_string() } else { format!("{program} {}", args.join(" ")) };
+        bail!("{what}: {why}");
     }
+    Ok(())
+}
+
+/// Windows tools write in the console's code page (CP949 on Korean Windows)
+fn decode(bytes: &[u8]) -> String {
+    #[cfg(target_os = "windows")]
+    if std::str::from_utf8(bytes).is_err() {
+        return windows::from_oem(bytes);
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Forwarding for the mesh needs a NAT the system lacks
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+pub struct NoNat;
+
+#[cfg(target_os = "windows")]
+impl std::fmt::Display for NoNat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this edition of Windows has no built-in NAT (WinNAT), so this device cannot forward traffic for the mesh")
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl std::error::Error for NoNat {}
+
+/// Whether this device can be an exit node (`exit`) or route networks for
+/// the mesh, checked before anything changes
+pub fn check_gateway(exit: bool) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = exit;
+        if !windows::has_nat() {
+            return Err(NoNat.into());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if exit {
+        bail!("offering an exit node is supported on Linux and Windows only");
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let _ = exit;
     Ok(())
 }
 
@@ -340,6 +386,8 @@ impl Gateway {
     /// while this is an exit node.
     #[cfg(target_os = "windows")]
     fn install(&mut self) -> Result<()> {
+        // Before forwarding is turned on, so a missing NAT changes nothing
+        check_gateway(self.exit)?;
         let script = format!(
             "$ErrorActionPreference='Stop'; \
              Set-NetIPInterface -InterfaceIndex {idx} -Forwarding Enabled; \
@@ -351,10 +399,12 @@ impl Gateway {
 
     #[cfg(target_os = "windows")]
     fn cleanup(&mut self) {
-        run_quiet(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", "Remove-NetNat -Name retail-exit -Confirm:$false"],
+        let script = format!(
+            "Remove-NetNat -Name retail-exit -Confirm:$false -ErrorAction SilentlyContinue; \
+             Set-NetIPInterface -InterfaceIndex {idx} -Forwarding Disabled -ErrorAction SilentlyContinue",
+            idx = self.tun_index
         );
+        run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]);
     }
 
     /// IP forwarding, and pf NAT in an anchor the system's pf.conf already
@@ -362,9 +412,7 @@ impl Gateway {
     /// that reaches it
     #[cfg(target_os = "macos")]
     fn install(&mut self) -> Result<()> {
-        if self.exit {
-            bail!("offering an exit node is supported on Linux and Windows only");
-        }
+        check_gateway(self.exit)?;
         let forwarding = Command::new("sysctl").args(["-n", "net.inet.ip.forwarding"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         if forwarding != "1" {
             run("sysctl", &["-w", "net.inet.ip.forwarding=1"])?;
@@ -558,6 +606,32 @@ mod windows {
         Ok(index)
     }
 
+    /// WinNAT, which comes with Hyper-V: Home editions have none. Asked once;
+    /// only a clear "no" counts.
+    pub fn has_nat() -> bool {
+        static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HAS.get_or_init(|| {
+            let script = "if (-not (Get-CimClass -Namespace root/StandardCimv2 -ClassName MSFT_NetNat -ErrorAction SilentlyContinue)) { exit 3 }";
+            let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).output();
+            !out.is_ok_and(|o| o.status.code() == Some(3))
+        })
+    }
+
+    pub fn from_oem(bytes: &[u8]) -> String {
+        use windows_sys::Win32::Globalization::{CP_OEMCP, MultiByteToWideChar};
+        let Ok(len) = i32::try_from(bytes.len()) else { return String::from_utf8_lossy(bytes).into_owned() };
+        // SAFETY: the input slice and output buffer are valid for the lengths given
+        unsafe {
+            let n = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
+            if n <= 0 {
+                return String::from_utf8_lossy(bytes).into_owned();
+            }
+            let mut wide = vec![0u16; n as usize];
+            let n = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n);
+            String::from_utf16_lossy(&wide[..n.max(0) as usize])
+        }
+    }
+
     /// Index 0 unpins
     pub fn unicast_if(sock: &socket2::SockRef<'_>, index: u32) -> io::Result<()> {
         let raw = sock.as_raw_socket() as SOCKET;
@@ -570,6 +644,18 @@ mod windows {
             setsockopt(raw, IPPROTO_IPV6, IPV6_UNICAST_IF, (&index as *const u32).cast(), 4);
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    #[test]
+    fn tool_errors_are_one_readable_line() {
+        let script = "$ErrorActionPreference='Stop'; Get-Item C:\\retail-no-such-file";
+        let e = super::run("powershell", &["-NoProfile", "-NonInteractive", "-Command", script]).unwrap_err();
+        let msg = format!("{e:#}");
+        // Neither the script, PowerShell's trace, nor a misread code page
+        assert!(!msg.contains('\n') && !msg.contains("$ErrorActionPreference") && !msg.contains('\u{FFFD}'), "{msg}");
     }
 }
 
