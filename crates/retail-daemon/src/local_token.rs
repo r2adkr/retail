@@ -65,16 +65,21 @@ fn restrict(dir: &Path, file: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     // Root plus the control group when it exists, otherwise root only
     let group = if cfg!(target_os = "macos") { "admin" } else { "retail" };
-    let gid = group_id(group);
+    let mut gid = group_id(group);
     for (p, mode) in [(dir, 0o750), (file, 0o640)] {
         if !p.exists() {
             continue;
         }
+        // Not allowed to give it to the group (a unit without CAP_CHOWN):
+        // root only, and the group's members sign in with the token instead
+        if let Some(g) = gid
+            && let Err(e) = std::os::unix::fs::chown(p, None, Some(g))
+        {
+            tracing::warn!("could not give {} to the {group} group: {e}", p.display());
+            gid = None;
+        }
         let mode = if gid.is_some() { mode } else { mode & 0o700 };
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))?;
-        if let Some(gid) = gid {
-            std::os::unix::fs::chown(p, None, Some(gid))?;
-        }
     }
     Ok(())
 }

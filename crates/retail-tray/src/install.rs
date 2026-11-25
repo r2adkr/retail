@@ -310,7 +310,9 @@ fn after_install(opts: &Opts, installed: bool) -> bool {
     // On an update a tray app already running restarts itself into the new
     // one when it sees the newer daemon; starting another would make two
     if desktop && !installed {
-        let _ = std::process::Command::new(&tray).spawn();
+        // Not on the installer's output, which a script may be reading to its end
+        use std::process::Stdio;
+        let _ = std::process::Command::new(&tray).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
     desktop
 }
