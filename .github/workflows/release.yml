@@ -101,6 +101,7 @@ jobs:
   installers:
     needs: build
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -145,6 +146,7 @@ jobs:
   macos:
     needs: build
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -195,6 +197,7 @@ jobs:
   windows:
     needs: installers
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -204,22 +207,27 @@ jobs:
         shell: pwsh
         run: |
           $inst = "out\retail-windows-x86_64.exe"
-          # A windowed program: wait for it and take its output from files
-          $p = Start-Process $inst -ArgumentList '--package-info' -Wait -PassThru -RedirectStandardOutput info.txt
-          Get-Content info.txt
+          # A windowed program: run it, take its output from a file. Only the
+          # installer is waited for (Start-Process -Wait would also wait for
+          # the daemon it leaves running), for at most two minutes.
+          function Run-Installer($out, [string[]]$params) {
+            $p = Start-Process $inst -ArgumentList $params -PassThru -RedirectStandardOutput $out
+            if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; throw "installer $params did not finish" }
+            Get-Content $out | Write-Host
+            return $p.ExitCode
+          }
+          $null = Run-Installer info.txt @('--package-info')
           $dir = "$env:RUNNER_TEMP\r"
-          $p = Start-Process $inst -ArgumentList '--yes','--prefix',$dir,'--no-service','--no-autostart' -Wait -PassThru -RedirectStandardOutput install.txt
-          Get-Content install.txt
-          if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
+          $code = Run-Installer install.txt @('--yes','--prefix',$dir,'--no-service','--no-autostart')
+          if ($code -ne 0) { throw "installer exit $code" }
           Get-ChildItem "$dir\bin"
           & "$dir\bin\retail.exe" status
           if ($LASTEXITCODE -ne 0) { throw "retail status failed" }
           & "$dir\bin\retail.exe" set --auto-update false
           if ($LASTEXITCODE -ne 0) { throw "retail set failed" }
           # Again over the running programs, as an update by hand does
-          $p = Start-Process $inst -ArgumentList '--yes','--prefix',$dir,'--no-service','--no-autostart' -Wait -PassThru -RedirectStandardOutput again.txt
-          Get-Content again.txt
-          if ($p.ExitCode -ne 0) { throw "installing over the running programs: exit $($p.ExitCode)" }
+          $code = Run-Installer again.txt @('--yes','--prefix',$dir,'--no-service','--no-autostart')
+          if ($code -ne 0) { throw "installing over the running programs: exit $code" }
           Get-ChildItem "$dir\bin"
           Stop-Process -Name retaild -Force
 
