@@ -28,7 +28,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # The small-machine builds the release ships: 64-bit ARM natively, 32-bit ARM cross-compiled
+  # The small-machine builds the release ships: 64-bit ARM natively, 32-bit ARM
+  # cross-compiled; all three programs, since the installer is the tray app
   arm:
     strategy:
       fail-fast: false
@@ -59,7 +60,7 @@ jobs:
         shell: bash
         run: |
           if [ -n "${{ matrix.target }}" ]; then
-            cargo build --locked -p retail-daemon -p retail-cli --target ${{ matrix.target }}
+            cargo build --locked -p retail-daemon -p retail-cli -p retail-tray --target ${{ matrix.target }}
           else
             cargo test --workspace --locked
           fi

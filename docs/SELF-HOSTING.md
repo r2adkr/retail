@@ -37,7 +37,7 @@ Other devices join with `retail up --invite retail1.…`.
   - So that installers can be made again later, a named invite's code is kept in the server's data folder (readable by administrators only). One-time invites are kept as hashes only.
 - **Installers**: every multi-device invite has a **Download ▾** menu with Windows, Linux and macOS. Hand the one file to the other person, who only has to run it. It asks for administrator rights once, installs the programs, registers the daemon to start at boot (Windows Task Scheduler, Linux systemd, macOS launchd), joins with the invite and opens the tray app.
   - The server makes the file on the spot by appending the invite to a prebuilt client. Nothing is compiled.
-  - For the server's own system it uses the programs installed on the server (on Windows `wintun.dll` must sit in the same folder). For other systems the server downloads the official client of its own version from [GitHub Releases](https://github.com/r2adkr/retail/releases) the first time, checks it against `SHA256SUMS` and keeps it (`RETAIL_RELEASES` changes the address; an empty value turns this off). A server that cannot reach GitHub can take the files through **upload files…** in the download menu: `retail-tray`, `retaild` and `retail` for that system (on Windows the `.exe` files and `wintun.dll`). The server checks that each is an executable for that system (PE, ELF, Mach-O). To place them by hand, put the same files in `clients/<os>-<arch>/` under retaild's state folder (`/var/lib/retail/clients/windows-x86_64/` on Linux, `C:\ProgramData\retail\clients\linux-x86_64\` on Windows, and so on).
+  - For the server's own system it uses the programs installed on the server (on Windows `wintun.dll` must sit in the same folder). For other systems the server downloads that system's official installer of its own version from [GitHub Releases](https://github.com/r2adkr/retail/releases) the first time, checks it against `SHA256SUMS` and keeps the programs from it (`RETAIL_RELEASES` changes the address; an empty value turns this off). A server that cannot reach GitHub can take the files through **upload files…** in the download menu: `retail-tray`, `retaild` and `retail` for that system (on Windows the `.exe` files and `wintun.dll`). The server checks that each is an executable for that system (PE, ELF, Mach-O). To place them by hand, put the same files in `clients/<os>-<arch>/` under retaild's state folder (`/var/lib/retail/clients/windows-x86_64/` on Linux, `C:\ProgramData\retail\clients\linux-x86_64\` on Windows, and so on).
   - An installer carries a reusable invite, so do not pass it around freely. If one leaks, use ⋯ → **New code** on that invite.
   - retail is not code-signed yet, so Windows SmartScreen or macOS Gatekeeper may warn.
   - On a device that already belongs to another network, the installer asks whether to switch. On yes the device leaves its current network cleanly, keeps it in its server list (Settings → **Change server** switches back) and joins this one. To remove retail: run the installed `retail-tray --uninstall` (as administrator).
@@ -52,17 +52,17 @@ When the server starts, retail **opens ports on the router automatically with PC
 
 ## On a VPS or in Docker
 
-On a server without a screen, everything works from the command line. Download `retaild` and `retail` for the machine (`linux-x86_64`, `linux-aarch64`, or `linux-arm` for 32-bit ARM) from the [releases](https://github.com/r2adkr/retail/releases), then:
+On a server without a screen, everything works from the command line. Download the installer for the machine (`retail-linux-x86_64`, `retail-linux-aarch64`, or `retail-linux-arm` for 32-bit ARM) from the [releases](https://github.com/r2adkr/retail/releases), then:
 
 ```sh
-chmod +x retaild-* retail-* && mv retaild-* retaild && mv retail-* retail
-sudo ./retaild install --server             # installs both, starts at boot, starts the server, prints an invite
+chmod +x retail-linux-* && sudo ./retail-linux-* --yes   # installs retail, starts the daemon at boot
+sudo retaild install --server               # starts a server here, prints an invite
 retail server invite --name family          # more invites; retail server status, acl, tag, helper-device …
 retail tui                                  # the same in a full-screen terminal view
 sudo retaild uninstall                      # removes the service and programs (the server data stays)
 ```
 
-`retaild install --server` copies the programs to `/usr/local/bin` (or `--dir`), registers the daemon with systemd (launchd on macOS, Task Scheduler on Windows), starts a server that does not join its own network (so it needs no TUN device), and prints the first invite. `--port` and `--domain` set the server's port and a name for invites. Without `--server` it only installs the daemon, for a device that joins a network.
+The installer puts `retaild`, `retail` and the tray app in `/usr/local/bin` and registers the daemon with systemd (launchd on macOS, Task Scheduler on Windows); without a desktop it starts no tray app. `--invite <code>` joins a network right away. `retaild install --server` then starts a server that does not join its own network (so it needs no TUN device) and prints the first invite; `--port` and `--domain` set the server's port and a name for invites.
 
 On a machine with less than 1 GB of memory the daemon picks its smallest buffers by itself (about 9 MB); `retail set --memory-limit` overrides it. The web admin page is on the server's loopback: `ssh -L 41180:127.0.0.1:41180 server`, then open the link `retail server web --print` prints there.
 
@@ -204,7 +204,7 @@ In the web admin page: **Restore from a backup…** while the server is off (the
 
 ## Updates
 
-The daemon looks for a new official release every 6 hours (`retail update --check` or **Check now** in Settings asks at once). The tray tells you once per release, and **Update now** (or `retail update`) installs it: the files for this system are downloaded, checked against the release's `SHA256SUMS`, put in place of the running programs, and the daemon restarts through its service manager; the tray app restarts itself. With **Install updates automatically** (`retail set --auto-update`) this happens on its own.
+The daemon looks for a new official release every 6 hours (`retail update --check` or **Check now** in Settings asks at once). The tray tells you once per release, and **Update now** (or `retail update`) installs it: this system's installer is downloaded and checked against the release's `SHA256SUMS`, and the programs from it are put in place of the running ones, and the daemon restarts through its service manager; the tray app restarts itself. With **Install updates automatically** (`retail set --auto-update`) this happens on its own.
 
 - On Linux the systemd unit lets the daemon write only its own program folder (`ReadWritePaths=`), to replace the programs.
 - `RETAIL_RELEASES` points at another release mirror (an empty value turns checks off).

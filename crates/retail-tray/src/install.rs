@@ -1,16 +1,21 @@
 //! Self-install for client packages (`retail_proto::package`). Run as a
-//! package, the tray app asks to join, raises itself to administrator once,
-//! unpacks the daemon and CLI next to a plain copy of itself, has the daemon
-//! start at boot (Windows Task Scheduler, systemd, launchd), joins with the
-//! invite inside, then registers and starts the tray app for the user.
+//! package, the tray app asks to install, raises itself to administrator
+//! once, unpacks the daemon and CLI next to a plain copy of itself, has the
+//! daemon start at boot (Windows Task Scheduler, systemd, launchd), joins with
+//! the invite inside if there is one, then registers and starts the tray app
+//! for the user.
 //!
-//! On a device already in another network it asks whether to switch; the
-//! daemon then leaves that network (keeping it among the saved servers) and
-//! joins this one.
+//! The official installer of a release is such a package without an invite:
+//! it installs (or updates) retail, and the tray app then offers to join.
+//! A package a server made joins its network; on a device already in another
+//! network it asks whether to switch, and the daemon then leaves that network
+//! (keeping it among the saved servers) and joins this one.
 //!
 //! Flags: `--install` (the raised step), `--switch` (it may leave another
-//! network), `--uninstall`, `--package-info`, and for tests `--prefix DIR` (install under DIR), `--no-service` (start
-//! the daemon directly instead of registering it), `--no-autostart`.
+//! network), `--invite CODE` (join with this code), `--yes` (ask nothing),
+//! `--uninstall`, `--package-info`, and for tests `--prefix DIR` (install
+//! under DIR), `--no-service` (start the daemon directly instead of
+//! registering it), `--no-autostart`.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -31,25 +36,34 @@ struct Opts {
     autostart: bool,
     /// The user agreed to leave the network this device is in
     switch: bool,
+    /// Given on the command line, in place of the package's
+    invite: Option<String>,
+    yes: bool,
 }
 
 impl Opts {
     fn parse(args: &[String]) -> Self {
-        let prefix = args.iter().position(|a| a == "--prefix").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+        let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
         Opts {
-            prefix,
+            prefix: value("--prefix").map(PathBuf::from),
             service: !args.iter().any(|a| a == "--no-service"),
             autostart: !args.iter().any(|a| a == "--no-autostart"),
             switch: args.iter().any(|a| a == "--switch"),
+            invite: value("--invite").filter(|i| !i.trim().is_empty()),
+            yes: args.iter().any(|a| a == "--yes") || std::env::var_os("RETAIL_INSTALL_YES").is_some(),
         }
     }
 
-    /// Hands the same test flags to the raised step
+    /// Hands the same flags to the raised step
     fn forward(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(p) = &self.prefix {
             out.push("--prefix".into());
             out.push(p.display().to_string());
+        }
+        if let Some(i) = &self.invite {
+            out.push("--invite".into());
+            out.push(i.clone());
         }
         if !self.service {
             out.push("--no-service".into());
@@ -102,9 +116,18 @@ pub fn run(args: &[String]) -> Option<i32> {
     }
     let manifest = manifest?;
     crate::i18n::set(crate::config::Config::load().language);
-    let Ok(invite) = retail_proto::invite::Invite::decode(&manifest.invite) else {
-        message("retail", tr("This installer is damaged: its invite code is unreadable."));
-        return Some(2);
+    QUIET.store(opts.yes, std::sync::atomic::Ordering::Relaxed);
+    // The command line's code, the package's, or none (the official installer)
+    if opts.invite.is_none() && !manifest.invite.is_empty() {
+        opts.invite = Some(manifest.invite.clone());
+    }
+    let invite = match opts.invite.as_deref().map(retail_proto::invite::Invite::decode) {
+        None => None,
+        Some(Ok(i)) => Some(i),
+        Some(Err(_)) => {
+            tell(tr("This installer is damaged: its invite code is unreadable."));
+            return Some(2);
+        }
     };
     if args.iter().any(|a| a == "--install") {
         return Some(report(privileged(&me, &manifest, &opts)));
@@ -114,24 +137,27 @@ pub fn run(args: &[String]) -> Option<i32> {
     } else {
         trf("the retail network \"{name}\"", &[("name", &manifest.network)])
     };
+    let status = crate::api::status_blocking(api_addr()).ok();
+    let installed = status.is_some() || bin_dir(&opts).join(exe("retaild")).is_file();
     // retail already here and in another network: switch rather than install
-    let target = format!("https://{}", invite.addrs[0]);
-    let current = crate::api::status_blocking(api_addr())
-        .ok()
-        .filter(|s| s.state != BackendState::NeedsLogin)
-        .and_then(|s| s.server)
-        .filter(|s| *s != target);
-    let (question, yes) = match &current {
-        Some(cur) => (
+    let current = invite.as_ref().and_then(|invite| {
+        let target = format!("https://{}", invite.addrs[0]);
+        status.as_ref().filter(|s| s.state != BackendState::NeedsLogin).and_then(|s| s.server.clone()).filter(|s| *s != target)
+    });
+    let version = env!("CARGO_PKG_VERSION");
+    let (question, yes) = match (&invite, &current) {
+        (Some(_), Some(cur)) => (
             trf(
                 "This computer is connected to {current}. Leave it and switch to {network}? You can switch back in retail's settings.",
                 &[("current", &crate::settings::server_label(cur)), ("network", &network)],
             ),
             tr("Switch"),
         ),
-        None => (trf("Install retail on this computer and join {network}?", &[("network", &network)]), tr("Install")),
+        (Some(_), None) => (trf("Install retail on this computer and join {network}?", &[("network", &network)]), tr("Install")),
+        (None, _) if installed => (trf("Update retail on this computer to version {version}?", &[("version", &version)]), tr("Update")),
+        (None, _) => (trf("Install retail {version} on this computer?", &[("version", &version)]), tr("Install")),
     };
-    if !confirm("retail", &question, yes) {
+    if !opts.yes && !confirm("retail", &question, yes) {
         return Some(1);
     }
     opts.switch = current.is_some();
@@ -147,28 +173,52 @@ pub fn run(args: &[String]) -> Option<i32> {
         return Some(code);
     }
     let tray = bin_dir(&opts).join(exe("retail-tray"));
-    if opts.autostart
-        && let Err(e) = autostart(&tray)
-    {
+    // A server without a desktop gets no tray app
+    let desktop = opts.autostart && has_desktop();
+    if desktop && let Err(e) = autostart(&tray) {
         eprintln!("retail: could not start the tray app at sign-in: {e}");
     }
-    let done = if opts.switch {
-        trf("This computer switched to {network}.", &[("network", &network)])
-    } else {
-        trf("retail is installed and this computer joined {network}.", &[("network", &network)])
+    let done = match (&invite, opts.switch) {
+        (Some(_), true) => trf("This computer switched to {network}.", &[("network", &network)]),
+        (Some(_), false) => trf("retail is installed and this computer joined {network}.", &[("network", &network)]),
+        (None, _) if installed => trf("retail is updated to version {version}.", &[("version", &version)]),
+        (None, _) if desktop => tr("retail is installed. Join a network from the retail icon.").to_string(),
+        (None, _) => tr("retail is installed. Join a network with `retail up --invite <code>`, or host one with `retail server start`.").to_string(),
     };
-    message("retail", &done);
-    if opts.autostart {
+    tell(&done);
+    if desktop {
+        // An older tray app still running restarts itself when it sees the new daemon
         let _ = std::process::Command::new(&tray).spawn();
     }
     Some(0)
+}
+
+/// Whether a desktop session can show the tray app (Linux may be a server)
+fn has_desktop() -> bool {
+    if cfg!(target_os = "linux") {
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    } else {
+        true
+    }
+}
+
+/// With `--yes` nothing is shown in a window, which would wait for a click
+/// (scripted installs, CI); messages go to the terminal
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn tell(text: &str) {
+    if QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+        println!("{text}");
+    } else {
+        message("retail", text);
+    }
 }
 
 fn report(r: Result<(), String>) -> i32 {
     match r {
         Ok(()) => 0,
         Err(e) => {
-            message("retail", &e);
+            tell(&e);
             3
         }
     }
@@ -202,7 +252,10 @@ fn privileged(me: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
         cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         cmd.spawn().map_err(|e| format!("starting retaild: {e}"))?;
     }
-    join(&m.invite, o.switch)
+    match &o.invite {
+        Some(invite) => join(invite, o.switch),
+        None => wait_for_daemon().map(|_| ()),
+    }
 }
 
 /// Writes `len` bytes from `offset` to `dest`, replacing it atomically
@@ -222,9 +275,10 @@ fn copy_range(src: &mut File, offset: u64, len: u64, dest: &Path) -> Result<(), 
     std::fs::rename(&tmp, dest).map_err(err)
 }
 
-/// Waits for the daemon, then joins. A device in another network leaves it
-/// only if the user agreed (`switch`); the daemon keeps it as a saved server.
-fn join(invite: &str, switch: bool) -> Result<(), String> {
+/// Waits for the daemon to answer. What answers must be the daemon just
+/// started, not a program that took its port first: it would get the invite,
+/// or fake a join.
+fn wait_for_daemon() -> Result<retail_proto::api::StatusResponse, String> {
     let addr = api_addr();
     let start = Instant::now();
     let status = loop {
@@ -234,6 +288,15 @@ fn join(invite: &str, switch: bool) -> Result<(), String> {
             Err(e) => return Err(trf("retaild did not start: {error}", &[("error", &e)])),
         }
     };
+    retail_proto::local::check_listener(addr)?;
+    Ok(status)
+}
+
+/// Waits for the daemon, then joins. A device in another network leaves it
+/// only if the user agreed (`switch`); the daemon keeps it as a saved server.
+fn join(invite: &str, switch: bool) -> Result<(), String> {
+    let addr = api_addr();
+    let status = wait_for_daemon()?;
     let code = retail_proto::invite::Invite::decode(invite).map_err(|e| e.to_string())?;
     let target = format!("https://{}", code.addrs[0]);
     match status.server {
@@ -447,10 +510,12 @@ fn confirm(title: &str, text: &str, yes: &str) -> bool {
     std::process::Command::new("osascript").args(["-e", &script]).status().is_ok_and(|s| s.success())
 }
 
-/// A terminal when there is one, otherwise zenity if installed
+/// A dialog (zenity) on a desktop, otherwise the terminal
 #[cfg(target_os = "linux")]
 fn message(title: &str, text: &str) {
-    if std::process::Command::new("zenity").args(["--info", "--title", title, "--text", text]).status().is_err() {
+    let shown = has_desktop()
+        && std::process::Command::new("zenity").args(["--info", "--title", title, "--text", text]).status().is_ok_and(|s| s.success());
+    if !shown {
         println!("{text}");
     }
 }
@@ -460,7 +525,11 @@ fn confirm(title: &str, text: &str, yes: &str) -> bool {
     if std::env::var_os("RETAIL_INSTALL_YES").is_some() {
         return true;
     }
-    if let Ok(s) = std::process::Command::new("zenity").args(["--question", "--title", title, "--text", text, "--ok-label", yes, "--cancel-label", tr("Cancel")]).status() {
+    // zenity exits 1 for "no" and 5 or more when it could not ask
+    if has_desktop()
+        && let Ok(s) = std::process::Command::new("zenity").args(["--question", "--title", title, "--text", text, "--ok-label", yes, "--cancel-label", tr("Cancel")]).status()
+        && matches!(s.code(), Some(0 | 1))
+    {
         return s.success();
     }
     print!("{text} [y/N] ");

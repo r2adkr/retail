@@ -812,16 +812,19 @@ install_test() {
 
 # Self-update from a release mirror over HTTPS (own certificate, trusted
 # through RETAIL_CA_FILE): retaild runs from a copy of the programs, finds
-# 9.9.9, fetches and checks it, puts it in place and exits for a restart
+# 9.9.9, fetches its installer, checks it, puts the programs from it in place
+# and exits for a restart
 update_test() {
-    local bin="$WORK/bin" rel="$WORK/rel" api=127.0.0.1:41195 ok=1
-    mkdir -p "$bin" "$rel/latest" "$rel/v9.9.9"
+    local bin="$WORK/bin" rel="$WORK/rel" new="$WORK/new" api=127.0.0.1:41195 ok=1
+    mkdir -p "$bin" "$new" "$rel/latest" "$rel/v9.9.9"
     for f in retaild retail retail-tray; do
         cp "$BIN/$f" "$bin/$f"
-        cp "$BIN/$f" "$rel/v9.9.9/$f-linux-x86_64"
+        cp "$BIN/$f" "$new/$f"
     done
     # So the replaced files can be told from the old ones
-    printf 'new' >>"$rel/v9.9.9/retail-linux-x86_64"
+    printf 'new' >>"$new/retail"
+    # The release's one installer for this system, made as the release workflow makes it
+    python3 "$SCRIPTS/bundle.py" "$rel/v9.9.9/retail-linux-x86_64" "$new/retail-tray" retaild="$new/retaild" retail="$new/retail"
     echo 9.9.9 >"$rel/latest/VERSION"
     (cd "$rel/v9.9.9" && sha256sum -- * >SHA256SUMS)
     # A private CA (trusted through RETAIL_CA_FILE) and the mirror's certificate from it
@@ -860,11 +863,11 @@ s.serve_forever()' "$rel" "$WORK/rel.crt" "$WORK/rel.key" >"$WORK/mirror.log" 2>
     done
     echo "  retaild exited with $code to be restarted"
     [ "$code" = 75 ] || { ok=0; tail -5 "$WORK/update.log"; }
-    cmp -s "$bin/retail" "$rel/v9.9.9/retail-linux-x86_64" && echo "  the programs were replaced" || { echo "  retail was not replaced"; ok=0; }
+    cmp -s "$bin/retail" "$new/retail" && echo "  the programs were replaced from the installer" || { echo "  retail was not replaced"; ok=0; }
     ls "$bin" | grep -qE '\.(new|old)$' && { echo "  leftovers: $(ls "$bin")"; ok=0; }
 
-    # A release whose file does not match its checksum is refused
-    printf 'tampered' >>"$rel/v9.9.9/retaild-linux-x86_64"
+    # A release whose installer does not match its checksum is refused
+    printf 'tampered' >>"$rel/v9.9.9/retail-linux-x86_64"
     cp "$BIN/retaild" "$bin/retaild.copy" && mv "$bin/retaild.copy" "$bin/retaild"
     RETAIL_RELEASES=https://127.0.0.1:9443 RETAIL_CA_FILE="$WORK/ca.crt" RETAIL_API_TOKEN_FILE="$WORK/u.token" RETAIL_NO_PORTMAP=1 \
         "$bin/retaild" --state-dir "$WORK/ustate" --api "$api" --port 41695 --web-port 0 >>"$WORK/update.log" 2>&1 &

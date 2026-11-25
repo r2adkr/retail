@@ -26,23 +26,28 @@ A self-hosted mesh VPN. Your devices reach each other directly over WireGuard, f
 
 ## Install
 
-Download the programs for your system from [Releases](https://github.com/r2adkr/retail/releases).
+Download the installer for your system from [Releases](https://github.com/r2adkr/retail/releases). It is one file that installs everything: the daemon `retaild` (runs as administrator/root, and is the server when the device hosts), the tray / menu bar app, and the `retail` CLI with `retail tui`.
 
-| Program | What it is |
+| System | Installer |
 |---|---|
-| `retaild` | The daemon on each device (runs as administrator/root); also the server when the device hosts |
-| `retail-tray` | Tray / menu bar app |
-| `retail` | CLI and `retail tui` |
+| Windows | `retail-windows-x86_64.exe` |
+| macOS (Apple silicon and Intel) | `retail-macos.zip`: open it, then open `retail.app` |
+| Linux | `retail-linux-x86_64` |
+| Linux on 64-bit ARM (Raspberry Pi 3/4/5) | `retail-linux-aarch64` |
+| Linux on 32-bit ARM (Raspberry Pi OS 32-bit, routers) | `retail-linux-arm` |
 
-**Desktop**: the easiest way is an installer from your network's server. On the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page). Running it installs retail and joins the network.
+Run it and confirm; it asks for administrator rights once. On Linux: `chmod +x retail-linux-* && sudo ./retail-linux-*`. The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time. Running a newer installer over an installed retail updates it, though installed devices also update themselves.
+
+**Joining**: after installing, paste an invite code in the tray app. Or use an installer from your network's server, which also joins: on the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page).
 
 **Server without a screen** (Linux VPS, Raspberry Pi):
 
 ```sh
-sudo ./retaild install --server
+chmod +x retail-linux-x86_64 && sudo ./retail-linux-x86_64 --yes
+sudo retaild install --server
 ```
 
-This installs `retaild` and `retail`, starts them at boot, starts the server and prints the first invite. Or run the server image:
+The first command installs retail and starts it at boot; the second starts a server and prints the first invite. Or run the server image:
 
 ```sh
 docker run -d -p 443:443 -p 80:80 -p 3478:3478/udp -v retail-data:/data ghcr.io/r2adkr/retail

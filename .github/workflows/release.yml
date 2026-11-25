@@ -1,7 +1,9 @@
-# Official clients, built when a version tag (v0.1.0, ...) is pushed. Servers
-# fetch these by name to make one-click client packages, so asset names are
-# `<program>-<os>-<arch>[.exe]`, plus `wintun-windows-x86_64.dll`,
-# `VERSION` and `SHA256SUMS`. Daemons update themselves from the same files.
+# Official releases, built when a version tag (v0.1.0, ...) is pushed. A
+# release holds one installer per system, with every program inside:
+#   retail-windows-x86_64.exe, retail-macos.zip (Apple silicon and Intel),
+#   retail-linux-x86_64, retail-linux-aarch64, retail-linux-arm
+# plus `VERSION` and `SHA256SUMS`. Daemons update themselves from these, and
+# servers take other systems' programs out of them for their client packages.
 name: release
 
 on:
@@ -9,7 +11,7 @@ on:
     tags: ['v*']
     branches: [release-rehearsal]
   # A rehearsal (a push to the release-rehearsal branch, or run by hand):
-  # builds everything and the image, publishes nothing
+  # builds the installers and the image and tries them, publishes nothing
   workflow_dispatch:
 
 # Read-only by default; only the publishing job can write releases. Actions are
@@ -18,6 +20,7 @@ permissions:
   contents: read
 
 jobs:
+  # The programs of each system, kept as artifacts of this run only
   build:
     strategy:
       fail-fast: false
@@ -31,12 +34,10 @@ jobs:
           - os: ubuntu-22.04-arm
             variant: linux-aarch64
             ext: ""
-          # 32-bit ARM (Raspberry Pi Zero 2 / 2 / 3 on a 32-bit OS, routers):
-          # daemon and CLI only, cross-compiled
+          # 32-bit ARM (Raspberry Pi Zero 2 / 2 / 3 on a 32-bit OS, routers), cross-compiled
           - os: ubuntu-22.04
             variant: linux-arm
             target: armv7-unknown-linux-gnueabihf
-            programs: retaild retail
             ext: ""
           - os: windows-latest
             variant: windows-x86_64
@@ -72,24 +73,14 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          programs="${{ matrix.programs || 'retail-tray retaild retail' }}"
-          # No `case` inside $(...): macOS's bash 3.2 cannot parse it
-          packages=""
-          for b in $programs; do
-            case $b in
-              retaild) packages="$packages -p retail-daemon" ;;
-              retail) packages="$packages -p retail-cli" ;;
-              retail-tray) packages="$packages -p retail-tray" ;;
-            esac
-          done
           target="${{ matrix.target }}"
-          cargo build --release --locked $packages ${target:+--target $target}
+          cargo build --release --locked -p retail-tray -p retail-daemon -p retail-cli ${target:+--target $target}
       - name: Collect
         shell: bash
         run: |
           mkdir dist
           out=target/${{ matrix.target || '' }}/release
-          for b in ${{ matrix.programs || 'retail-tray retaild retail' }}; do
+          for b in retail-tray retaild retail; do
             cp "$out/$b${{ matrix.ext }}" "dist/$b-${{ matrix.variant }}${{ matrix.ext }}"
           done
       - name: wintun.dll
@@ -103,8 +94,106 @@ jobs:
           cp wintun/bin/amd64/wintun.dll dist/wintun-windows-x86_64.dll
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: ${{ matrix.variant }}
+          name: programs-${{ matrix.variant }}
           path: dist/*
+
+  # Windows and Linux installers: the programs put together (scripts/bundle.py)
+  installers:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: dist
+          pattern: programs-*
+          merge-multiple: true
+      - name: Bundle
+        run: |
+          mkdir out
+          for v in linux-x86_64 linux-aarch64 linux-arm; do
+            python3 scripts/bundle.py "out/retail-$v" "dist/retail-tray-$v" "retaild=dist/retaild-$v" "retail=dist/retail-$v"
+          done
+          v=windows-x86_64
+          python3 scripts/bundle.py "out/retail-$v.exe" "dist/retail-tray-$v.exe" \
+            "retaild.exe=dist/retaild-$v.exe" "retail.exe=dist/retail-$v.exe" "wintun.dll=dist/wintun-$v.dll"
+          ls -l out
+      # The installer on this machine: it unpacks, starts the daemon, and the CLI it installed answers
+      - name: Try the Linux installer
+        run: |
+          ./out/retail-linux-x86_64 --package-info
+          sudo ./out/retail-linux-x86_64 --yes --prefix "$RUNNER_TEMP/r" --no-service --no-autostart
+          ls -l "$RUNNER_TEMP/r/bin"
+          sudo "$RUNNER_TEMP/r/bin/retail" status
+          sudo pkill -f "$RUNNER_TEMP/r/bin/retaild"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: installers-other
+          path: out/*
+
+  # One macOS installer for both processors (universal programs), as
+  # retail.app in a zip so it stays runnable after a download
+  macos:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: dist
+          pattern: programs-macos-*
+          merge-multiple: true
+      - name: Universal programs and the installer
+        run: |
+          mkdir uni out
+          for b in retail-tray retaild retail; do
+            lipo -create "dist/$b-macos-aarch64" "dist/$b-macos-x86_64" -output "uni/$b"
+            lipo -info "uni/$b"
+          done
+          python3 scripts/bundle.py uni/installer uni/retail-tray retaild=uni/retaild retail=uni/retail
+          python3 scripts/bundle.py --app out/retail-macos.zip uni/installer
+          ls -l out
+      - name: Try the macOS installer
+        run: |
+          mkdir try && cd try && ditto -x -k ../out/retail-macos.zip .
+          ./retail.app/Contents/MacOS/retail --package-info
+          sudo ./retail.app/Contents/MacOS/retail --yes --prefix "$RUNNER_TEMP/r" --no-service --no-autostart
+          ls -l "$RUNNER_TEMP/r/bin"
+          sudo "$RUNNER_TEMP/r/bin/retail" status
+          sudo pkill -f "$RUNNER_TEMP/r/bin/retaild"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: installers-macos
+          path: out/*
+
+  # The Windows installer on a Windows machine
+  windows:
+    needs: installers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: installers-other
+          path: out
+      - name: Try the Windows installer
+        shell: pwsh
+        run: |
+          $inst = "out\retail-windows-x86_64.exe"
+          # A windowed program: wait for it and take its output from files
+          $p = Start-Process $inst -ArgumentList '--package-info' -Wait -PassThru -RedirectStandardOutput info.txt
+          Get-Content info.txt
+          $dir = "$env:RUNNER_TEMP\r"
+          $p = Start-Process $inst -ArgumentList '--yes','--prefix',$dir,'--no-service','--no-autostart' -Wait -PassThru -RedirectStandardOutput install.txt
+          Get-Content install.txt
+          if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
+          Get-ChildItem "$dir\bin"
+          & "$dir\bin\retail.exe" status
+          if ($LASTEXITCODE -ne 0) { throw "retail status failed" }
+          Stop-Process -Name retaild -Force
 
   # The server image (retaild and retail, no tunnel of its own) for
   # 64-bit Intel and ARM, from the same programs as the release
@@ -121,6 +210,7 @@ jobs:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: dist
+          pattern: programs-linux-*
           merge-multiple: true
       - name: Programs by Docker platform
         run: |
@@ -152,21 +242,27 @@ jobs:
             ${{ env.IMAGE }}:${{ env.VERSION }}
             ${{ env.IMAGE }}:latest
 
+  # Everything the release holds, checked; created only for a tag
   publish:
-    needs: [build, image]
-    if: github.ref_type == 'tag'
+    needs: [installers, macos, windows, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # Only the programs the build jobs made (named after their variant)
+      # Only the installers (named after their system)
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: dist
-          pattern: '{linux,windows,macos}-*'
+          pattern: installers-*
           merge-multiple: true
       # VERSION lets daemons find the newest release through releases/latest/download/VERSION
-      - run: cd dist && echo "${GITHUB_REF_NAME#v}" > VERSION && sha256sum * > SHA256SUMS && cat SHA256SUMS
-      - env:
+      - run: |
+          cd dist
+          echo "${GITHUB_REF_NAME#v}" > VERSION
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          [ "$(ls | wc -l)" = 7 ] || { echo "expected 5 installers, VERSION and SHA256SUMS"; ls; exit 1; }
+      - if: github.ref_type == 'tag'
+        env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

@@ -1,7 +1,10 @@
-//! Official clients from GitHub Releases, for client packages of systems this
-//! server has no programs for. Files are fetched for this daemon's own
-//! version, checked against the release's `SHA256SUMS`, and kept in
-//! `<state>/clients/<os>-<arch>/` for the next downloads.
+//! Official releases from GitHub Releases: a release holds one installer per
+//! system (`retail-windows-x86_64.exe`, `retail-linux-aarch64`,
+//! `retail-macos.zip`, ...) with every program inside, plus `VERSION` and
+//! `SHA256SUMS`. The installer is checked against the checksums and its
+//! programs taken out: by the updater for this device, and by a server for
+//! client packages of systems it has no programs for (kept in
+//! `<state>/clients/<os>-<arch>/` for the next downloads).
 
 use std::path::Path;
 use std::time::Duration;
@@ -23,16 +26,22 @@ pub fn base() -> Option<String> {
     }
 }
 
-/// Release asset name of a client file: `retaild-linux-x86_64`, `wintun-windows-x86_64.dll`
-fn asset(file: &str, variant: &str) -> String {
-    match file.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}-{variant}.{ext}"),
-        None => format!("{file}-{variant}"),
+/// The release's installer for `<os>-<arch>`. macOS has one for both
+/// processors, in a zip so it stays runnable after a download.
+pub fn installer_asset(variant: &str) -> String {
+    match variant.split_once('-').map(|(os, _)| os) {
+        Some("windows") => format!("retail-{variant}.exe"),
+        Some("macos") => "retail-macos.zip".to_string(),
+        _ => format!("retail-{variant}"),
     }
 }
 
-/// Fetches `files` of `variant` for this daemon's own version into `dir`
+/// Fetches `files` of `variant` for this daemon's own version into `dir`,
+/// unless they are all there
 pub async fn fetch(variant: &str, files: &[String], dir: &Path) -> Result<()> {
+    if files.iter().all(|f| dir.join(f).is_file()) {
+        return Ok(());
+    }
     fetch_version(env!("CARGO_PKG_VERSION"), variant, files, dir).await
 }
 
@@ -64,47 +73,59 @@ pub fn newer(latest: &str, current: &str) -> bool {
     matches!((parse_version(latest), parse_version(current)), (Some(l), Some(c)) if l > c)
 }
 
-/// Fetches `files` of `variant` from release `version` into `dir`
+/// Fetches the installer of `variant` from release `version`, checks it, and
+/// writes `files` from it into `dir`
 pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: &Path) -> Result<()> {
     // One fetch at a time: two clicks must not race on the same files
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = LOCK.lock().await;
-    let base = base().context("fetching official clients is turned off (RETAIL_RELEASES)")?;
+    let base = base().context("fetching official releases is turned off (RETAIL_RELEASES)")?;
     let release = format!("{base}/v{version}");
+    let name = installer_asset(variant);
     tokio::time::timeout(TIMEOUT, async {
         let sums = get(&format!("{release}/SHA256SUMS"), None).await.context("reading the release's checksums")?;
         let sums = String::from_utf8_lossy(&sums.1);
+        let want = sums
+            .lines()
+            .find_map(|l| {
+                let (hash, n) = l.split_once(char::is_whitespace)?;
+                (n.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
+            })
+            .with_context(|| format!("release v{version} has no {name}"))?;
         tokio::fs::create_dir_all(dir).await?;
-        for file in files {
-            if dir.join(file).is_file() {
-                continue;
-            }
-            let name = asset(file, variant);
-            let want = sums
-                .lines()
-                .find_map(|l| {
-                    let (hash, n) = l.split_once(char::is_whitespace)?;
-                    (n.trim().trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
-                })
-                .with_context(|| format!("release v{version} has no {name}"))?;
-            let tmp = dir.join(format!("{file}.download"));
-            let got = get(&format!("{release}/{name}"), Some(&tmp)).await.with_context(|| format!("downloading {name}"))?.0;
-            if got != want {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                bail!("{name} does not match the release checksum");
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-            }
-            tokio::fs::rename(&tmp, dir.join(file)).await?;
-            tracing::info!(%name, "official client file fetched");
+        let download = dir.join(format!("{name}.download"));
+        let got = get(&format!("{release}/{name}"), Some(&download)).await.with_context(|| format!("downloading {name}"))?.0;
+        if got != want {
+            let _ = tokio::fs::remove_file(&download).await;
+            bail!("{name} does not match the release checksum");
         }
+        let (dir2, files2, download2) = (dir.to_path_buf(), files.to_vec(), download.clone());
+        let unpacked = tokio::task::spawn_blocking(move || unpack(&download2, &dir2, &files2)).await?;
+        let _ = tokio::fs::remove_file(&download).await;
+        unpacked.with_context(|| format!("taking the programs out of {name}"))?;
+        tracing::info!(%name, "official release fetched");
         anyhow::Ok(())
     })
     .await
     .context("fetching took too long")?
+}
+
+/// Writes `files` out of the installer at `path` (a zip holding it for macOS)
+fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
+    use retail_proto::package::{APP_EXECUTABLE, Window, extract, read_manifest, zip_entry};
+    let mut f = std::fs::File::open(path)?;
+    let (start, len) = if path.to_string_lossy().ends_with(".zip.download") {
+        zip_entry(&mut f, APP_EXECUTABLE).context("the zip holds no installer")?
+    } else {
+        (0, f.metadata()?.len())
+    };
+    let mut w = Window::new(f, start, len);
+    let m = read_manifest(&mut w).context("not a retail installer")?;
+    let written = extract(&mut w, &m, dir, |n| files.iter().any(|f| f == n))?;
+    if let Some(missing) = files.iter().find(|f| !written.contains(f)) {
+        bail!("the installer has no {missing}");
+    }
+    Ok(())
 }
 
 /// GETs `url`, following redirects, into `to` or memory. Returns the SHA-256
@@ -228,10 +249,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn asset_names() {
-        assert_eq!(asset("retaild", "linux-x86_64"), "retaild-linux-x86_64");
-        assert_eq!(asset("retail-tray.exe", "windows-x86_64"), "retail-tray-windows-x86_64.exe");
-        assert_eq!(asset("wintun.dll", "windows-x86_64"), "wintun-windows-x86_64.dll");
+    fn installer_names() {
+        assert_eq!(installer_asset("linux-x86_64"), "retail-linux-x86_64");
+        assert_eq!(installer_asset("windows-x86_64"), "retail-windows-x86_64.exe");
+        assert_eq!(installer_asset("macos-aarch64"), "retail-macos.zip");
+        assert_eq!(installer_asset("macos-x86_64"), "retail-macos.zip");
     }
 
     #[test]
