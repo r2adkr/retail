@@ -140,16 +140,15 @@ jobs:
           systemctl is-active retaild
           getent group retail
           retail status
-          # Root may change settings; a member of the retail group (the
-          # runner is one if it is in sudo) without the token, from the kernel's
-          # socket table; anyone else is refused by the daemon
+          # Root may change settings, and members of the retail group without
+          # the token (the installer adds the user who ran sudo; the daemon
+          # reads /etc/group, which this shell's own groups do not show yet);
+          # anyone else is refused
           sudo retail set --auto-update false
-          if id -nG | grep -qw sudo; then
-            retail set --auto-update false
-          else
-            out=$(retail set --auto-update false 2>&1) && { echo "a non-member changed settings: $out"; exit 1; }
-            echo "$out" | grep -q "not allowed"
-          fi
+          getent group retail | grep -qw "$(id -un)"
+          retail set --auto-update false
+          out=$(sudo -u nobody retail set --auto-update false 2>&1) && { echo "a non-member changed settings: $out"; exit 1; }
+          echo "$out" | grep -q "not allowed"
           sudo apt-get remove -y retail
           if systemctl is-active --quiet retaild; then echo "still running after removal"; exit 1; fi
           test ! -e /usr/local/bin/retaild
