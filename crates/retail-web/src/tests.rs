@@ -91,6 +91,9 @@ impl Backend for Fake {
     fn set_tags(&self, _: i64, _: Vec<String>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
+    fn set_tunnel(&self, _: bool) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
     fn set_helper_device(&self, _: Option<i64>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }

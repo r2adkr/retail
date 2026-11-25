@@ -14,7 +14,7 @@ A self-hosted mesh VPN. Your devices reach each other directly over WireGuard, f
 - **Direct connections** through NATs (STUN and hole punching, IPv4 and IPv6), with an automatic relay over HTTPS when no direct path exists.
 - **Gets through restrictive networks**: blocked UDP, TLS-inspecting firewalls, company proxies (with Windows sign-in), CDNs, NAT64, and REALITY camouflage.
 - **No separate server to install**: any device hosts the network from the tray app. Invite others with a code, a QR code, or an installer that joins on its own.
-- **Works behind CGNAT** with a helper node: any member device that other networks can reach, or a VPS.
+- **Works behind CGNAT** with a helper node (any member device that other networks can reach, or a VPS), or with no other machine at all through an opt-in Cloudflare quick tunnel.
 - **MagicDNS**: reach devices by name, such as `nas.retail.internal`.
 - **Access control** with device tags and rules.
 - **Subnet routes**: reach a whole LAN (printers, NAS, cameras) through one device in it.
@@ -88,6 +88,7 @@ Then, for example:
 retail set --exit-node <device>                                       # send internet traffic through another device
 retail server acl allow --from '*' --to tag:server --ports tcp:443    # access rules
 retail server helper-device <device>                                  # helper node behind CGNAT
+retail server tunnel on                                               # or a Cloudflare tunnel, no other machine
 retail set --advertise-routes 192.168.1.0/24                          # route this LAN (then: retail server routes <device>)
 retail server backup retail-server.retail-backup                      # encrypted backup of the server
 retail server web                                                     # open the web admin page

@@ -86,6 +86,16 @@ impl StunAdvertiser {
     }
 }
 
+/// Sets the HTTPS URLs devices are told forward to the server
+#[derive(Clone)]
+pub struct FrontSetter(server::AppState);
+
+impl FrontSetter {
+    pub fn set(&self, fronts: Vec<String>) {
+        self.0.set_server_fronts(fronts);
+    }
+}
+
 /// Dropping it without [`Server::stop`] aborts the tasks without saving
 /// last-seen times.
 pub struct Server {
@@ -301,6 +311,16 @@ impl Server {
     /// finding the server when its public address changes
     pub fn set_addrs(&self, addrs: Vec<String>) {
         self.state.set_server_addrs(addrs);
+    }
+
+    /// The HTTPS URLs forwarding to the server (a CDN, the internet tunnel),
+    /// sent to every device: the tunnel's address changes when it restarts
+    pub fn set_fronts(&self, fronts: Vec<String>) {
+        self.state.set_server_fronts(fronts);
+    }
+
+    pub fn front_setter(&self) -> FrontSetter {
+        FrontSetter(self.state.clone())
     }
 
     /// The database as saved, for backups

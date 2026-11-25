@@ -95,6 +95,11 @@ pub async fn control_loop(engine: Arc<Engine>, target: Target, token: String) ->
         let mut target = target.clone();
         let fresh = engine.subscribe_server_addrs().borrow().clone();
         let routed = engine.subscribe_routes().borrow().accepted.clone();
+        // The server's own list replaces the invite's: its internet tunnel
+        // gets a new address when it restarts
+        if let Some(fronts) = engine.subscribe_server_fronts().borrow().clone() {
+            target.fronts = fronts;
+        }
         target.alts = merge_alts(&target.url, &fresh, &target.alts)
             .into_iter()
             .filter(|a| match a.parse::<std::net::SocketAddr>() {

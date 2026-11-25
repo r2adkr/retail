@@ -44,6 +44,9 @@ struct HostConfig {
     /// The second server port (see `ALT_PORTS`), kept so invites stay valid
     #[serde(default)]
     alt_port: Option<u16>,
+    /// The internet tunnel (see `cloudflared`)
+    #[serde(default)]
+    tunnel: bool,
 }
 
 /// Persisted so the keys survive restarts and existing invites keep working
@@ -149,6 +152,13 @@ struct Running {
     device_helper: Arc<Mutex<Option<retail_proto::invite::HelperCode>>>,
     device_linked: Arc<std::sync::atomic::AtomicBool>,
     device_watch: Option<tokio::task::JoinHandle<()>>,
+    stun: Stun,
+    insecure_http: bool,
+    /// The internet tunnel, its current address, and the task that tells
+    /// devices about it
+    tunnel: Option<crate::cloudflared::Tunnel>,
+    tunnel_url: Arc<Mutex<Option<String>>>,
+    tunnel_watch: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct Host {
@@ -195,6 +205,7 @@ impl Host {
                 reality: None,
                 fronts: None,
                 helper: None,
+                tunnel: None,
             };
             if let Err(e) = self.start(&req, wg_port).await {
                 tracing::error!("could not resume the server: {e:#}");
@@ -277,8 +288,20 @@ impl Host {
             reach: reach.clone(),
             helper: helper.iter().flat_map(helper_stun).collect(),
             device: Arc::default(),
+            public: Arc::default(),
         };
         stun.advertise();
+        // Devices learn the server's list, which replaces their invite's
+        server.set_fronts(fronts.clone());
+        let tunnel_on = !req.insecure_http && req.tunnel.unwrap_or(saved.tunnel);
+        let tunnel_url = Arc::new(Mutex::new(None));
+        let (tunnel, tunnel_watch) = if tunnel_on {
+            let (t, w) = self.open_tunnel(&server, &fronts, &stun, &tunnel_url);
+            (Some(t), Some(w))
+        } else {
+            crate::cloudflared::end_recorded(&self.tunnel_dir()).await;
+            (None, None)
+        };
         // RETAIL_NO_PORTMAP leaves the router alone (tests, or a VPS with a public address)
         let use_portmap = !req.insecure_http && std::env::var_os("RETAIL_NO_PORTMAP").is_none();
         let portmap = use_portmap.then(|| {
@@ -312,6 +335,11 @@ impl Host {
             device_helper,
             device_linked,
             device_watch,
+            stun: stun.clone(),
+            insecure_http: req.insecure_http,
+            tunnel,
+            tunnel_url,
+            tunnel_watch,
         });
         self.save_config(&HostConfig {
             enabled: true,
@@ -323,6 +351,7 @@ impl Host {
             helper: helper_code,
             web_admins: saved.web_admins.clone(),
             alt_port,
+            tunnel: tunnel_on || (req.insecure_http && saved.tunnel),
         })?;
         *self.last_error.lock().unwrap() = None;
         drop(running);
@@ -454,6 +483,62 @@ impl Host {
         c.enabled = false;
         self.save_config(&c)?;
         self.halt().await;
+        crate::cloudflared::end_recorded(&self.tunnel_dir()).await;
+        Ok(())
+    }
+
+    /// Where cloudflared and its record are kept (outside the server's
+    /// data, which a restored backup replaces)
+    fn tunnel_dir(&self) -> PathBuf {
+        self.dir.parent().unwrap_or(&self.dir).join("tunnel")
+    }
+
+    fn open_tunnel(
+        &self,
+        server: &retail_control::Server,
+        fronts: &[String],
+        stun: &Stun,
+        slot: &Arc<Mutex<Option<String>>>,
+    ) -> (crate::cloudflared::Tunnel, tokio::task::JoinHandle<()>) {
+        let tunnel = crate::cloudflared::Tunnel::start(self.tunnel_dir(), server.port());
+        let watch = tokio::spawn(follow_tunnel(tunnel.url(), fronts.to_vec(), server.front_setter(), slot.clone(), stun.clone()));
+        (tunnel, watch)
+    }
+
+    /// Turns the internet tunnel on or off, now and at the next start
+    pub async fn set_tunnel(&self, on: bool) -> Result<()> {
+        let mut running = self.running.lock().await;
+        if on && running.as_ref().is_some_and(|r| r.insecure_http) {
+            bail!("the internet tunnel needs the server's TLS (it runs without --insecure-http)");
+        }
+        let mut c = self.config();
+        c.tunnel = on;
+        self.save_config(&c)?;
+        let Some(r) = running.as_mut() else {
+            if !on {
+                crate::cloudflared::end_recorded(&self.tunnel_dir()).await;
+            }
+            return Ok(());
+        };
+        if on {
+            if r.tunnel.is_none() {
+                let (t, w) = self.open_tunnel(&r.server, &r.fronts, &r.stun, &r.tunnel_url);
+                r.tunnel = Some(t);
+                r.tunnel_watch = Some(w);
+            }
+        } else {
+            if let Some(w) = r.tunnel_watch.take() {
+                w.abort();
+            }
+            match r.tunnel.take() {
+                Some(t) => t.stop().await,
+                None => crate::cloudflared::end_recorded(&self.tunnel_dir()).await,
+            }
+            *r.tunnel_url.lock().unwrap() = None;
+            r.server.set_fronts(r.fronts.clone());
+            r.stun.public.store(false, std::sync::atomic::Ordering::Relaxed);
+            r.stun.advertise();
+        }
         Ok(())
     }
 
@@ -469,6 +554,14 @@ impl Host {
             }
             if let Some(t) = r.device_watch {
                 t.abort();
+            }
+            // cloudflared keeps running for the next start, which takes it
+            // over with its address (devices outside know no other)
+            if let Some(t) = r.tunnel_watch {
+                t.abort();
+            }
+            if let Some(t) = r.tunnel {
+                t.detach();
             }
             let mapped = r.mapped.lock().unwrap().take();
             if let Some(m) = mapped {
@@ -525,7 +618,8 @@ impl Host {
         let nodes = r.server.nodes().await.unwrap_or_default();
         // Either helper makes the server reachable whatever the router does
         let reachable = r.helper_linked.load(std::sync::atomic::Ordering::Relaxed)
-            || r.device_linked.load(std::sync::atomic::Ordering::Relaxed);
+            || r.device_linked.load(std::sync::atomic::Ordering::Relaxed)
+            || r.tunnel_url.lock().unwrap().is_some();
         let invites = r.server.keys().await.unwrap_or_default();
         let (key_expiry_days, remove_inactive_days) = r.server.expiry_settings();
         ServerStatus {
@@ -542,6 +636,7 @@ impl Host {
             domain: r.domain.clone(),
             reality: r.reality.as_ref().map(|x| x.server_name.clone()),
             fronts: r.fronts.clone(),
+            tunnel: r.tunnel.as_ref().map(crate::cloudflared::Tunnel::status),
             helper: r.helper.as_ref().and_then(|h| h.addrs.first().cloned()),
             helper_linked: r.helper_linked.load(std::sync::atomic::Ordering::Relaxed),
             helper_device: r.server.helper_device(),
@@ -613,9 +708,15 @@ impl Host {
             bail!("this device has no network address to invite others to");
         }
         let reality = r.reality.as_ref().and_then(HostReality::invite);
-        let invite =
-            Invite { addrs, pin: r.server.pin().as_ref().map(encode_pin), key, reality, fronts: r.fronts.clone() };
+        let invite = Invite { addrs, pin: r.server.pin().as_ref().map(encode_pin), key, reality, fronts: Self::all_fronts(r) };
         Ok(invite.encode())
+    }
+
+    /// The CDN's URLs, then the internet tunnel's
+    fn all_fronts(r: &Running) -> Vec<String> {
+        let mut out = r.fronts.clone();
+        out.extend(r.tunnel_url.lock().unwrap().clone());
+        out
     }
 
     /// The current code of a named invite, with today's addresses
@@ -703,6 +804,35 @@ struct Stun {
     reach: Arc<Mutex<Reach>>,
     helper: Vec<String>,
     device: Arc<Mutex<Vec<String>>>,
+    /// While the internet tunnel is up: devices outside cannot reach this
+    /// server's STUN, so they learn their public addresses (to connect to
+    /// each other directly) from Cloudflare's
+    public: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Cloudflare's public STUN server, already in the path while the tunnel is
+const PUBLIC_STUN: &str = "stun.cloudflare.com:3478";
+
+/// Tells devices the tunnel's address as it changes
+async fn follow_tunnel(
+    mut url: tokio::sync::watch::Receiver<Option<String>>,
+    fronts: Vec<String>,
+    setter: retail_control::FrontSetter,
+    slot: Arc<Mutex<Option<String>>>,
+    stun: Stun,
+) {
+    loop {
+        let now = url.borrow_and_update().clone();
+        *slot.lock().unwrap() = now.clone();
+        let mut all = fronts.clone();
+        all.extend(now.clone());
+        setter.set(all);
+        stun.public.store(now.is_some(), std::sync::atomic::Ordering::Relaxed);
+        stun.advertise();
+        if url.changed().await.is_err() {
+            break;
+        }
+    }
 }
 
 impl Stun {
@@ -714,6 +844,9 @@ impl Stun {
         }
         stun.extend(self.helper.iter().cloned());
         stun.extend(self.device.lock().unwrap().iter().cloned());
+        if self.public.load(std::sync::atomic::Ordering::Relaxed) {
+            stun.push(PUBLIC_STUN.to_string());
+        }
         stun.extend(lan_ips().into_iter().map(|ip| SocketAddr::new(ip, self.port).to_string()));
         self.adv.set(stun);
     }

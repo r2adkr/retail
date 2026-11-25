@@ -32,6 +32,8 @@ pub enum DashAction {
     Stop,
     Remove(i64),
     OpenWeb,
+    /// Turns the internet tunnel on or off
+    Tunnel(bool),
     /// Opens the form for a new invite
     NewInvite,
     /// In the form: several devices (named) or one
@@ -253,11 +255,12 @@ impl Dashboard {
         let w = WIDTH - 2.0 * PAD;
         let (x, ix) = (PAD, PAD + 16.0);
         let mut rows: Vec<(&str, String, Color)> = Vec::new();
-        rows.push((
-            tr("Address"),
-            s.public.clone().unwrap_or_else(|| tr("Not reachable from other networks").into()),
-            if s.public.is_some() { t.text } else { t.amber },
-        ));
+        let tunnel_url = s.tunnel.as_ref().and_then(|t| t.url.clone());
+        rows.push(match (&s.public, &tunnel_url) {
+            (Some(p), _) => (tr("Address"), p.clone(), t.text),
+            (None, Some(_)) => (tr("Address"), tr("Through the internet tunnel").into(), t.text),
+            (None, None) => (tr("Address"), tr("Not reachable from other networks").into(), t.amber),
+        });
         if let Some(lan) = s.lan.first() {
             rows.push((tr("This network"), lan.clone(), t.text));
         }
@@ -283,18 +286,47 @@ impl Dashboard {
         if !s.fronts.is_empty() {
             rows.push(("CDN", s.fronts.join(", "), t.text));
         }
+        // Last, with its switch on the right
+        let (tunnel_value, tunnel_color, tunnel_switch) = match &s.tunnel {
+            None => (tr("Off · through Cloudflare, from any network").to_string(), t.dim, (tr("Turn on"), DashAction::Tunnel(true))),
+            Some(tun) => {
+                let (v, col) = match (&tun.url, &tun.error) {
+                    (Some(u), _) => (u.trim_start_matches("https://").to_string(), t.text),
+                    (None, Some(e)) => (e.clone(), t.amber),
+                    (None, None) => (tr("Starting…").to_string(), t.dim),
+                };
+                (v, col, (tr("Turn off"), DashAction::Tunnel(false)))
+            }
+        };
+        rows.push((tr("Internet tunnel"), tunnel_value, tunnel_color));
         let card_h = 16.0 + rows.len() as f32 * 42.0;
         let cy = y + 18.0;
         c.fill_rrect(x, cy, w, card_h, 12.0, t.surface);
         let mut ry = cy + 8.0;
-        for (label, value, color) in rows {
+        let last = rows.len() - 1;
+        for (i, (label, value, color)) in rows.into_iter().enumerate() {
+            let mut value_w = w - 32.0;
+            if i == last {
+                let (switch, action) = tunnel_switch.clone();
+                let sw = c.measure(switch, 12.5, Weight::Regular) + 20.0;
+                let r = Rect::from_xywh(x + w - 10.0 - sw, ry + 10.0, sw, 28.0).unwrap();
+                if self.hovered(&r) {
+                    c.fill_rrect(r.x(), r.y(), r.width(), r.height(), 6.0, t.hover);
+                }
+                c.text(switch, r.x() + 10.0, ry + 29.0, 12.5, Weight::Regular, t.accent, None);
+                self.regions.push((r, action));
+                value_w -= sw + 8.0;
+            }
             c.text(label, ix, ry + 16.0, 11.5, Weight::Regular, t.dim, None);
-            c.text(&value, ix, ry + 34.0, 13.5, Weight::Regular, color, Some(w - 32.0));
+            c.text(&value, ix, ry + 34.0, 13.5, Weight::Regular, color, Some(value_w));
             ry += 42.0;
         }
         let mut y = cy + card_h;
         if let Some(notice) = &s.notice {
             y = paragraph(c, &notice_text(notice), x + 4.0, y + 18.0, w - 8.0, 12.0, t.amber);
+            if s.tunnel.is_none() {
+                y = paragraph(c, tr("Or turn on the internet tunnel above: devices then reach this server through Cloudflare from any network."), x + 4.0, y + 26.0, w - 8.0, 12.0, t.amber);
+            }
         }
 
         y += 34.0;

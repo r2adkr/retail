@@ -76,6 +76,11 @@ pub struct NetMap {
     /// nodes to find it after its public address changes
     #[serde(default)]
     pub server_addrs: Vec<String>,
+    /// HTTPS URLs that forward to the server (a CDN, or the server's own
+    /// internet tunnel, whose address changes). `None` from servers before
+    /// 1.0.1, which keeps the ones the invite gave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_fronts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -164,6 +169,9 @@ pub struct ServerStatus {
     /// Devices not seen for this many days are removed
     #[serde(default)]
     pub remove_inactive_days: Option<u32>,
+    /// The internet tunnel, `None` when off
+    #[serde(default)]
+    pub tunnel: Option<TunnelStatus>,
     pub nodes: Vec<ServerNode>,
     pub invites: Vec<ServerInvite>,
     pub last_error: Option<String>,
@@ -270,6 +278,25 @@ pub struct ServerStartRequest {
     /// Helper node code (`retailh1.…`) or `off`. `None` keeps the current one.
     #[serde(default)]
     pub helper: Option<String>,
+    /// The internet tunnel (see [`TunnelStatus`]). `None` keeps the current setting.
+    #[serde(default)]
+    pub tunnel: Option<bool>,
+}
+
+/// The internet tunnel: the server reachable through a Cloudflare quick
+/// tunnel, which needs no open port (CGNAT, routers that do not forward)
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TunnelStatus {
+    /// `https://….trycloudflare.com` once up; `None` while it starts
+    pub url: Option<String>,
+    /// Why it is not up
+    pub error: Option<String>,
+}
+
+/// `POST /server/tunnel`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelRequest {
+    pub on: bool,
 }
 
 fn yes() -> bool {
@@ -596,6 +623,7 @@ mod tests {
             expires_at: Some(1),
             expired: false,
             server_addrs: vec!["203.0.113.1:443".into()],
+            server_fronts: Some(vec!["https://a.trycloudflare.com".into()]),
         });
         let s = serde_json::to_string(&nm).unwrap();
         assert!(s.starts_with(r#"{"type":"net_map""#));
@@ -607,6 +635,8 @@ mod tests {
         assert_eq!(nm.self_node.accept, crate::acl::Accept::All);
         assert!(!nm.helper);
         assert!(!nm.expired && nm.expires_at.is_none() && nm.server_addrs.is_empty() && nm.self_node.routes.is_empty());
+        // None: keep the invite's fronts
+        assert!(nm.server_fronts.is_none());
         // And an older client's hostinfo
         let ClientMessage::Hostinfo { routes, .. } = serde_json::from_str(r#"{"type":"hostinfo","exit_node":true}"#).unwrap() else { panic!() };
         assert!(routes.is_empty());

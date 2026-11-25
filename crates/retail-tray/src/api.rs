@@ -52,6 +52,8 @@ pub enum ServerCommand {
     Remove(i64),
     /// Opens the web admin page with a one-time sign-in link
     OpenWeb,
+    /// Turns the internet tunnel on or off
+    Tunnel(bool),
 }
 
 pub enum ApiEvent {
@@ -141,6 +143,10 @@ pub fn spawn(
                                 on_event(ApiEvent::Server(call(addr, "POST", "/server/start", Some(&body), t)));
                             }
                             ServerCommand::Stop => on_event(ApiEvent::Server(call(addr, "POST", "/server/stop", None, t))),
+                            ServerCommand::Tunnel(on) => {
+                                let body = serde_json::to_string(&retail_proto::api::TunnelRequest { on }).unwrap_or_default();
+                                on_event(ApiEvent::Server(call(addr, "POST", "/server/tunnel", Some(&body), t)));
+                            }
                             ServerCommand::Remove(id) => {
                                 on_event(ApiEvent::Server(call(addr, "POST", &format!("/server/nodes/{id}/delete"), None, t)));
                             }

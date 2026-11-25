@@ -71,6 +71,9 @@ impl retail_web::Backend for Glue {
     fn set_tags(&self, id: i64, tags: Vec<String>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.set_tags(id, &tags).await.map_err(text) })
     }
+    fn set_tunnel(&self, on: bool) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move { self.backend.host.set_tunnel(on).await.map_err(text) })
+    }
     fn set_helper_device(&self, id: Option<i64>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.set_helper_device(id).await.map_err(text) })
     }

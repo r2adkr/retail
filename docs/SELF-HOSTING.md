@@ -47,7 +47,7 @@ Other devices join with `retail up --invite retail1.…`.
 When the server starts, retail **opens ports on the router automatically with PCP or NAT-PMP, falling back to UPnP** (TCP 443 and 80, UDP 3478, UDP 41641), and a second TCP port picked at random once per server (20000–31999), for providers that block 80 and 443 coming in and routers that keep 443 for themselves. Invites name the public address on both TCP ports and devices try them at once. The router ports row of the server window shows the result. A router that opens nothing still tells its public address, which invites then name too: forward the same port numbers by hand and devices on other networks can join. On Windows it also adds firewall rules that apply only to retaild, and removes them when the server stops.
 
 - If the router does not support automatic port opening, the server window explains how to forward the ports by hand.
-- If the router's external address is private (carrier-grade NAT, or two routers in a row), the window warns that the server cannot be reached from outside. Devices on the same network can still join, and devices outside can join through a **helper node** (below).
+- If the router's external address is private (carrier-grade NAT, or two routers in a row), the window warns that the server cannot be reached from outside. Devices on the same network can still join, and devices outside can join through the **internet tunnel** or a **helper node** (below).
 - If your public IP changes, give a dynamic DNS name with `retail server start --domain myhome.example.net`. Invite codes then carry that name instead of the IP.
 
 ## On a VPS or in Docker
@@ -97,6 +97,21 @@ retail server start --reality off                 # turn it off
 - The clocks of the server and the devices must agree within 2 minutes.
 - The chosen website must offer HTTPS (TLS 1.3) and be reachable from the server.
 - Devices try plain HTTPS and REALITY 1.5 seconds apart, so even on a blocking network they connect within seconds.
+
+## A server nobody outside can reach: internet tunnel
+
+Behind carrier-grade NAT, or behind a router that says it opened the ports but lets nothing in, turn on the **internet tunnel**: the **Turn on** switch on the *Internet tunnel* row of the server window, the web admin page, or
+
+```sh
+retail server tunnel on              # off turns it off; retail server start --tunnel does it at start
+```
+
+retail then runs Cloudflare's `cloudflared` beside the server, which opens a free *quick tunnel* (an `https://….trycloudflare.com` address) from the inside out, so no router port is needed. Invite codes carry that address, and devices use it like a CDN address (below) when nothing else works: inside it they check the server's certificate again, so Cloudflare passes the traffic through without being able to read it. Device-to-device traffic still goes directly between the devices whenever their networks allow it; while the tunnel is up, devices learn their public addresses from Cloudflare's STUN server for that.
+
+- **The first time** it downloads cloudflared (about 20 to 55 MB, by system) from Cloudflare's GitHub releases, checks it against the checksum built into retail, and keeps it in the state folder (`tunnel/`). It takes some tens of MB of memory while it runs.
+- **The address changes** when the computer restarts or the tunnel is lost. Devices that already joined learn the new address from the server by themselves; an invite code you have not used yet carries the old one, so make it again after a restart. Updating retail does not change it (the next retaild takes the running tunnel over).
+- **Limits**: quick tunnels are Cloudflare's free service for testing, with no uptime promise and at most 200 requests in flight at once; this is plenty for the control connection of a household's devices, and relayed data (when two devices cannot connect directly) goes through it more slowly than over a direct connection. For a network you depend on, prefer a helper node, a VPS, or a CDN address on your own domain.
+- It needs outgoing connections to Cloudflare (port 7844, UDP or TCP). Networks that block those show the error on the tunnel row.
 
 ## A server behind CGNAT: helper node
 

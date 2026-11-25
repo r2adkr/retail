@@ -158,6 +158,10 @@ enum ServerCmd {
         /// server behind CGNAT. `off` stops using it.
         #[arg(long, value_name = "CODE|off")]
         helper: Option<String>,
+        /// Also reach the server through a Cloudflare tunnel (see `retail
+        /// server tunnel`)
+        #[arg(long)]
+        tunnel: bool,
     },
     /// Stop the server. Devices stay registered for when it starts again.
     Stop,
@@ -254,6 +258,15 @@ enum ServerCmd {
     HelperDevice {
         /// Device: name, mesh IP or id, or `off`
         device: String,
+    },
+    /// Reach the server through a free Cloudflare tunnel (a
+    /// https://….trycloudflare.com address), for a server other networks
+    /// cannot reach: CGNAT, or a router that does not really open ports.
+    /// Downloads cloudflared once. The address changes when the computer
+    /// restarts; devices learn the new one by themselves.
+    Tunnel {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
     },
 }
 
@@ -444,13 +457,14 @@ async fn main() -> Result<()> {
 
 async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
     let st: ServerStatus = match cmd {
-        ServerCmd::Start { port, domain, no_join, insecure_http, reality, front, helper } => {
+        ServerCmd::Start { port, domain, no_join, insecure_http, reality, front, helper, tunnel } => {
             let fronts = match front.as_slice() {
                 [] => None,
                 [off] if off == "off" => Some(Vec::new()),
                 _ => Some(front),
             };
-            let req = ServerStartRequest { join: !no_join, port, domain, insecure_http, reality, fronts, helper };
+            let tunnel = tunnel.then_some(true);
+            let req = ServerStartRequest { join: !no_join, port, domain, insecure_http, reality, fronts, helper, tunnel };
             client.post("/server/start", Some(&req)).await?
         }
         ServerCmd::Stop => client.post::<(), _>("/server/stop", None).await?,
@@ -564,6 +578,9 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
             let current: ServerStatus = client.get("/server").await?;
             let id = find_device(&current, &device)?;
             client.post(&format!("/server/nodes/{id}/tags"), Some(&TagsRequest { tags })).await?
+        }
+        ServerCmd::Tunnel { state } => {
+            client.post("/server/tunnel", Some(&retail_proto::api::TunnelRequest { on: state == "on" })).await?
         }
         ServerCmd::HelperDevice { device } => {
             let current: ServerStatus = client.get("/server").await?;
@@ -771,6 +788,13 @@ fn print_server(st: &ServerStatus) {
     }
     if !st.fronts.is_empty() {
         println!("cdn:     {}", st.fronts.join(", "));
+    }
+    if let Some(t) = &st.tunnel {
+        match (&t.url, &t.error) {
+            (Some(u), _) => println!("tunnel:  {u}"),
+            (None, Some(e)) => println!("tunnel:  not up: {e}"),
+            (None, None) => println!("tunnel:  starting"),
+        }
     }
     if let Some(w) = &st.warning {
         println!("warning: {w}");

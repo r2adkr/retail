@@ -51,6 +51,7 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api
         .route("/server/restore", post(server_restore))
         .route("/server/acl", post(server_acl))
         .route("/server/helper-device", post(server_helper_device))
+        .route("/server/tunnel", post(server_tunnel))
         .route("/server/invites/{id}/revoke", post(server_revoke_invite))
         // POST so the guard asks for the token: the answer is a reusable invite
         .route("/server/invites/{id}/code", post(server_named_code))
@@ -360,6 +361,13 @@ async fn server_acl(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto:
 
 async fn server_helper_device(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::HelperDeviceRequest>) -> Response {
     match b.host.set_helper_device(req.id).await {
+        Ok(()) => Json(b.server_status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn server_tunnel(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::TunnelRequest>) -> Response {
+    match b.host.set_tunnel(req.on).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }

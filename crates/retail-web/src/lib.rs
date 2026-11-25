@@ -67,6 +67,8 @@ pub trait Backend: Send + Sync + 'static {
     fn set_tags(&self, id: i64, tags: Vec<String>) -> BoxFut<'_, Result<(), String>>;
     /// A member device as the helper node (`None`: none)
     fn set_helper_device(&self, id: Option<i64>) -> BoxFut<'_, Result<(), String>>;
+    /// The internet tunnel on or off
+    fn set_tunnel(&self, on: bool) -> BoxFut<'_, Result<(), String>>;
 }
 
 /// Uploaded program files may be this large
@@ -146,6 +148,7 @@ impl WebAdmin {
             .route("/api/restore", post(restore).layer(axum::extract::DefaultBodyLimit::max(64 << 20)))
             .route("/api/acl", post(set_acl))
             .route("/api/helper-device", post(set_helper_device))
+            .route("/api/tunnel", post(set_tunnel))
             .route("/api/qr", post(qr))
             .route("/api/clients/{variant}/fetch", post(fetch_client))
             .route(
@@ -414,6 +417,10 @@ async fn set_helper_device(State(ctx): State<Ctx>, Json(req): Json<retail_proto:
         return deny(StatusCode::BAD_REQUEST, "the device hosting the server cannot be its helper node");
     }
     done(ctx.web.backend.set_helper_device(req.id).await)
+}
+
+async fn set_tunnel(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::TunnelRequest>) -> Response {
+    done(ctx.web.backend.set_tunnel(req.on).await)
 }
 
 /// Stores one program file for a client variant (a macOS build, say), so

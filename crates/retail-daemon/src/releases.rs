@@ -134,7 +134,7 @@ fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
 
 /// GETs `url`, following redirects, into `to` or memory. Returns the SHA-256
 /// (hex) and, without `to`, the body.
-async fn get(url: &str, to: Option<&Path>) -> Result<(String, Vec<u8>)> {
+pub(crate) async fn get(url: &str, to: Option<&Path>) -> Result<(String, Vec<u8>)> {
     let mut url = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let u = crate::http::parse_url(&url)?;

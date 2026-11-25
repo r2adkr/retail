@@ -51,8 +51,13 @@ pub enum Cmd {
 /// On Windows the daemon is stopped by terminating it, so the system settings
 /// a session undoes when it ends stay behind: the name resolution rule that
 /// sends `.retail.internal` to the MagicDNS address, the exit node's NAT and
-/// the firewall rule. Removing retail removes them too.
-fn remove_system_changes() {
+/// the firewall rule. Removing retail removes them too, and ends the internet
+/// tunnel's cloudflared, which outlives the daemon on purpose.
+fn remove_system_changes(state_dir: Option<&Path>) {
+    let state = state_dir.map_or_else(crate::state::default_state_dir, Path::to_path_buf);
+    crate::cloudflared::end_recorded_now(&state.join("tunnel"));
+    // The downloaded program, not data
+    let _ = std::fs::remove_dir_all(state.join("tunnel"));
     #[cfg(windows)]
     {
         for script in [
@@ -78,7 +83,7 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
                 _ => {
                     stop(api);
                     unregister();
-                    remove_system_changes();
+                    remove_system_changes(state_dir);
                     Ok(())
                 }
             }
@@ -87,7 +92,7 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             require_admin()?;
             stop(api);
             unregister();
-            remove_system_changes();
+            remove_system_changes(state_dir);
             let dir = dir.unwrap_or_else(default_dir);
             for name in ["retaild", "retail"] {
                 let _ = std::fs::remove_file(dir.join(exe(name)));
@@ -389,6 +394,7 @@ pub fn register(daemon: &Path) -> Result<()> {
 <key>ProgramArguments</key><array><string>{}</string></array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
+<key>AbandonProcessGroup</key><true/>
 </dict></plist>
 "#,
         daemon.display()

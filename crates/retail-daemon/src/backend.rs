@@ -623,6 +623,23 @@ impl Backend {
                 }
             }
         });
+        // The same for the URLs that forward to it
+        let mut fronts = engine.subscribe_server_fronts();
+        let (persisted, state_path, server) = (self.persisted.clone(), self.state_path.clone(), p.server.clone());
+        tasks.spawn(async move {
+            while fronts.changed().await.is_ok() {
+                let Some(fresh) = fronts.borrow_and_update().clone() else { continue };
+                let mut p = persisted.lock().await;
+                if p.server != server || p.server_fronts == fresh {
+                    continue;
+                }
+                p.server_fronts = fresh;
+                p.remember_current();
+                if let Err(e) = p.save(&state_path) {
+                    tracing::warn!("saving the server's addresses: {e:#}");
+                }
+            }
+        });
         let mut session = Session { engine, tasks, graceful, threads, stop, exit_routes: None, gateway, _dns: dns };
         if let Err(e) = apply_exit_prefs(&mut session, &p.prefs) {
             // The mesh still works, so only report the exit-node problem

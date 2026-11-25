@@ -5,6 +5,7 @@ mod crypto;
 mod engine;
 mod exit;
 mod filter;
+mod cloudflared;
 mod firewall;
 mod gro;
 mod happy;
@@ -166,6 +167,7 @@ async fn main() -> Result<()> {
                 insecure_http: false,
                 reality: args.serve_reality.clone(),
                 fronts: (!args.serve_front.is_empty()).then(|| args.serve_front.clone()),
+                tunnel: None,
                 helper: args.serve_helper.clone(),
             };
             if let Err(e) = b.host.start(&req, port).await {

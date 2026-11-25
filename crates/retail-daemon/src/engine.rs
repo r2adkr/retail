@@ -596,6 +596,8 @@ pub struct Engine {
     key_state: Mutex<(Option<i64>, bool)>,
     /// Where the server says it is reachable now
     server_addrs: watch::Sender<Vec<String>>,
+    /// The HTTPS URLs that forward to it, once a server (1.0.1 on) says
+    server_fronts: watch::Sender<Option<Vec<String>>>,
     /// Tells the control loop to reconnect so its socket picks up new routes
     pub control_reset: tokio::sync::Notify,
     memory_limit_mb: Option<u32>,
@@ -701,6 +703,7 @@ impl Engine {
             route_state: watch::channel(RouteState::default()).0,
             key_state: Mutex::default(),
             server_addrs: watch::channel(Vec::new()).0,
+            server_fronts: watch::channel(None).0,
             control_reset: tokio::sync::Notify::new(),
             memory_limit_mb: cfg.memory_limit_mb,
             extra_endpoints: Mutex::default(),
@@ -796,6 +799,10 @@ impl Engine {
         self.server_addrs.subscribe()
     }
 
+    pub fn subscribe_server_fronts(&self) -> watch::Receiver<Option<Vec<String>>> {
+        self.server_fronts.subscribe()
+    }
+
     /// When this device's key expires, and whether it has
     pub fn key_state(&self) -> (Option<i64>, bool) {
         *self.key_state.lock().unwrap()
@@ -857,6 +864,11 @@ impl Engine {
         let addrs: Vec<String> = nm.server_addrs.iter().take(16).filter(|a| a.len() < 300).cloned().collect();
         if !addrs.is_empty() {
             self.server_addrs.send_if_modified(|cur| std::mem::replace(cur, addrs.clone()) != addrs);
+        }
+        if let Some(fronts) = &nm.server_fronts {
+            let fronts: Vec<String> =
+                fronts.iter().filter(|f| f.starts_with("https://") && f.len() < 300).take(8).cloned().collect();
+            self.server_fronts.send_if_modified(|cur| cur.replace(fronts.clone()).as_ref() != Some(&fronts));
         }
         *self.granted_routes.write().unwrap() = nm.self_node.routes.clone();
         let own_routes = self.own_routes_now();

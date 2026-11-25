@@ -229,6 +229,14 @@ const TR={
 "Stop using as helper node":["보조 노드 해제","補助ノードの使用をやめる","停止用作辅助节点","Dejar de usar como nodo auxiliar"],
 "Helper node":["보조 노드","補助ノード","辅助节点","Nodo auxiliar"],
 "Linking…":["연결 중…","接続中…","正在连接…","Enlazando…"],
+"Internet tunnel":["인터넷 터널","インターネットトンネル","互联网隧道","Túnel de internet"],
+"Through the internet tunnel":["인터넷 터널로 접속","インターネットトンネル経由","通过互联网隧道","A través del túnel de internet"],
+"Starting…":["시작하는 중…","起動中…","正在启动…","Iniciando…"],
+"Turn on internet tunnel":["인터넷 터널 켜기","インターネットトンネルをオン","开启互联网隧道","Activar túnel de internet"],
+"Turn off internet tunnel":["인터넷 터널 끄기","インターネットトンネルをオフ","关闭互联网隧道","Desactivar túnel de internet"],
+"Internet tunnel turned on":["인터넷 터널을 켰습니다","インターネットトンネルをオンにしました","已开启互联网隧道","Túnel de internet activado"],
+"Internet tunnel turned off":["인터넷 터널을 껐습니다","インターネットトンネルをオフにしました","已关闭互联网隧道","Túnel de internet desactivado"],
+"Or turn on the internet tunnel: devices then reach this server through Cloudflare from any network.":["또는 인터넷 터널을 켜세요. 그러면 기기들이 어느 네트워크에서나 Cloudflare를 거쳐 이 서버에 접속합니다.","またはインターネットトンネルをオンにしてください。デバイスはどのネットワークからも Cloudflare 経由でこのサーバーに接続できます。","或者开启互联网隧道：设备即可在任何网络中经由 Cloudflare 访问此服务器。","O activa el túnel de internet: los dispositivos llegarán a este servidor a través de Cloudflare desde cualquier red."],
 "{host} will relay connections to this server for devices on other networks. It has to be reachable from the internet: a public address, or a router that opens ports for it. Continue?":["{host}이(가) 다른 네트워크의 기기를 이 서버로 이어 줍니다. 이 기기는 인터넷에서 접속할 수 있어야 합니다(공인 주소이거나, 공유기가 포트를 열어 줄 수 있는 곳). 계속할까요?","{host} が他のネットワークのデバイスからこのサーバーへの接続を中継します。このデバイスはインターネットから到達できる必要があります（グローバルアドレス、またはルーターがポートを開けられる環境）。続けますか？","{host} 将为其他网络中的设备中继到此服务器的连接。它必须能从互联网访问（公网地址，或路由器能为它打开端口）。继续吗？","{host} retransmitirá a este servidor las conexiones de dispositivos de otras redes. Debe ser accesible desde internet: una dirección pública o un router que le abra puertos. ¿Continuar?"],
 "{host} is the helper node now":["이제 {host}이(가) 보조 노드입니다","{host} が補助ノードになりました","{host} 现在是辅助节点","{host} es ahora el nodo auxiliar"],
 "Helper node removed":["보조 노드를 해제했습니다","補助ノードを解除しました","已移除辅助节点","Nodo auxiliar quitado"],
@@ -321,13 +329,17 @@ function render(){
     $("#server").innerHTML=`<div class="card pad"><p style="margin-top:0">${esc(t("The network server on this device is off. Turn it on to make this device the server and invite other devices."))}</p>${s.last_error?`<div class="notice">${esc(s.last_error)}</div>`:""}<button class="primary" onclick="act('/api/server/start',{},t('Server turned on'))">${esc(t("Turn on server"))}</button>${view.local?` <button onclick="openRestore()">${esc(t("Restore from a backup…"))}</button>`:""}</div>`;
     $("#networked").hidden=true;return;
   }
-  const rows=[[t("Address from outside"),s.public||t("Not reachable from other networks")],[t("This network"),(s.lan||[]).slice(0,3).join(", ")||"-"],[t("Router ports"),routerText(s.router)]];
+  const tun=s.tunnel,tunUrl=tun&&tun.url;
+  const rows=[[t("Address from outside"),s.public||(tunUrl?t("Through the internet tunnel"):t("Not reachable from other networks"))],[t("This network"),(s.lan||[]).slice(0,3).join(", ")||"-"],[t("Router ports"),routerText(s.router)]];
   if(s.reality)rows.push(["REALITY",t("On · looks like {site}",{site:s.reality})]);
   if(s.helper)rows.push([t("Helper node"),`${s.helper} · ${t(s.helper_linked?"Connected":"Not connected")}`]);
   if(s.helper_device!=null){const h=(s.nodes||[]).find(n=>n.id===s.helper_device);rows.push([t("Helper node"),`${h?h.hostname:"#"+s.helper_device} · ${t(s.helper_device_linked?"Connected":"Linking…")}`])}
   if((s.fronts||[]).length)rows.push(["CDN",s.fronts.join(", ")]);
-  const notice=noticeText(s.notice);
-  $("#server").innerHTML=`<div class="card pad"><dl class="rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${notice?`<div class="notice">${esc(notice)}</div>`:""}<button class="danger" onclick="stopServer()">${esc(t("Turn off server"))}</button></div>`;
+  rows.push([t("Internet tunnel"),!tun?t("Off"):tunUrl?tunUrl.replace(/^https:\/\//,""):tun.error||t("Starting…")]);
+  let notice=noticeText(s.notice);
+  if(notice&&!tun)notice+=" "+t("Or turn on the internet tunnel: devices then reach this server through Cloudflare from any network.");
+  const tunBtn=`<button onclick="act('/api/tunnel',{on:${!tun}},t('${tun?"Internet tunnel turned off":"Internet tunnel turned on"}'))">${esc(t(tun?"Turn off internet tunnel":"Turn on internet tunnel"))}</button> `;
+  $("#server").innerHTML=`<div class="card pad"><dl class="rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>${notice?`<div class="notice">${esc(notice)}</div>`:""}${tunBtn}<button class="danger" onclick="stopServer()">${esc(t("Turn off server"))}</button></div>`;
   $("#networked").hidden=false;
 
   // Named invites first, then single-use ones still open, newest first

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
@@ -51,6 +51,20 @@ async fn open(state: &AppState, peer: PeerAddr) -> Option<DuplexStream> {
     Some(ours)
 }
 
+/// The device behind a tunnel that ends on this machine (the internet
+/// tunnel's cloudflared): Cloudflare names it in `Cf-Connecting-IP`. Trusted
+/// from loopback only, so the per-address limits apply per device and not to
+/// all of them at once; from elsewhere the header is anyone's to write.
+fn real_peer(peer: PeerAddr, headers: &HeaderMap) -> PeerAddr {
+    if !peer.0.ip().is_loopback() {
+        return peer;
+    }
+    match headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {
+        Some(ip) => PeerAddr(std::net::SocketAddr::new(ip.to_canonical(), peer.0.port()), peer.1),
+        None => peer,
+    }
+}
+
 fn no_store(status: StatusCode, body: impl IntoResponse) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], body).into_response()
 }
@@ -58,8 +72,10 @@ fn no_store(status: StatusCode, body: impl IntoResponse) -> Response {
 pub async fn websocket(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<PeerAddr>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let peer = real_peer(peer, &headers);
     let ws = ws.max_message_size(MAX_MESSAGE).max_frame_size(MAX_MESSAGE).read_buffer_size(PIPE);
     ws.on_upgrade(move |socket| async move {
         if let Some(pipe) = open(&state, peer).await {
@@ -106,7 +122,8 @@ async fn pump(socket: WebSocket, pipe: DuplexStream) {
     }
 }
 
-pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): ConnectInfo<PeerAddr>) -> Response {
+pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): ConnectInfo<PeerAddr>, headers: HeaderMap) -> Response {
+    let peer = real_peer(peer, &headers);
     {
         let mut polls = state.polls().lock().unwrap();
         polls.retain(|_, s| s.touched.lock().unwrap().elapsed() < POLL_IDLE);
@@ -182,5 +199,27 @@ pub async fn poll_up(State(state): State<AppState>, Path(id): Path<String>, body
             state.polls().lock().unwrap().remove(&id);
             no_store(StatusCode::GONE, "")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_device_behind_cloudflared_is_trusted_from_loopback_only() {
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "198.51.100.7".parse().unwrap());
+        let local = PeerAddr("127.0.0.1:5000".parse().unwrap(), false);
+        assert_eq!(real_peer(local, &h).0, "198.51.100.7:5000".parse().unwrap());
+        // Anyone else may write the header
+        let remote = PeerAddr("203.0.113.9:5000".parse().unwrap(), true);
+        assert_eq!(real_peer(remote, &h).0, "203.0.113.9:5000".parse().unwrap());
+        // Missing or malformed: the peer as it is
+        let local = PeerAddr("127.0.0.1:5000".parse().unwrap(), false);
+        assert_eq!(real_peer(local, &HeaderMap::new()).0.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+        h.insert("cf-connecting-ip", "nonsense".parse().unwrap());
+        let local = PeerAddr("[::1]:5000".parse().unwrap(), false);
+        assert!(real_peer(local, &h).0.ip().is_loopback());
     }
 }

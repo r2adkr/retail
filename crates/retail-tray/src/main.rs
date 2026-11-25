@@ -446,6 +446,9 @@ impl App {
             DashAction::OpenWeb => {
                 let _ = self.commands.send(Command::Server(ServerCommand::OpenWeb));
             }
+            DashAction::Tunnel(on) => {
+                let _ = self.commands.send(Command::Server(ServerCommand::Tunnel(on)));
+            }
             DashAction::Remove(id) => {
                 if d.remove_armed(id) {
                     d.confirm_remove = None;
@@ -1630,7 +1633,19 @@ mod preview {
             }
             d.node_scroll = 2;
         }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        // Behind CGNAT, with the internet tunnel off or on
+        if (state == "cgnat" || state == "tunnel")
+            && let Some(Ok(st)) = &mut d.status
+        {
+            st.public = None;
+            st.router = None;
+            st.notice = Some(retail_proto::api::ServerNotice::Cgnat { router_ip: "100.64.12.7".parse().unwrap() });
+            if state == "tunnel" {
+                st.notice = None;
+                st.tunnel = Some(retail_proto::api::TunnelStatus { url: Some("https://warm-river-lamp-sky.trycloudflare.com".into()), error: None });
+            }
+        }
+        let now =std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         if let Some(Ok(st)) = &mut d.status
             && st.running
         {

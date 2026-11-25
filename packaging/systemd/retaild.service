@@ -15,6 +15,9 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/retaild --state-dir /var/lib/retail
 Restart=on-failure
 RestartSec=2
+# Stopping (an update) ends retaild alone: the internet tunnel's cloudflared
+# keeps its address, and the next retaild takes it over
+KillMode=process
 StateDirectory=retail
 StateDirectoryMode=0700
 

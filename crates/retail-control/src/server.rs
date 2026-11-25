@@ -65,6 +65,8 @@ pub struct AppState {
     offered_routes: Arc<Mutex<HashMap<i64, Vec<Ipv4Net>>>>,
     /// Where the server is reachable now, sent to nodes
     server_addrs: Arc<Mutex<Vec<String>>>,
+    /// HTTPS URLs forwarding to the server, sent to nodes once set
+    server_fronts: Arc<Mutex<Option<Vec<String>>>>,
     /// Helper codes of member devices acting as helper nodes, while connected
     helper_codes: Arc<Mutex<HashMap<i64, String>>>,
     /// The chosen helper device's code, for the hosting daemon to link to
@@ -91,6 +93,7 @@ impl AppState {
             exit_nodes: Arc::default(),
             offered_routes: Arc::default(),
             server_addrs: Arc::default(),
+            server_fronts: Arc::default(),
             helper_codes: Arc::default(),
             helper_code: Arc::new(watch::channel(None).0),
             shutdown: Arc::new(watch::channel(false).0),
@@ -142,6 +145,18 @@ impl AppState {
             let mut cur = self.server_addrs.lock().unwrap();
             let changed = *cur != addrs;
             *cur = addrs;
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+    }
+
+    pub(crate) fn set_server_fronts(&self, fronts: Vec<String>) {
+        let changed = {
+            let mut cur = self.server_fronts.lock().unwrap();
+            let changed = cur.as_ref() != Some(&fronts);
+            *cur = Some(fronts);
             changed
         };
         if changed {
@@ -281,6 +296,7 @@ impl AppState {
             expires_at: me.expires_at,
             expired,
             server_addrs: self.server_addrs.lock().unwrap().clone(),
+            server_fronts: self.server_fronts.lock().unwrap().clone(),
         }))
     }
 }
