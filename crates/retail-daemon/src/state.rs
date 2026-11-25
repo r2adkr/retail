@@ -199,6 +199,16 @@ impl Persisted {
 /// works elevated; a daemon run by a plain user keeps what it has.
 #[cfg(windows)]
 pub fn take_over(dir: &Path) {
+    // A junction or link made in its place would carry all this, and every
+    // file written after, to wherever it points: removed (the link only) for
+    // a folder of its own
+    use std::os::windows::fs::MetadataExt;
+    const REPARSE_POINT: u32 = 0x400;
+    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_attributes() & REPARSE_POINT != 0) {
+        tracing::warn!("{} was a link to another folder; making it a folder", dir.display());
+        let _ = std::fs::remove_dir(dir).or_else(|_| std::fs::remove_file(dir));
+        let _ = std::fs::create_dir(dir);
+    }
     for args in [&["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"][..], &["/reset", "/T", "/C", "/Q"][..]] {
         let _ = std::process::Command::new("icacls").arg(dir).args(args).output();
     }

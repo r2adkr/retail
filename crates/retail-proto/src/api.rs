@@ -380,6 +380,27 @@ pub struct UpdateStatus {
     pub error: Option<String>,
     /// Official builds exist for this system, so it can update itself
     pub supported: bool,
+    /// What the installation is doing now
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<UpdateStage>,
+    /// While downloading: bytes so far, and in all when the server says
+    #[serde(default)]
+    pub done_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+}
+
+/// The steps of installing an update, in order
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateStage {
+    Downloading,
+    /// Comparing with the release's checksums and taking the programs out
+    Checking,
+    /// Putting the programs in place
+    Replacing,
+    /// Shutting down to start again as the new version
+    Restarting,
 }
 
 /// A server this device has joined and can switch back to without an invite
@@ -592,6 +613,20 @@ pub struct PeerStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_stage_is_optional() {
+        // What a 1.0.1 daemon sends
+        let old: UpdateStatus = serde_json::from_str(
+            r#"{"current":"1.0.1","latest":"1.0.2","available":true,"installing":true,"error":null,"supported":true}"#,
+        )
+        .unwrap();
+        assert_eq!((old.stage, old.done_bytes, old.total_bytes), (None, 0, None));
+        let new = UpdateStatus { stage: Some(UpdateStage::Downloading), done_bytes: 5, total_bytes: Some(9), ..old };
+        let s = serde_json::to_string(&new).unwrap();
+        assert!(s.contains(r#""stage":"downloading""#), "{s}");
+        assert_eq!(serde_json::from_str::<UpdateStatus>(&s).unwrap(), new);
+    }
 
     #[test]
     fn tagged_messages() {

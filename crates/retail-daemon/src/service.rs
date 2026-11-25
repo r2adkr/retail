@@ -303,19 +303,34 @@ fn request_stop(api: SocketAddr) {
 }
 
 /// Task Scheduler defaults would stop the daemon after 72 hours and on
-/// battery, and never restart it, so the task is imported from XML. Starting
-/// it replaces an instance Task Scheduler still counts as running (a daemon
-/// just ended for an update), which would otherwise ignore the start.
+/// battery, and never restart it, so the task is imported from XML.
 #[cfg(windows)]
 pub fn register(daemon: &Path) -> Result<()> {
+    create_task(daemon)?;
+    run_quiet("schtasks", &["/Run", "/TN", TASK])
+}
+
+/// What marks the current task definition (the one-minute trigger)
+#[cfg(windows)]
+const TASK_MARK: &str = "retail node daemon (2)";
+
+/// The boot trigger, and a trigger every minute that starts the daemon when
+/// it is not running (after an update, or a crash: Task Scheduler restarts
+/// nothing that exits with an error code). Running, the minute's start is
+/// ignored.
+#[cfg(windows)]
+fn create_task(daemon: &Path) -> Result<()> {
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>retail node daemon</Description></RegistrationInfo>
-  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <RegistrationInfo><Description>{TASK_MARK}</Description></RegistrationInfo>
+  <Triggers>
+    <BootTrigger><Enabled>true</Enabled></BootTrigger>
+    <TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><Enabled>true</Enabled></TimeTrigger>
+  </Triggers>
   <Principals><Principal id="System"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
-    <MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
@@ -327,9 +342,15 @@ pub fn register(daemon: &Path) -> Result<()> {
   </Settings>
   <Actions Context="System"><Exec><Command>{}</Command></Exec></Actions>
 </Task>"#,
-        daemon.display()
+        xml_text(&daemon.display().to_string())
     );
-    let path = std::env::temp_dir().join("retaild-task.xml");
+    // In the state folder, which only SYSTEM and administrators may change:
+    // in a shared temporary folder another user could swap the file before
+    // Task Scheduler reads it, and run their program as SYSTEM
+    let dir = crate::state::default_state_dir();
+    std::fs::create_dir_all(&dir).context("creating the state folder")?;
+    crate::state::secure_dir(&dir);
+    let path = dir.join("retaild-task.xml");
     let mut bytes = vec![0xFF, 0xFE];
     for u in xml.encode_utf16() {
         bytes.extend_from_slice(&u.to_le_bytes());
@@ -338,12 +359,47 @@ pub fn register(daemon: &Path) -> Result<()> {
     let path_s = path.display().to_string();
     let created = run_quiet("schtasks", &["/Create", "/TN", TASK, "/XML", &path_s, "/F"]);
     let _ = std::fs::remove_file(&path);
-    created?;
-    run_quiet("schtasks", &["/Run", "/TN", TASK])
+    created
+}
+
+/// `s` as XML text: a folder may be named `R&D`
+#[cfg(windows)]
+fn xml_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// A daemon started by an older task definition (from 1.0.1 or before, which
+/// an update leaves in place) puts in the current one. Running instances
+/// carry on.
+#[cfg(windows)]
+pub fn update_task() {
+    let Ok(me) = std::env::current_exe() else { return };
+    let Ok(out) = std::process::Command::new("schtasks").args(["/Query", "/TN", TASK, "/XML"]).output() else { return };
+    // UTF-16 or the console's code page, by Windows version
+    let raw = out.stdout.strip_prefix(&[0xFF, 0xFE]).unwrap_or(&out.stdout);
+    let xml = if raw.len() >= 2 && raw.iter().skip(1).step_by(2).take(64).all(|b| *b == 0) {
+        let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    // Not installed as the task (a test, a copy elsewhere), or current
+    let ours = xml.contains(&format!("<Command>{}</Command>", xml_text(&me.display().to_string())));
+    if !out.status.success() || !ours || xml.contains(TASK_MARK) {
+        return;
+    }
+    match create_task(&me) {
+        Ok(()) => tracing::info!("boot task updated: it now also starts retaild when it is not running"),
+        Err(e) => tracing::warn!("updating the boot task: {e:#}"),
+    }
 }
 
 #[cfg(windows)]
 pub fn stop(api: SocketAddr) {
+    // Off first: the task's one-minute trigger would otherwise start it again,
+    // in the middle of an installer replacing the programs. `register` turns
+    // it back on.
+    let _ = run_quiet("schtasks", &["/Change", "/TN", TASK, "/DISABLE"]);
     request_stop(api);
     let _ = run_quiet("schtasks", &["/End", "/TN", TASK]);
     // Not this process (`retaild service stop` itself)

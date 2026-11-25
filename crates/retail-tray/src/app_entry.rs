@@ -57,7 +57,7 @@ mod imp {
     }
 
     fn run(program: &str, args: &[&str]) -> Result<(), String> {
-        let out = std::process::Command::new(program)
+        let out = std::process::Command::new(crate::install::system_program(program))
             .args(args)
             .creation_flags(NO_WINDOW)
             .output()

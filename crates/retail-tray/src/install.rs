@@ -177,7 +177,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         let r = privileged(&source, &manifest, &opts);
         // For the window that raised this step, which shows the error itself
         if let Some(f) = &opts.result {
-            let _ = std::fs::write(f, r.as_ref().err().map_or("", String::as_str));
+            write_result(f, r.as_ref().err().map_or("", String::as_str));
             return Some(if r.is_ok() { 0 } else { 3 });
         }
         return Some(report(r));
@@ -225,9 +225,7 @@ pub fn run(args: &[String]) -> Option<i32> {
             install_now(&me, &source, &manifest, &o)?;
             match (&o.result, o.raised_window) {
                 // Tells the user's process waiting for this window
-                (Some(f), true) => {
-                    let _ = std::fs::write(f, INSTALLED);
-                }
+                (Some(f), true) => write_result(f, INSTALLED),
                 _ => {
                     after_install(&o, installed);
                 }
@@ -270,6 +268,36 @@ pub fn run(args: &[String]) -> Option<i32> {
     Some(0)
 }
 
+/// The file the raised step answers in, made by the user beforehand under a
+/// name nobody can guess: in a shared temporary folder (Linux `/tmp`) another
+/// user's link of a known name would have root write wherever it points
+fn result_file(what: &str) -> Result<PathBuf, String> {
+    for _ in 0..8 {
+        // Keys from the system's random source, new for each RandomState
+        let nonce = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), std::process::id());
+        let path = std::env::temp_dir().join(format!("retail-{what}-{nonce:016x}.txt"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err("no temporary file could be made".into())
+}
+
+/// Answers in the file `result_file` made: only an existing file, and on
+/// Unix not through a link
+fn write_result(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW);
+    if let Ok(mut f) = o.open(path) {
+        let _ = f.write_all(text.as_bytes());
+    }
+}
+
 /// What the raised window writes once it has installed
 const INSTALLED: &str = "installed";
 
@@ -279,8 +307,7 @@ const INSTALLED: &str = "installed";
 /// settings). `None` if the user declined.
 #[cfg(windows)]
 fn raised_window(me: &Path, opts: &Opts, installed: bool) -> Option<i32> {
-    let result = std::env::temp_dir().join(format!("retail-window-{}.txt", std::process::id()));
-    let _ = std::fs::remove_file(&result);
+    let result = result_file("window").ok()?;
     let raised = Opts { result: Some(result.clone()), ..opts.clone() };
     let mut done = false;
     let code = elevate_with(me, "--raised-window", &raised, || {
@@ -303,8 +330,7 @@ fn install_now(me: &Path, source: &Path, m: &Manifest, opts: &Opts) -> Result<()
     if is_admin() {
         return privileged(source, m, opts);
     }
-    let result = std::env::temp_dir().join(format!("retail-install-{}.txt", std::process::id()));
-    let _ = std::fs::remove_file(&result);
+    let result = result_file("install")?;
     let raised = Opts { result: Some(result.clone()), yes: true, ..opts.clone() };
     let code = elevate(me, &raised)?;
     let error = std::fs::read_to_string(&result).unwrap_or_default();
@@ -555,7 +581,7 @@ fn remove_dir_later(dir: &Path, pings: u32) -> std::io::Result<std::process::Chi
     use std::os::windows::process::CommandExt;
     // cmd reads its command line as it is: Rust's quoting (\" for a quote)
     // would leave it a path it cannot find
-    std::process::Command::new("cmd")
+    std::process::Command::new(system_program("cmd"))
         .raw_arg(format!("/C ping -n {pings} 127.0.0.1 >NUL & rmdir /S /Q \"{}\"", dir.display()))
         .creation_flags(0x0800_0000)
         .spawn()
@@ -577,7 +603,7 @@ fn end_other_tray_apps() {
 
 #[cfg(windows)]
 fn run_quiet(program: &str, args: &[&str]) -> Result<(), String> {
-    let out = std::process::Command::new(program).args(args).output().map_err(|e| format!("{program}: {e}"))?;
+    let out = std::process::Command::new(system_program(program)).args(args).output().map_err(|e| format!("{program}: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -596,6 +622,64 @@ fn daemon_service(daemon: &Path, action: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("Error: ").to_string())
+    }
+}
+
+/// Starts retaild as a service, asking for administrator permission: its
+/// boot registration is put in place again (the current one) and started.
+/// For a daemon that did not come back after an update, or was stopped.
+pub fn start_daemon() -> Result<(), String> {
+    let dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().map(Path::to_path_buf).ok_or("no program folder")?;
+    let daemon = dir.join(if cfg!(windows) { "retaild.exe" } else { "retaild" });
+    if !daemon.is_file() {
+        return Err(format!("{} is missing", daemon.display()));
+    }
+    start_daemon_raised(&daemon)
+}
+
+#[cfg(windows)]
+fn start_daemon_raised(daemon: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (verb, file, params) = (wide("runas"), wide(&daemon.display().to_string()), wide("service register"));
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = 0; // SW_HIDE
+    if unsafe { ShellExecuteExW(&mut info) } == 0 || info.hProcess.is_null() {
+        return Err(tr("Administrator permission was not given.").into());
+    }
+    let mut code = 1u32;
+    unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+    }
+    if code == 0 { Ok(()) } else { Err(tr("retaild could not be started.").into()) }
+}
+
+#[cfg(target_os = "linux")]
+fn start_daemon_raised(daemon: &Path) -> Result<(), String> {
+    match std::process::Command::new("pkexec").arg(daemon).args(["service", "register"]).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err(tr("retaild could not be started.").into()),
+        Err(_) => Err(format!("sudo {} service register", daemon.display())),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_daemon_raised(daemon: &Path) -> Result<(), String> {
+    // The path goes in as an AppleScript string: quotes and backslashes escaped
+    let path = daemon.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("do shell script quoted form of \"{path}\" & \" service register\" with administrator privileges");
+    match std::process::Command::new("osascript").args(["-e", &script]).status() {
+        Ok(s) if s.success() => Ok(()),
+        _ => Err(tr("retaild could not be started.").into()),
     }
 }
 
@@ -661,8 +745,44 @@ fn remove_autostart() {
 
 #[cfg(windows)]
 fn is_admin() -> bool {
-    // `net session` succeeds only in an elevated process
-    std::process::Command::new("net").arg("session").output().is_ok_and(|o| o.status.success())
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: the token handle is ours and closed; the buffer is the size given
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        ok != 0 && elevation.TokenIsElevated != 0
+    }
+}
+
+/// A Windows program from System32 (`reg`, `taskkill`, `cmd`, PowerShell),
+/// never one of the same name in the folder this runs from, which for an
+/// installer is Downloads
+#[cfg(windows)]
+pub fn system_program(name: &str) -> std::path::PathBuf {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 260];
+    // SAFETY: the buffer's length is passed
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    let dir = if n > 0 && n < buf.len() { String::from_utf16_lossy(&buf[..n]) } else { r"C:\Windows\System32".to_string() };
+    let dir = std::path::PathBuf::from(dir);
+    match name {
+        "powershell" => dir.join("WindowsPowerShell").join("v1.0").join("powershell.exe"),
+        _ => dir.join(format!("{name}.exe")),
+    }
 }
 
 #[cfg(unix)]

@@ -247,9 +247,14 @@ async fn quick_host(metrics: u16) -> Option<String> {
     valid_host(&host).then_some(host)
 }
 
-/// A host name that can go into an `https://` URL as it is
+/// A quick tunnel's host name that can go into an `https://` URL as it is.
+/// Only Cloudflare's: a local program answering on the metrics port (another
+/// user's, once cloudflared is gone) must not name a host for every device.
 fn valid_host(host: &str) -> bool {
-    !host.is_empty()
+    host.len() < 254
+        && host
+            .strip_suffix(".trycloudflare.com")
+            .is_some_and(|sub| !sub.is_empty() && sub.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         && host.len() < 254
         && host.contains('.')
         && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
@@ -485,6 +490,9 @@ mod tests {
         assert!(!valid_host("localhost"));
         assert!(!valid_host("evil.com/path"));
         assert!(!valid_host("a b.trycloudflare.com"));
+        assert!(!valid_host("tunnel.example.com"));
+        assert!(!valid_host("x.evil.trycloudflare.com.example"));
+        assert!(!valid_host("a.b.trycloudflare.com"));
     }
 
     #[test]

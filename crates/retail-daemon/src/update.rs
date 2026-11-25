@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use retail_proto::api::UpdateStatus;
+use retail_proto::api::{UpdateStage, UpdateStatus};
 use tokio::sync::Notify;
 
 use crate::releases;
@@ -122,15 +122,18 @@ impl Updater {
     async fn finish(&self, latest: String) -> Result<()> {
         let result = self.install_version(&latest).await;
         let mut s = self.status.lock().unwrap();
-        s.installing = false;
         match result {
+            // Still installing to whoever asks until the restart
             Ok(()) => {
                 tracing::info!("updated to {latest}; restarting");
+                s.stage = Some(UpdateStage::Restarting);
                 self.restarting.store(true, Ordering::Relaxed);
                 self.restart.notify_one();
                 Ok(())
             }
             Err(e) => {
+                s.installing = false;
+                s.stage = None;
                 s.error = Some(format!("{e:#}"));
                 Err(e)
             }
@@ -144,7 +147,18 @@ impl Updater {
         let files: Vec<String> = programs().into_iter().filter(|f| bin.join(f).is_file()).collect();
         // Every file is fetched and checked now; none already there is trusted
         let _ = std::fs::remove_dir_all(&dir);
-        releases::fetch_version(version, &variant(), &files, &dir).await?;
+        let stage = |st: UpdateStage, done: u64, total: Option<u64>| {
+            let mut s = self.status.lock().unwrap();
+            s.stage = Some(st);
+            s.done_bytes = done;
+            s.total_bytes = total;
+        };
+        stage(UpdateStage::Downloading, 0, None);
+        releases::fetch_version_with(version, &variant(), &files, &dir, &|d, t| stage(UpdateStage::Downloading, d, t), || {
+            stage(UpdateStage::Checking, 0, None)
+        })
+        .await?;
+        stage(UpdateStage::Replacing, 0, None);
         for f in &files {
             replace(&dir.join(f), &bin.join(f)).with_context(|| format!("replacing {}", bin.join(f).display()))?;
         }
@@ -214,10 +228,24 @@ pub fn restart_after_exit() -> ! {
     {
         use std::os::windows::process::CommandExt;
         const DETACHED: u32 = 0x0000_0008 | 0x0800_0000; // DETACHED_PROCESS | CREATE_NO_WINDOW
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "ping -n 4 127.0.0.1 >NUL & schtasks /Run /TN retail\\retaild"])
-            .creation_flags(DETACHED)
-            .spawn();
+        const BREAKAWAY: u32 = 0x0100_0000; // CREATE_BREAKAWAY_FROM_JOB
+        // Out of the task's job where it allows that, so ending the task does
+        // not end this too. The task's one-minute trigger starts the daemon
+        // should this not.
+        let restart = || {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "ping -n 3 127.0.0.1 >NUL & schtasks /Run /TN retail\\retaild"]);
+            c
+        };
+        match restart().creation_flags(DETACHED | BREAKAWAY).spawn() {
+            Ok(_) => tracing::info!("restarting through Task Scheduler"),
+            Err(e) => {
+                tracing::info!("restarting through Task Scheduler, inside the task's job ({e})");
+                if let Err(e) = restart().creation_flags(DETACHED).spawn() {
+                    tracing::warn!("could not ask Task Scheduler to restart: {e}; its one-minute trigger will");
+                }
+            }
+        }
     }
     std::process::exit(75)
 }

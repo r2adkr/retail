@@ -50,7 +50,8 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 
 fetch() {  # url file
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$2" "$1"
+        # HTTPS only, redirects too (file: for a local mirror)
+        curl -fsSL --proto '=https,file' --proto-redir '=https' -o "$2" "$1"
     elif command -v wget >/dev/null 2>&1; then
         wget -qO "$2" "$1"
     else

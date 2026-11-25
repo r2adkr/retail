@@ -136,36 +136,49 @@ mod imp {
     use super::*;
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER};
     use windows_sys::Win32::Networking::WinSock::AF_INET;
+    use windows_sys::Win32::Security::{EqualSid, IsValidSid, IsWellKnownSid, WinLocalSystemSid};
     use windows_sys::Win32::System::RemoteDesktop::{WTS_PROCESS_INFOW, WTSEnumerateProcessesW, WTSFreeMemory};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
-    /// Services, retaild among them, run in session 0, where a signed-in user
-    /// cannot start programs; otherwise it must be this user's own session
+    /// The service runs as SYSTEM. Otherwise it must be this user's own
+    /// program in this session. A process in session 0 alone is not enough:
+    /// a user can have one started there (through WMI, say), and then its
+    /// user is theirs to see, where a service's is not.
     pub fn check(addr: SocketAddr) -> Result<(), String> {
         let SocketAddr::V4(v4) = addr else { return Err(format!("{addr}: only IPv4 local API addresses can be checked")) };
         let pid = owner(v4).ok_or_else(|| format!("nothing is listening on {addr}"))?;
-        let (theirs, mine) = sessions(pid, unsafe { GetCurrentProcessId() });
-        match theirs {
-            Some(0) => Ok(()),
-            Some(s) if Some(s) == mine => Ok(()),
-            _ => Err(refuse(addr, &format!("process {pid}, another user's session"))),
+        if trusted(pid, unsafe { GetCurrentProcessId() }) {
+            Ok(())
+        } else {
+            Err(refuse(addr, &format!("process {pid}, neither the service nor this user's")))
         }
     }
 
-    /// The sessions of two processes. The system's process list has them for
-    /// every process; asking a process itself needs rights a plain user
+    /// Whether process `theirs` runs as SYSTEM, or as the same user in the
+    /// same session as `mine`. The system's process list has user and session
+    /// for every process; asking a process itself needs rights a plain user
     /// lacks for services.
-    fn sessions(a: u32, b: u32) -> (Option<u32>, Option<u32>) {
+    fn trusted(theirs: u32, mine: u32) -> bool {
         let mut list: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
         let mut count = 0u32;
-        if unsafe { WTSEnumerateProcessesW(std::ptr::null_mut(), 0, 1, &mut list, &mut count) } == 0 || list.is_null() {
-            return (None, None);
+        // SAFETY: the list comes from the call and is freed once read
+        unsafe {
+            if WTSEnumerateProcessesW(std::ptr::null_mut(), 0, 1, &mut list, &mut count) == 0 || list.is_null() {
+                return false;
+            }
+            let procs = std::slice::from_raw_parts(list, count as usize);
+            let find = |pid: u32| procs.iter().find(|p| p.ProcessId == pid);
+            let sid_ok = |p: &WTS_PROCESS_INFOW| !p.pUserSid.is_null() && IsValidSid(p.pUserSid) != 0;
+            let out = match (find(theirs), find(mine)) {
+                (Some(t), _) if sid_ok(t) && IsWellKnownSid(t.pUserSid, WinLocalSystemSid) != 0 => true,
+                // A service of an account this user may not look into
+                (Some(t), _) if t.pUserSid.is_null() => t.SessionId == 0,
+                (Some(t), Some(m)) => sid_ok(t) && sid_ok(m) && t.SessionId == m.SessionId && EqualSid(t.pUserSid, m.pUserSid) != 0,
+                _ => false,
+            };
+            WTSFreeMemory(list.cast());
+            out
         }
-        let procs = unsafe { std::slice::from_raw_parts(list, count as usize) };
-        let find = |pid: u32| procs.iter().find(|p| p.ProcessId == pid).map(|p| p.SessionId);
-        let out = (find(a), find(b));
-        unsafe { WTSFreeMemory(list.cast()) };
-        out
     }
 
     fn owner(addr: std::net::SocketAddrV4) -> Option<u32> {
@@ -181,12 +194,11 @@ mod imp {
         let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
         let rows = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize) };
         let ip = u32::from_ne_bytes(addr.ip().octets());
-        rows.iter()
-            .find(|r| {
-                let port = u16::from_be((r.dwLocalPort & 0xFFFF) as u16);
-                port == addr.port() && (r.dwLocalAddr == ip || r.dwLocalAddr == 0)
-            })
-            .map(|r| r.dwOwningPid)
+        let on = |r: &&windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID, local: u32| {
+            u16::from_be((r.dwLocalPort & 0xFFFF) as u16) == addr.port() && r.dwLocalAddr == local
+        };
+        // The exact address first: it is the one connections reach
+        rows.iter().find(|r| on(r, ip)).or_else(|| rows.iter().find(|r| on(r, 0))).map(|r| r.dwOwningPid)
     }
 }
 
@@ -234,11 +246,12 @@ mod tests {
         assert!(netstat_listeners(new, "127.0.0.1:1".parse().unwrap()).is_empty());
     }
 
-    /// A service's socket (RPC on 135, in session 0) passes for a plain user too
+    /// The system's own socket (SMB on 445, the System process) passes for a
+    /// plain user too
     #[cfg(windows)]
     #[test]
     fn service_listener_passes() {
-        assert_eq!(check("127.0.0.1:135".parse().unwrap()), Ok(()));
+        assert_eq!(check("127.0.0.1:445".parse().unwrap()), Ok(()));
     }
 
     /// A socket this test opens is its own, so it passes
@@ -251,3 +264,4 @@ mod tests {
         assert!(check(addr).is_err());
     }
 }
+

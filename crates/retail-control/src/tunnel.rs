@@ -33,7 +33,7 @@ const POLL_GATHER: Duration = Duration::from_millis(2);
 /// A session nobody polled for this long is closed
 const POLL_IDLE: Duration = Duration::from_secs(60);
 const MAX_POLL_SESSIONS: usize = 256;
-/// Per client address, so one source cannot take them all
+/// Per client address (IPv6: per /64), so one source cannot take them all
 const MAX_POLL_SESSIONS_PER_IP: usize = 16;
 
 pub struct PollSession {
@@ -62,6 +62,18 @@ fn real_peer(peer: PeerAddr, headers: &HeaderMap) -> PeerAddr {
     match headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {
         Some(ip) => PeerAddr(std::net::SocketAddr::new(ip.to_canonical(), peer.0.port()), peer.1),
         None => peer,
+    }
+}
+
+/// An address, or for IPv6 its /64: one subscriber has a whole /64 to pick
+/// addresses from
+fn same_network(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip.to_canonical() {
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            std::net::IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+        v4 => v4,
     }
 }
 
@@ -127,7 +139,8 @@ pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): Connect
     {
         let mut polls = state.polls().lock().unwrap();
         polls.retain(|_, s| s.touched.lock().unwrap().elapsed() < POLL_IDLE);
-        if polls.len() >= MAX_POLL_SESSIONS || polls.values().filter(|s| s.ip == peer.0.ip()).count() >= MAX_POLL_SESSIONS_PER_IP {
+        let mine = same_network(peer.0.ip());
+        if polls.len() >= MAX_POLL_SESSIONS || polls.values().filter(|s| same_network(s.ip) == mine).count() >= MAX_POLL_SESSIONS_PER_IP {
             return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
         }
     }

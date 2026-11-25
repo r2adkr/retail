@@ -654,7 +654,7 @@ impl Dashboard {
 /// Draws word-wrapped text and returns the baseline of the last line. Lines
 /// break at spaces, or between any two characters where a word is too long
 /// or the script has no spaces (Japanese, Chinese).
-fn paragraph(c: &mut Canvas, text: &str, x: f32, y: f32, w: f32, px: f32, color: Color) -> f32 {
+pub(crate) fn paragraph(c: &mut Canvas, text: &str, x: f32, y: f32, w: f32, px: f32, color: Color) -> f32 {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     for ch in text.chars() {

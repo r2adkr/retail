@@ -17,6 +17,7 @@ mod http;
 mod http1;
 mod local_api;
 mod local_token;
+mod logfile;
 mod magicdns;
 mod memory;
 mod portmap;
@@ -105,11 +106,20 @@ fn default_tun_name() -> Option<String> {
 // data plane runs on its own threads
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
-    init_logging();
+    let args = Args::parse();
+    // Task Scheduler and launchd keep nothing a service writes to stderr
+    let log_file = (args.cmd.is_none() && cfg!(any(windows, target_os = "macos")) && !std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .then(|| args.state_dir.clone().unwrap_or_else(state::default_state_dir))
+        .and_then(|dir| {
+            // Its own folder before anything is written there
+            std::fs::create_dir_all(&dir).ok()?;
+            state::secure_dir(&dir);
+            logfile::LogFile::open(&dir.join("retaild.log"))
+        });
+    init_logging(log_file);
     // rustls refuses to guess a provider when more than one is available
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let args = Args::parse();
     if let Some(cmd) = args.cmd {
         return service::run(cmd, args.state_dir.as_deref(), args.api);
     }
@@ -179,6 +189,8 @@ async fn main() -> Result<()> {
             let req = retail_proto::api::HelperStartRequest { port: None, public: args.helper_public.clone() };
             match b.helper.start(&req).await {
                 Ok(()) => {
+                    // In a container this is where the operator finds it; the
+                    // log is for administrators only
                     if let Some(code) = b.helper.status().await.code {
                         tracing::info!("helper code: {code}");
                     }
@@ -193,6 +205,8 @@ async fn main() -> Result<()> {
     });
 
     update::clean_up(&state_dir);
+    #[cfg(windows)]
+    tokio::task::spawn_blocking(service::update_task);
     update::spawn(backend.clone());
     // Devices learn the hosted server's current addresses, which change
     // with the router's public address or the LAN
@@ -200,6 +214,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            b.host.set_mesh_ip(b.own_mesh_ip().await);
             b.host.publish_addrs().await;
         }
     });
@@ -229,7 +244,7 @@ async fn main() -> Result<()> {
 
 /// `RUST_LOG` takes the `target=level,...` form (e.g. `retaild=debug`). The
 /// regex-free filter keeps the binary and its resident size small.
-fn init_logging() {
+fn init_logging(file: Option<logfile::LogFile>) {
     use tracing_subscriber::filter::Targets;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -238,14 +253,17 @@ fn init_logging() {
         .ok()
         .and_then(|s| s.parse::<Targets>().ok())
         .unwrap_or_else(|| Targets::new().with_target("retaild", tracing::Level::INFO));
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-                .with_writer(std::io::stderr),
-        )
-        .with(filter)
-        .init();
+    let to_stderr = file.is_none().then(|| {
+        tracing_subscriber::fmt::layer().with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())).with_writer(std::io::stderr)
+    });
+    let to_file = file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(move || f.clone()));
+    tracing_subscriber::registry().with(to_stderr).with(to_file).with(filter).init();
+    // A panic says where, before the service manager's exit code is all that is left
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        default(info);
+    }));
 }
 
 async fn shutdown_signal() {

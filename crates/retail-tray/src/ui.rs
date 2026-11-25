@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use retail_proto::Key;
-use retail_proto::api::{BackendState, PeerStatus, StatusResponse};
+use retail_proto::api::{BackendState, PeerStatus, StatusResponse, UpdateStage};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::draw::{Canvas, Theme, contains, shade, with_alpha};
@@ -55,6 +55,100 @@ pub enum Action {
     Gear,
     /// Install the new release
     Update,
+    /// Start retaild with administrator permission
+    StartDaemon,
+}
+
+/// The daemon going away during an update, and coming back
+#[derive(Clone, Default)]
+pub struct DaemonWait {
+    /// The last answer had an update installing
+    pub installing: bool,
+    /// Since when it has been gone after that
+    pub since: Option<Instant>,
+    /// Since when it is being started with administrator permission
+    pub starting: Option<Instant>,
+}
+
+/// An update's restart usually takes a few seconds; Task Scheduler's
+/// one-minute trigger is the slowest way back
+const RESTART_WAIT: Duration = Duration::from_secs(75);
+const START_WAIT: Duration = Duration::from_secs(30);
+
+impl DaemonWait {
+    /// Called with every answer (or its absence)
+    pub fn seen(&mut self, s: Option<&StatusResponse>) {
+        match s {
+            Some(s) => {
+                self.installing = s.update.installing;
+                self.since = None;
+                self.starting = None;
+            }
+            None if self.installing => {
+                self.since.get_or_insert_with(Instant::now);
+            }
+            None => {}
+        }
+    }
+
+    /// Restarting after an update, within the time that may take
+    pub fn restarting(&self) -> bool {
+        self.since.is_some_and(|t| t.elapsed() < RESTART_WAIT)
+    }
+
+    pub fn is_starting(&self) -> bool {
+        self.starting.is_some_and(|t| t.elapsed() < START_WAIT)
+    }
+
+    /// Title, explanation, and the progress shown instead of the start button
+    pub fn text(&self) -> (String, String, Option<f32>) {
+        if self.is_starting() {
+            return (tr("Starting retaild…").into(), tr("Waiting for retaild to answer.").into(), Some(0.5));
+        }
+        if let Some(t) = self.since.filter(|_| self.restarting()) {
+            let s = t.elapsed().as_secs_f32();
+            // Most restarts are over within ten seconds; the bar slows down
+            // as it nears the end rather than stopping full
+            let f = 0.6 + 0.38 * (1.0 - (-s / 12.0).exp());
+            return (tr("Restarting retail…").into(), trf("The update is installed. retail starts again in a moment ({n} s).", &[("n", &(s as u64))]), Some(f));
+        }
+        let hint = if self.since.is_some() {
+            tr("retail did not start again after the update. Start it here.")
+        } else if cfg!(windows) {
+            tr("Start it here, or run retaild.exe as administrator.")
+        } else {
+            tr("Start it here, or run it with sudo retaild.")
+        };
+        (tr("retaild is not running").into(), hint.into(), None)
+    }
+}
+
+/// A thin bar `f` (0 to 1) full
+pub fn progress_bar(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, f: f32) {
+    c.fill_rrect(x, y, w, 4.0, 2.0, t.border);
+    c.fill_rrect(x, y, (w * f.clamp(0.0, 1.0)).max(4.0), 4.0, 2.0, t.accent);
+}
+
+/// What an installation is doing, in words
+pub fn stage_text(stage: UpdateStage, done: u64, total: Option<u64>) -> String {
+    let mb = |b: u64| format!("{:.1}", b as f64 / 1_048_576.0);
+    match (stage, total) {
+        (UpdateStage::Downloading, Some(t)) => trf("Downloading {done} / {total} MB", &[("done", &mb(done)), ("total", &mb(t))]),
+        (UpdateStage::Downloading, None) => trf("Downloading {done} MB", &[("done", &mb(done))]),
+        (UpdateStage::Checking, _) => tr("Checking the download…").into(),
+        (UpdateStage::Replacing, _) => tr("Putting the new programs in place…").into(),
+        (UpdateStage::Restarting, _) => tr("Restarting…").into(),
+    }
+}
+
+/// How far along the whole installation is: the download is most of it
+pub fn stage_fraction(stage: UpdateStage, done: u64, total: Option<u64>) -> f32 {
+    match stage {
+        UpdateStage::Downloading => 0.05 + 0.75 * total.filter(|t| *t > 0).map_or(0.0, |t| done as f32 / t as f32),
+        UpdateStage::Checking => 0.85,
+        UpdateStage::Replacing => 0.9,
+        UpdateStage::Restarting => 0.95,
+    }
 }
 
 struct MenuItem {
@@ -77,6 +171,7 @@ pub struct Ui {
     pub menu: Option<Key>,
     /// The gear menu is open
     pub gear: bool,
+    pub daemon: DaemonWait,
     regions: Vec<(Rect, Action)>,
 }
 
@@ -92,6 +187,7 @@ impl Ui {
             transparent_corners: false,
             menu: None,
             gear: false,
+            daemon: DaemonWait::default(),
             regions: Vec::new(),
         }
     }
@@ -123,7 +219,8 @@ impl Ui {
                 CARD_H + 12.0 + SECTION_H + rows * ROW_H + error + 8.0
             }
             Some(_) => MESSAGE_H,
-            None => NOTE_H + 12.0,
+            // Room for a hint over two lines
+            None => MESSAGE_H + 18.0,
         };
         HEADER_H + self.banner_h() + body + FOOTER_H
     }
@@ -187,23 +284,31 @@ impl Ui {
             y += BANNER_H;
         }
         match self.view.clone() {
-            View::Loading => self.message(&mut c, &t, y, tr("Connecting to retaild…"), "", None),
-            View::Offline => self.message(
-                &mut c,
-                &t,
-                y,
-                "retaild is not running",
-                if cfg!(windows) { tr("Run retaild.exe as administrator.") } else { tr("Run it with sudo retaild.") },
-                None,
-            ),
-            View::Status(s) if s.state == BackendState::NeedsLogin => self.message(
-                &mut c,
-                &t,
-                y,
-                tr("This device hasn't logged in yet"),
-                tr("Connect with an invite code to join the network."),
-                Some(tr("Log in…")),
-            ),
+            View::Loading => {
+                self.message(&mut c, &t, y, tr("Connecting to retaild…"), "", None);
+            }
+            View::Offline => {
+                let (title, hint, bar) = self.daemon.text();
+                match bar {
+                    Some(f) => {
+                        let below = self.message(&mut c, &t, y, &title, &hint, None);
+                        progress_bar(&mut c, &t, PAD, below + 4.0, WIDTH - 2.0 * PAD, f);
+                    }
+                    None => {
+                        self.message(&mut c, &t, y, &title, &hint, Some((tr("Start retaild"), Action::StartDaemon)));
+                    }
+                }
+            }
+            View::Status(s) if s.state == BackendState::NeedsLogin => {
+                self.message(
+                    &mut c,
+                    &t,
+                    y,
+                    tr("This device hasn't logged in yet"),
+                    tr("Connect with an invite code to join the network."),
+                    Some((tr("Log in…"), Action::OpenSettings)),
+                );
+            }
             View::Status(s) if s.state == BackendState::Stopped => {
                 y = self.device_card(&mut c, &t, &s, y + 4.0);
                 c.text(tr("The connection is off"), PAD, y + 36.0, 14.0, Weight::Semibold, t.text, None);
@@ -264,6 +369,7 @@ impl Ui {
         c.text("retail", lx + 40.0, 35.0, 16.0, Weight::Semibold, t.text, None);
         let (label, color) = match &self.view {
             View::Loading => (tr("Starting…"), t.gray),
+            View::Offline if self.daemon.restarting() => (tr("Restarting retail…"), t.amber),
             View::Offline => (tr("retaild is not running"), t.red),
             View::Status(s) => match (s.state, s.control_connected) {
                 (BackendState::NeedsLogin, _) => (tr("Login needed"), t.amber),
@@ -431,18 +537,23 @@ impl Ui {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn message(&mut self, c: &mut Canvas, t: &Theme, y: f32, title: &str, body: &str, button: Option<&str>) {
+    /// A title, a wrapped explanation and maybe a button; returns where the
+    /// space under the explanation starts
+    fn message(&mut self, c: &mut Canvas, t: &Theme, y: f32, title: &str, body: &str, button: Option<(&str, Action)>) -> f32 {
         c.text(title, PAD, y + 34.0, 15.0, Weight::Semibold, t.text, Some(WIDTH - 2.0 * PAD));
-        c.text(body, PAD, y + 56.0, 12.5, Weight::Regular, t.dim, Some(WIDTH - 2.0 * PAD));
-        if let Some(label) = button {
-            let (bw, bh) = (112.0, 34.0);
+        let below = crate::dashboard::paragraph(c, body, PAD, y + 56.0, WIDTH - 2.0 * PAD, 12.5, t.dim) + 20.0;
+        if let Some((label, action)) = button {
+            let y = below - 76.0;
+            let bw = (c.measure(label, 13.0, Weight::Semibold) + 32.0).max(112.0);
+            let bh = 34.0;
             let r = Rect::from_xywh(PAD, y + 76.0, bw, bh).unwrap();
             let bg = if self.hovered(&r) { shade(t.accent, 1.1) } else { t.accent };
             c.fill_rrect(PAD, y + 76.0, bw, bh, 8.0, bg);
             let lw = c.measure(label, 13.0, Weight::Semibold);
             c.text(label, PAD + (bw - lw) / 2.0, y + 76.0 + bh / 2.0 + 4.5, 13.0, Weight::Semibold, Color::WHITE, None);
-            self.regions.push((r, Action::OpenSettings));
+            self.regions.push((r, action));
         }
+        below
     }
 
     fn footer(&mut self, c: &mut Canvas, t: &Theme, h: f32) {

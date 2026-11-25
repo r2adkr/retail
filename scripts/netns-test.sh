@@ -63,6 +63,10 @@
 #   helper-device B hosts behind a router that opens nothing (as behind
 #                 CGNAT); C, a member on a public address, becomes its helper
 #                 node, and A on another network joins through C
+#   mesh-fallback B hosts behind a router that opens ports (as host-nat); then
+#                 every TCP way in is cut (as when an internet tunnel's address
+#                 changes) while their WireGuard path stays: A finds the server
+#                 again at B's mesh address, through that path
 #   subnet        B routes its LAN (192.168.2.0/24) for the others: not before
 #                 the server approves it, then A reaches B's router (no retail
 #                 on it), which sees B's LAN address; B keeps its own LAN off
@@ -1012,7 +1016,7 @@ run_scenario() {
         invite=$(cli B server invite 2>/dev/null)
         echo "  invite leads with $(invite_first_addr "$invite")"
         cli A up --invite "$invite" --hostname a >/dev/null || { echo "  A could not join through C"; return 1; }
-    elif [[ $sc == host-* ]]; then
+    elif [[ $sc == host-* || $sc == mesh-fallback ]]; then
         NATPMP=yes; [ "$sc" = host-upnp ] && NATPMP=no
         start_upnp_router B
         for s in A B; do
@@ -1077,7 +1081,7 @@ run_scenario() {
         [ "${idle_a:-0}" -le "$IDLE_LIMIT_KB" ] || { echo "  idle RSS of A above 20 MiB"; ok=0; }
         # A device hosting the network also runs the server
         local limit_b=$IDLE_LIMIT_KB
-        [[ $sc == host-* || $sc == helper ]] && limit_b=$((20 * 1024))
+        [[ $sc == host-* || $sc == helper || $sc == mesh-fallback ]] && limit_b=$((20 * 1024))
         [ "${idle_b:-0}" -le "$limit_b" ] || { echo "  idle RSS of B above $((limit_b / 1024)) MiB"; ok=0; }
     else
         path=$(path_of A)
@@ -1180,6 +1184,32 @@ run_scenario() {
         if [ "$up" -gt 0 ]; then echo "  server started again: A reconnected after $(awk -v t="$up" 'BEGIN{printf "%.1f", t/10}')s"; else echo "  A did not reconnect within 30s"; ok=0; fi
         nsx hA ping -c3 -i0.2 -q "$ip_b" | grep -q " 0% packet loss" || { echo "  no ping after the restart"; ok=0; }
     fi
+    if [ "$sc" = mesh-fallback ] && [ "$ok" = 1 ]; then
+        # B tells the devices its addresses every 30 s, its mesh address last
+        sleep 35
+        # Both ways, as when cloudflared goes: silence, no reset
+        nsx rB iptables -I FORWARD 1 -i wanB -p tcp -j DROP
+        nsx rB iptables -I FORWARD 1 -o wanB -p tcp -j DROP
+        local down=0 up=0
+        for i in $(seq 450); do
+            [ "$(cli A status --json | jq -r .control_connected)" = false ] && { down=$i; break; }
+            sleep 0.1
+        done
+        echo "  TCP to B cut: A lost the server after $(awk -v t="$down" 'BEGIN{printf "%.1f", t/10}')s"
+        for i in $(seq 600); do
+            [ "$(cli A status --json | jq -r .control_connected)" = true ] && { up=$i; break; }
+            sleep 0.1
+        done
+        local via
+        via=$(grep "control connection established" "$WORK/nodeA.log" | tail -1 | grep -oE 'addr=[^ ]+')
+        if [ "$up" -gt 0 ] && [[ $via == "addr=$ip_b:"* ]]; then
+            echo "  A found the server through the mesh after $(awk -v t="$up" 'BEGIN{printf "%.1f", t/10}')s: $via"
+        else
+            echo "  A did not reach the server through the mesh (connected: $up, via: $via)"; ok=0
+            grep -E "control connection" "$WORK/nodeA.log" | tail -3
+        fi
+        nsx hA ping -c3 -i0.2 -q "$ip_b" | grep -q " 0% packet loss" || { echo "  no ping after finding the server again"; ok=0; }
+    fi
     if [ "$sc" = idle-relay ] && [ "$ok" = 1 ]; then
         sleep 40
         local pa pb
@@ -1263,7 +1293,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device magicdns acl subnet expire restore server-cli switch install update
+    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device mesh-fallback magicdns acl subnet expire restore server-cli switch install update
 else
     set -- "$WHICH"
 fi

@@ -34,7 +34,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use retail_proto::api::{BackendState, StatusResponse};
@@ -134,6 +134,8 @@ struct App {
     started: std::time::SystemTime,
     /// Shown the new-release notice this run
     notice_pending: bool,
+    /// How starting retaild with administrator permission went
+    start_result: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
 impl App {
@@ -279,6 +281,7 @@ impl App {
             Action::Update => {
                 let _ = self.commands.send(Command::InstallUpdate);
             }
+            Action::StartDaemon => self.start_daemon(),
             Action::SetExit(key) => {
                 self.ui.menu = None;
                 let req = retail_proto::api::PrefsRequest { exit_node: Some(key), ..Default::default() };
@@ -650,6 +653,7 @@ impl App {
                 st.message = None;
                 let _ = self.commands.send(Command::CheckUpdate);
             }
+            SettingsAction::StartDaemon => self.start_daemon(),
             SettingsAction::InstallUpdate => {
                 st.message = None;
                 let _ = self.commands.send(Command::InstallUpdate);
@@ -736,6 +740,12 @@ impl App {
     }
 
     fn on_status(&mut self, result: Result<StatusResponse, String>) {
+        self.ui.daemon.seen(result.as_ref().ok());
+        if let Some(Err(e)) = self.start_result.lock().unwrap().take() {
+            self.ui.daemon.starting = None;
+            self.settings.message = Some((e, true));
+        }
+        self.settings.daemon = self.ui.daemon.clone();
         self.ui.view = match result {
             Ok(s) => View::Status(Box::new(s)),
             Err(_) => View::Offline,
@@ -770,6 +780,22 @@ impl App {
             };
             tray.set_state(self.ui.is_running(), &tooltip);
         }
+    }
+
+    /// Starts retaild with administrator permission, away from the window's
+    /// thread (the permission prompt waits for the user)
+    fn start_daemon(&mut self) {
+        if self.ui.daemon.is_starting() {
+            return;
+        }
+        self.ui.daemon.starting = Some(Instant::now());
+        self.settings.daemon = self.ui.daemon.clone();
+        self.settings.message = None;
+        let (result, commands) = (self.start_result.clone(), self.commands.clone());
+        std::thread::spawn(move || {
+            *result.lock().unwrap() = Some(install::start_daemon());
+            let _ = commands.send(Command::Refresh);
+        });
     }
 
     /// The daemon or the installer replaced this program's file: start the
@@ -1312,6 +1338,7 @@ fn main() {
         mods: ModifiersState::empty(),
         started: std::time::SystemTime::now(),
         notice_pending: false,
+        start_result: Arc::default(),
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("retail-tray: {e}");
@@ -1513,6 +1540,9 @@ mod preview {
                 installing: state == "updating",
                 error: None,
                 supported: true,
+                stage: (state == "updating").then_some(retail_proto::api::UpdateStage::Downloading),
+                done_bytes: 6_291_456,
+                total_bytes: Some(15_728_640),
             },
             servers: if backend == BackendState::NeedsLogin {
                 vec![]
@@ -1532,6 +1562,10 @@ mod preview {
         let mut ui = Ui::new(dark);
         ui.transparent_corners = true;
         ui.view = sample(state);
+        if state == "restarting" {
+            ui.view = View::Offline;
+            ui.daemon = crate::ui::DaemonWait { installing: true, since: Some(std::time::Instant::now() - std::time::Duration::from_secs(4)), starting: None };
+        }
         if state == "exit-menu" {
             // Open the "⋯" menu of desktop-home, which offers itself as exit node
             ui.menu = Some(Key([2; 32]));
@@ -1551,6 +1585,13 @@ mod preview {
         let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System }, crate::LangPref::System);
         st.view = sample(if matches!(state, "change" | "server-menu" | "many-servers" | "language") { "connected" } else { state });
         st.lang_open = state == "language";
+        // The daemon gone: off, or restarting after an update
+        if matches!(state, "offline" | "restarting") {
+            st.view = View::Offline;
+        }
+        if state == "restarting" {
+            st.daemon = crate::ui::DaemonWait { installing: true, since: Some(std::time::Instant::now() - std::time::Duration::from_secs(4)), starting: None };
+        }
         if state == "many-servers" {
             st.changing = true;
             st.server_scroll = 2;

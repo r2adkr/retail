@@ -50,7 +50,10 @@ async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
 
 async fn connect_one(addr: SocketAddr) -> io::Result<TcpStream> {
     let sock = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
-    if let Err(e) = crate::exit::bypass(socket2::SockRef::from(&sock)) {
+    // A server's mesh address (a device hosting the network) is reached
+    // through the tunnel; everything else around it
+    let mesh = matches!(addr, SocketAddr::V4(v4) if retail_proto::in_mesh(*v4.ip()));
+    if !mesh && let Err(e) = crate::exit::bypass(socket2::SockRef::from(&sock)) {
         tracing::debug!("marking control socket: {e}");
     }
     sock.connect(addr).await

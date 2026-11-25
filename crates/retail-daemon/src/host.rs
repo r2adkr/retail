@@ -168,6 +168,8 @@ pub struct Host {
     /// Public WireGuard endpoint as mapped on the router, offered as a candidate
     /// because this device's own STUN only sees loopback or the LAN
     pub public_wg: tokio::sync::watch::Sender<Option<SocketAddr>>,
+    /// This device's mesh address, when it is a member of the network
+    mesh_ip: Mutex<Option<std::net::Ipv4Addr>>,
 }
 
 impl Host {
@@ -177,6 +179,7 @@ impl Host {
             running: tokio::sync::Mutex::default(),
             last_error: Mutex::default(),
             public_wg: tokio::sync::watch::channel(None).0,
+            mesh_ip: Mutex::default(),
         }
     }
 
@@ -364,8 +367,20 @@ impl Host {
     pub async fn publish_addrs(&self) {
         let running = self.running.lock().await;
         if let Some(r) = running.as_ref() {
-            r.server.set_addrs(Self::invite_addrs(r));
+            let mut addrs = Self::invite_addrs(r);
+            // Last, through the mesh: devices that reach the server only by
+            // its internet tunnel still find it when the tunnel gets a new
+            // address, as long as they have a path to this device
+            if let Some(ip) = *self.mesh_ip.lock().unwrap() {
+                addrs.push(SocketAddr::new(ip.into(), r.server.port()).to_string());
+            }
+            r.server.set_addrs(addrs);
         }
+    }
+
+    /// This device's mesh address while it is a member of its own network
+    pub fn set_mesh_ip(&self, ip: Option<std::net::Ipv4Addr>) {
+        *self.mesh_ip.lock().unwrap() = ip;
     }
 
     /// The server's data in a passphrase-encrypted file

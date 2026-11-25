@@ -42,6 +42,8 @@ pub enum SettingsAction {
     CheckUpdate,
     InstallUpdate,
     AutoUpdate(bool),
+    /// Starts retaild with administrator permission
+    StartDaemon,
 }
 
 const NETWORK_H: f32 = 76.0;
@@ -82,6 +84,8 @@ pub struct Settings {
     pub message: Option<(String, bool)>,
     /// First click on "Log out" arms it, and a second click within 4 s confirms
     pub confirm_logout: Option<Instant>,
+    /// Whether the daemon is coming back from an update, or being started
+    pub daemon: crate::ui::DaemonWait,
     regions: Vec<(Rect, SettingsAction)>,
 }
 
@@ -107,6 +111,7 @@ impl Settings {
             busy: None,
             message: None,
             confirm_logout: None,
+            daemon: Default::default(),
             regions: Vec::new(),
         }
     }
@@ -172,11 +177,19 @@ impl Settings {
         }
     }
 
+    /// The about card has the update rows only while retaild answers
+    fn about_h(&self) -> f32 {
+        if matches!(self.view, View::Status(_)) { ABOUT_H } else { 60.0 }
+    }
+
     fn card_h(&self) -> f32 {
         match &self.view {
             View::Status(_) if self.show_form() => 16.0 + 3.0 * (20.0 + FIELD_H + 14.0) + BUTTON_H + 18.0,
             View::Status(_) if self.show_list() => 8.0 + self.servers().len().min(MAX_ROWS) as f32 * ROW_H + 14.0 + BUTTON_H + 18.0,
             View::Status(_) => 16.0 + 2.0 * 50.0 + BUTTON_H + 26.0,
+            // Room for the start button, or for the progress bar
+            View::Offline if self.daemon.text().2.is_some() => 92.0 + 16.0,
+            View::Offline => 92.0 + 48.0,
             _ => 92.0,
         }
     }
@@ -191,7 +204,7 @@ impl Settings {
         // 40 between sections, 24 bottom padding
         let message = if self.message.is_some() { 30.0 } else { 0.0 };
         let network = if self.show_network() { 40.0 + 14.0 + NETWORK_H } else { 0.0 };
-        76.0 + (14.0 + self.card_h() + message) + network + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + ABOUT_H) + 24.0
+        76.0 + (14.0 + self.card_h() + message) + network + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + self.about_h()) + 24.0
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<SettingsAction> {
@@ -224,13 +237,18 @@ impl Settings {
                 c.text(tr("Connecting to retaild…"), inner_x, y + 36.0, 13.5, Weight::Regular, t.dim, None);
             }
             View::Offline => {
-                c.text(tr("retaild is not running"), inner_x, y + 36.0, 14.0, Weight::Semibold, t.text, None);
-                let hint = if cfg!(windows) {
-                    tr("Run retaild.exe as administrator, then try again.")
-                } else {
-                    tr("Run it with sudo retaild.")
-                };
-                c.text(hint, inner_x, y + 60.0, 12.5, Weight::Regular, t.dim, Some(inner_w));
+                let (title, hint, bar) = self.daemon.text();
+                c.text(&title, inner_x, y + 36.0, 14.0, Weight::Semibold, t.text, None);
+                c.text(&hint, inner_x, y + 60.0, 12.5, Weight::Regular, t.dim, Some(inner_w));
+                match bar {
+                    Some(f) => crate::ui::progress_bar(&mut c, &t, inner_x, y + 84.0, inner_w, f),
+                    None => {
+                        let label = tr("Start retaild");
+                        let bw = c.measure(label, 13.0, Weight::Semibold) + 28.0;
+                        let busy = self.daemon.is_starting();
+                        self.button(&mut c, &t, label, inner_x, y + 80.0, bw, Style::Primary, !busy, SettingsAction::StartDaemon);
+                    }
+                }
             }
             View::Status(_) if self.show_form() => self.form(&mut c, &t, inner_x, y + 16.0, inner_w),
             View::Status(_) if self.show_list() => self.server_list(&mut c, &t, y),
@@ -271,7 +289,7 @@ impl Settings {
         y += 40.0;
         section(&mut c, &t, tr("About"), y);
         y += 14.0;
-        c.fill_rrect(PAD, y, WIDTH - 2.0 * PAD, ABOUT_H, 12.0, t.surface);
+        c.fill_rrect(PAD, y, WIDTH - 2.0 * PAD, self.about_h(), 12.0, t.surface);
         c.text(
             &format!("retail {}", env!("CARGO_PKG_VERSION")),
             inner_x,
@@ -287,6 +305,7 @@ impl Settings {
                 BackendState::Stopped => tr("retaild running · disconnected"),
                 BackendState::NeedsLogin => tr("retaild running · login needed"),
             },
+            View::Offline if self.daemon.restarting() => tr("Restarting retail…"),
             View::Offline => tr("retaild is not running"),
             View::Loading => tr("Checking retaild…"),
         };
@@ -436,8 +455,11 @@ impl Settings {
         c.hline(ix, x + w - 16.0, y, t.border);
         let u = &s.update;
         let latest = u.latest.clone().unwrap_or_default();
+        let staged = u.installing.then_some(u.stage).flatten();
         let (line, sub, color) = if !u.supported {
             (tr("Updates are not available here").to_string(), tr("There are no official builds for this system.").to_string(), t.dim)
+        } else if let Some(stage) = staged {
+            (trf("Installing retail {version}…", &[("version", &latest)]), crate::ui::stage_text(stage, u.done_bytes, u.total_bytes), t.text)
         } else if u.installing {
             (trf("Installing retail {version}…", &[("version", &latest)]), tr("retail restarts when it is done.").to_string(), t.text)
         } else if u.available {
@@ -458,6 +480,9 @@ impl Settings {
         let bw = c.measure(label, 13.0, Weight::Semibold) + 28.0;
         c.text(&line, ix, y + 27.0, 13.5, Weight::Regular, color, Some(w - 48.0 - bw));
         c.text(&sub, ix, y + 45.0, 11.5, Weight::Regular, t.dim, Some(w - 48.0 - bw));
+        if let Some(stage) = staged {
+            crate::ui::progress_bar(c, t, ix, y + 53.0, w - 48.0 - bw, crate::ui::stage_fraction(stage, u.done_bytes, u.total_bytes));
+        }
         if u.supported {
             self.button(c, t, label, x + w - 16.0 - bw, y + 15.0, bw, style, !busy, action);
         }

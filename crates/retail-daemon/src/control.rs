@@ -162,10 +162,14 @@ async fn run_once(
     req.headers_mut()
         .insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
     let dialed = crate::transport::dial(target).await?;
-    if let Some(addr) = dialed.server_addr {
+    // Its mesh address is no STUN server for the tunnel's own socket
+    if let Some(addr) = dialed.server_addr.filter(|a| !matches!(a, std::net::SocketAddr::V4(v4) if retail_proto::in_mesh(*v4.ip()))) {
         engine.set_control_addr(addr);
     }
-    tracing::info!(via = %dialed.via, "control connection established");
+    match dialed.server_addr {
+        Some(addr) => tracing::info!(via = %dialed.via, %addr, "control connection established"),
+        None => tracing::info!(via = %dialed.via, "control connection established"),
+    }
     engine.set_control_via(Some(dialed.via));
     let handshake = tokio_tungstenite::client_async_with_config(req, dialed.io, Some(ws_config()));
     let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)

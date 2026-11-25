@@ -76,6 +76,19 @@ pub fn newer(latest: &str, current: &str) -> bool {
 /// Fetches the installer of `variant` from release `version`, checks it, and
 /// writes `files` from it into `dir`
 pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: &Path) -> Result<()> {
+    fetch_version_with(version, variant, files, dir, &|_, _| {}, || {}).await
+}
+
+/// `fetch_version`, telling `progress` how the installer's download goes and
+/// `checking` when it is checked and unpacked
+pub async fn fetch_version_with(
+    version: &str,
+    variant: &str,
+    files: &[String],
+    dir: &Path,
+    progress: &(dyn Fn(u64, Option<u64>) + Sync),
+    checking: impl FnOnce(),
+) -> Result<()> {
     // One fetch at a time: two clicks must not race on the same files
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = LOCK.lock().await;
@@ -94,7 +107,8 @@ pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: 
             .with_context(|| format!("release v{version} has no {name}"))?;
         tokio::fs::create_dir_all(dir).await?;
         let download = dir.join(format!("{name}.download"));
-        let got = get(&format!("{release}/{name}"), Some(&download)).await.with_context(|| format!("downloading {name}"))?.0;
+        let got = get_with(&format!("{release}/{name}"), Some(&download), progress).await.with_context(|| format!("downloading {name}"))?.0;
+        checking();
         if got != want {
             let _ = tokio::fs::remove_file(&download).await;
             bail!("{name} does not match the release checksum");
@@ -135,6 +149,11 @@ fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
 /// GETs `url`, following redirects, into `to` or memory. Returns the SHA-256
 /// (hex) and, without `to`, the body.
 pub(crate) async fn get(url: &str, to: Option<&Path>) -> Result<(String, Vec<u8>)> {
+    get_with(url, to, &|_, _| {}).await
+}
+
+/// `get`, telling `progress` the bytes so far and in all (when known)
+pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u64, Option<u64>) + Sync)) -> Result<(String, Vec<u8>)> {
     let mut url = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let u = crate::http::parse_url(&url)?;
@@ -180,6 +199,7 @@ pub(crate) async fn get(url: &str, to: Option<&Path>) -> Result<(String, Vec<u8>
             None => None,
         };
         let mut total = 0u64;
+        progress(0, length);
         let mut chunk = rest;
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -193,6 +213,7 @@ pub(crate) async fn get(url: &str, to: Option<&Path>) -> Result<(String, Vec<u8>
                     Some(f) => f.write_all(&chunk).await?,
                     None => body.extend_from_slice(&chunk),
                 }
+                progress(total, length);
             }
             let n = tls.read(&mut buf).await.or_else(|e| {
                 // Servers often close without a TLS close_notify after `Connection: close`
