@@ -741,7 +741,7 @@ impl App {
         if let View::Status(s) = &self.ui.view {
             let update = s.update.clone();
             let auto = s.prefs.auto_update;
-            self.after_update(&update.current);
+            self.after_update();
             // Tell the user about each new release once, unless it installs itself
             if update.available && !auto && !update.installing && update.latest.is_some() && update.latest != self.config.notified_update {
                 self.config.notified_update = update.latest.clone();
@@ -769,12 +769,10 @@ impl App {
         }
     }
 
-    /// The daemon updated itself and replaced this program's file: start the
-    /// new one in its place
-    fn after_update(&mut self, daemon_version: &str) {
-        if !newer_version(daemon_version, env!("CARGO_PKG_VERSION")) {
-            return;
-        }
+    /// The daemon or the installer replaced this program's file: start the
+    /// new one in its place. Not by version: a reinstall of the same version
+    /// brings changes too. The daemon answering means the copying is done.
+    fn after_update(&mut self) {
         let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) else { return };
         let me = dir.join(if cfg!(windows) { "retail-tray.exe" } else { "retail-tray" });
         let replaced = std::fs::metadata(&me).and_then(|m| m.modified()).is_ok_and(|t| t > self.started);
@@ -1193,15 +1191,6 @@ fn round_corners(window: &Window) {
             );
         }
     }
-}
-
-/// Whether version `a` is newer than `b` (`major.minor.patch`)
-fn newer_version(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Option<(u64, u64, u64)> {
-        let mut it = v.split('.').map(|p| p.parse().ok());
-        Some((it.next()??, it.next()??, it.next()??))
-    };
-    matches!((parse(a), parse(b)), (Some(x), Some(y)) if x > y)
 }
 
 /// Typing into a text field: editing keys, clipboard shortcuts, text

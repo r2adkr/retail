@@ -326,7 +326,7 @@ fn after_install(opts: &Opts, installed: bool) -> bool {
         eprintln!("retail: could not start the tray app at sign-in: {e}");
     }
     // On an update a tray app already running restarts itself into the new
-    // one when it sees the newer daemon; starting another would make two
+    // one when it sees its program file replaced; starting another would make two
     if desktop && !installed {
         // Not on the installer's output, which a script may be reading to its end
         use std::process::Stdio;
