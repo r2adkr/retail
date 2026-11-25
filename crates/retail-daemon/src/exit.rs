@@ -297,6 +297,10 @@ impl Gateway {
         if self.exit == exit && self.routes == routes {
             return Ok(());
         }
+        // Before anything changes; nothing was set up where it cannot work
+        if exit || !routes.is_empty() {
+            check_gateway(exit)?;
+        }
         self.cleanup();
         self.exit = exit;
         self.routes = routes.to_vec();
@@ -386,8 +390,6 @@ impl Gateway {
     /// while this is an exit node.
     #[cfg(target_os = "windows")]
     fn install(&mut self) -> Result<()> {
-        // Before forwarding is turned on, so a missing NAT changes nothing
-        check_gateway(self.exit)?;
         let script = format!(
             "$ErrorActionPreference='Stop'; \
              Set-NetIPInterface -InterfaceIndex {idx} -Forwarding Enabled; \
@@ -412,7 +414,6 @@ impl Gateway {
     /// that reaches it
     #[cfg(target_os = "macos")]
     fn install(&mut self) -> Result<()> {
-        check_gateway(self.exit)?;
         let forwarding = Command::new("sysctl").args(["-n", "net.inet.ip.forwarding"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         if forwarding != "1" {
             run("sysctl", &["-w", "net.inet.ip.forwarding=1"])?;
