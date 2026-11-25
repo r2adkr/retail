@@ -305,8 +305,17 @@ impl Client {
         self.call(self.http.get(format!("{}{path}", self.base))).await
     }
 
+    /// Changes carry invite codes, passwords and backups, so they go only to
+    /// the real daemon, not a program that took its port while it was down.
+    /// From an administrator/root, they carry the administrator token too.
     async fn post<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: Option<&T>) -> Result<R> {
+        if let Ok(addr) = self.base.trim_start_matches("http://").parse::<std::net::SocketAddr>() {
+            retail_proto::local::check_listener(addr).map_err(anyhow::Error::msg)?;
+        }
         let mut req = self.http.post(format!("{}{path}", self.base));
+        if let Some(admin) = retail_proto::local::read_admin_token() {
+            req = req.header(retail_proto::local::ADMIN_HEADER, admin);
+        }
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -387,8 +396,13 @@ async fn main() -> Result<()> {
                 Some("auto") | Some("0") => Some(0),
                 Some(v) => Some(v.parse::<u32>().context("--memory-limit takes a number of MiB or `auto`")?),
             };
+            let named_proxy = proxy.as_deref().is_some_and(|p| !matches!(p.trim(), "" | "auto" | "off" | "none" | "direct"));
             let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes };
-            print_status(&client.post::<_, StatusResponse>("/prefs", Some(&req)).await?);
+            let st = client.post::<_, StatusResponse>("/prefs", Some(&req)).await?;
+            print_status(&st);
+            if cfg!(windows) && named_proxy && !st.prefs.proxy_sign_in {
+                eprintln!("note: set from an administrator terminal, the proxy may also be given your Windows sign-in (NTLM/Kerberos)");
+            }
         }
         Cmd::ExitNodes => {
             let st: StatusResponse = client.get("/status").await?;
@@ -462,8 +476,11 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
                 retail_proto::local::is_local_web_link(&url),
                 "the answer on the local API port is not a link to this device's web page; is retaild the program listening there?"
             );
-            println!("{url}");
-            if !print && !open_browser(&url) {
+            // The browser gets a private page that posts the sign-in, so the
+            // link is not on its command line for other users to see
+            let opened = !print && retail_proto::local::sign_in_page(&url).is_ok_and(|page| open_browser(&page.display().to_string()));
+            if !opened {
+                println!("{url}");
                 eprintln!("Open the link above in a browser on this device (valid once, for 2 minutes).");
             }
             return Ok(());

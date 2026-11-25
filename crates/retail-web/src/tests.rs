@@ -135,10 +135,23 @@ async fn local_access_rules() {
     let link = web.login_link();
     let path = link.split_once(&format!("{port}")).unwrap().1.to_string();
     let (code, text) = request(port, get(port, &path, "")).await;
-    assert_eq!(code, 303, "{text}");
+    assert_eq!(code, 200, "{text}");
+    assert!(text.contains("url=/"), "the page moves on to the admin page: {text}");
     let cookie = text.lines().find_map(|l| l.strip_prefix("set-cookie: ")).unwrap().split(';').next().unwrap().to_string();
     assert!(cookie.starts_with("retail_web="));
     assert_eq!(request(port, get(port, &path, "")).await.0, 401, "a login link works once");
+
+    // The same sign-in posted from a local file, as the CLI and tray app do
+    let token = web.login_link().rsplit_once("t=").unwrap().1.to_string();
+    let form = format!(
+        "POST /login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: null\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\nt={token}",
+        token.len() + 2
+    );
+    let (code, text) = request(port, form.clone()).await;
+    assert_eq!(code, 200, "{text}");
+    assert!(text.contains("set-cookie: retail_web="), "{text}");
+    assert_eq!(request(port, form).await.0, 401, "a posted sign-in works once too");
 
     let c = format!("Cookie: {cookie}\r\n");
     assert_eq!(request(port, get(port, "/api/status", &c)).await.0, 200);

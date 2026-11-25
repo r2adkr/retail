@@ -2,7 +2,9 @@
 //! `X-Retail-Local` header (a custom header forces a CORS preflight, which is
 //! never answered) and a loopback `Host` (defeats DNS rebinding). Requests that
 //! change anything also need the token from `retail_proto::local::token_path`,
-//! readable only by users allowed to control retail.
+//! readable only by users allowed to control retail. Stopping the daemon and
+//! giving a proxy the Windows sign-in need the administrator token
+//! (`retail_proto::local::admin_token_path`).
 
 use std::sync::Arc;
 
@@ -21,7 +23,11 @@ use crate::backend::Backend;
 
 pub const LOCAL_HEADER: &str = "x-retail-local";
 
-pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
+/// Whether the request carried the administrator token
+#[derive(Clone, Copy)]
+struct Admin(bool);
+
+pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/up", post(up))
@@ -57,11 +63,12 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>) -> Router {
         .route("/helper/stop", post(helper_stop))
         .route("/proxy/system", post(system_proxy))
         .route("/web/login", post(web_login))
-        .layer(middleware::from_fn(move |req: Request, next: Next| guard(token.clone(), req, next)))
+        .route("/shutdown", post(shutdown))
+        .layer(middleware::from_fn(move |req: Request, next: Next| guard(token.clone(), admin.clone(), req, next)))
         .with_state(backend)
 }
 
-async fn guard(token: Arc<String>, req: Request, next: Next) -> Response {
+async fn guard(token: Arc<String>, admin: Arc<String>, mut req: Request, next: Next) -> Response {
     let host_ok = req
         .headers()
         .get(header::HOST)
@@ -81,7 +88,19 @@ async fn guard(token: Arc<String>, req: Request, next: Next) -> Response {
             );
         }
     }
+    let is_admin = req.headers().get(retail_proto::local::ADMIN_HEADER).is_some_and(|g| same_secret(g.as_bytes(), admin.as_bytes()));
+    req.extensions_mut().insert(Admin(is_admin));
     next.run(req).await
+}
+
+/// Ends the daemon the way a service stop would, undoing its system changes
+/// (Windows has no stop signal for it). Administrators only.
+async fn shutdown(State(b): State<Arc<Backend>>, axum::Extension(Admin(admin)): axum::Extension<Admin>) -> Response {
+    if !admin {
+        return error(StatusCode::FORBIDDEN, "only an administrator can stop retaild");
+    }
+    b.stop_requested.notify_one();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -145,8 +164,8 @@ async fn forget_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSele
     }
 }
 
-async fn prefs(State(b): State<Arc<Backend>>, Json(req): Json<PrefsRequest>) -> Response {
-    match b.set_prefs(req).await {
+async fn prefs(State(b): State<Arc<Backend>>, axum::Extension(Admin(admin)): axum::Extension<Admin>, Json(req): Json<PrefsRequest>) -> Response {
+    match b.set_prefs(req, admin).await {
         Ok(()) => Json(b.status().await).into_response(),
         Err(e) => failed(e),
     }

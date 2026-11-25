@@ -1,12 +1,36 @@
 //! Windows Firewall blocks unsolicited inbound traffic by default, so hosting
-//! a network needs a rule scoped to this program for as long as hosting runs.
-//! Other systems have no default inbound block to undo.
+//! a network (or being a helper node) needs a rule scoped to this program for
+//! as long as that runs. Other systems have no default inbound block to undo.
+
+use std::sync::Mutex;
 
 #[cfg(target_os = "windows")]
 const RULE: &str = "retail";
 
-/// Returns whether a rule was added
+/// What needs the rule now: hosting, the helper node, the helper role
+static USERS: Mutex<u32> = Mutex::new(0);
+
+/// One more user of the rule; adds it for the first. Each call is paired
+/// with a `release_inbound`. Returns whether the rule is there.
 pub fn allow_inbound() -> bool {
+    let mut users = USERS.lock().unwrap();
+    *users += 1;
+    if *users > 1 {
+        return cfg!(target_os = "windows");
+    }
+    add_rule()
+}
+
+/// One user fewer; the last takes the rule away
+pub fn release_inbound() {
+    let mut users = USERS.lock().unwrap();
+    *users = users.saturating_sub(1);
+    if *users == 0 {
+        remove_inbound();
+    }
+}
+
+fn add_rule() -> bool {
     #[cfg(target_os = "windows")]
     {
         let Ok(exe) = std::env::current_exe() else { return false };
@@ -28,6 +52,7 @@ pub fn allow_inbound() -> bool {
     }
 }
 
+/// Takes the rule away whoever uses it (removing retail)
 pub fn remove_inbound() {
     #[cfg(target_os = "windows")]
     {

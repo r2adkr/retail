@@ -147,9 +147,10 @@ pub fn spawn(
                             ServerCommand::OpenWeb => {
                                 if let Ok(v) = call::<serde_json::Value>(addr, "POST", "/web/login", Some("{}"), t)
                                     && let Some(url) = v["url"].as_str()
-                                    && retail_proto::local::is_local_web_link(url)
+                                    && let Ok(page) = retail_proto::local::sign_in_page(url)
                                 {
-                                    open_browser(url);
+                                    // A private page that posts the sign-in, keeping the link off the browser's command line
+                                    open_browser(&page.display().to_string());
                                 }
                                 continue;
                             }
@@ -196,6 +197,7 @@ pub fn spawn(
 /// POSTs `path` and saves the answer in `dir` under the name the daemon
 /// gives it, streaming (installers are tens of MiB)
 fn download(addr: SocketAddr, path: &str, dir: &Path, timeout: Duration) -> Result<PathBuf, String> {
+    retail_proto::local::check_listener(addr)?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
         .map_err(|_| tr("retaild is not running").to_string())?;
     s.set_read_timeout(Some(timeout)).ok();
@@ -303,6 +305,11 @@ fn call<T: serde::de::DeserializeOwned>(
 ) -> Result<T, String> {
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
         .map_err(|_| tr("retaild is not running").to_string())?;
+    // Changes carry invite codes, passwords and backups, and their answers are
+    // acted on: only for the real daemon. Status reads go to whoever answers.
+    if method != "GET" {
+        retail_proto::local::check_listener(addr)?;
+    }
     s.set_read_timeout(Some(timeout)).ok();
     s.set_write_timeout(Some(timeout)).ok();
     let body = body.unwrap_or("");

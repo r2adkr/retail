@@ -134,6 +134,8 @@ async fn main() -> Result<()> {
     if let Some(web) = web::start(backend.clone(), state_dir.clone(), args.web_port).await {
         let _ = backend.web.set(web);
     }
+    // Before anything maps ports again: what a killed daemon left on the router
+    portmap::init(&state_dir).await;
     // A network hosted here comes back first so this device can rejoin it
     backend.host.resume(args.port).await;
     if args.serve {
@@ -187,11 +189,13 @@ async fn main() -> Result<()> {
     let shutdown_backend = backend.clone();
     let updater = backend.updater.clone();
     let token = Arc::new(local_token::write_new().context("writing the local API token")?);
-    axum::serve(listener, local_api::router(backend, token))
+    let admin = Arc::new(local_token::write_admin().context("writing the administrator token")?);
+    axum::serve(listener, local_api::router(backend, token, admin))
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = shutdown_signal() => {}
                 _ = shutdown_backend.updater.restart.notified() => {}
+                _ = shutdown_backend.stop_requested.notified() => {}
             }
             tracing::info!("shutting down");
             shutdown_backend.shutdown().await;

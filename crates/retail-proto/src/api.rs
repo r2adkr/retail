@@ -448,6 +448,10 @@ pub struct Prefs {
     /// `user:password@`) or `off`. `None` follows the system settings.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// The proxy was set by an administrator, so on Windows it may be given
+    /// the signed-in user's Windows sign-in
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proxy_sign_in: bool,
     /// Install new official releases on their own
     #[serde(default)]
     pub auto_update: bool,

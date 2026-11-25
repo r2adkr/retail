@@ -3,7 +3,8 @@
 //! device for it. The server asks through the netmap; this device listens,
 //! opens its router's ports, and sends its helper code back over the control
 //! connection. The server then links to it as it would to `retail helper
-//! start` on a VPS. Stops when the server stops asking or the session ends.
+//! start` on a VPS. Stops when the server stops asking or the session ends,
+//! closing the router's ports either way.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -20,18 +21,23 @@ use crate::portmap::{self, Proto};
 /// Tried in order: the first that is free
 const PORTS: [u16; 2] = [443, 8443];
 
-pub async fn run(engine: Arc<Engine>, data_dir: PathBuf) -> Result<()> {
+/// Until `stop` turns true (the session ends)
+pub async fn run(engine: Arc<Engine>, data_dir: PathBuf, mut stop: tokio::sync::watch::Receiver<bool>) -> Result<()> {
     let mut wanted = engine.subscribe_helper_role();
     loop {
+        if *stop.borrow() {
+            return Ok(());
+        }
         if *wanted.borrow_and_update() {
             match Role::start(&data_dir).await {
-                Ok(role) => {
+                Ok(mut role) => {
                     tracing::info!(code_addrs = ?role.addrs, "this device is the network's helper node");
                     engine.set_helper_code(Some(role.code.clone()));
-                    role.serve(&mut wanted).await;
+                    role.serve(&mut wanted, &mut stop).await;
                     engine.set_helper_code(None);
                     role.stop().await;
                     tracing::info!("no longer the network's helper node");
+                    continue;
                 }
                 Err(e) => {
                     tracing::warn!("cannot be the network's helper node: {e:#}");
@@ -39,13 +45,17 @@ pub async fn run(engine: Arc<Engine>, data_dir: PathBuf) -> Result<()> {
                     // Ask again later: the router may come around
                     tokio::select! {
                         r = wanted.changed() => r?,
+                        _ = stop.changed() => {}
                         _ = tokio::time::sleep(Duration::from_secs(300)) => {}
                     }
                     continue;
                 }
             }
         }
-        wanted.changed().await?;
+        tokio::select! {
+            r = wanted.changed() => r?,
+            _ = stop.changed() => {}
+        }
     }
 }
 
@@ -116,19 +126,25 @@ impl Role {
         Ok(Role { helper, mapping, code, addrs })
     }
 
-    /// Until the server stops asking: keeps the router's ports open
-    async fn serve(&self, wanted: &mut tokio::sync::watch::Receiver<bool>) {
-        let mut mapping = self.mapping.clone();
+    /// Until the server stops asking or the session ends: keeps the router's ports open
+    async fn serve(&mut self, wanted: &mut tokio::sync::watch::Receiver<bool>, stop: &mut tokio::sync::watch::Receiver<bool>) {
         loop {
+            if *stop.borrow() {
+                return;
+            }
             tokio::select! {
                 r = wanted.changed() => {
                     if r.is_err() || !*wanted.borrow_and_update() {
                         return;
                     }
                 }
+                _ = stop.changed() => return,
                 _ = tokio::time::sleep(portmap::LEASE / 2) => {
-                    if let Some(m) = &mapping {
-                        mapping = portmap::renew(m, 1).await.ok().or(mapping);
+                    if let Some(m) = &self.mapping
+                        && let Ok(renewed) = portmap::renew(m, 1).await
+                    {
+                        // What is closed at the end is what the router has now
+                        self.mapping = Some(renewed);
                     }
                 }
             }
@@ -140,5 +156,6 @@ impl Role {
         if let Some(m) = &self.mapping {
             portmap::close(m).await;
         }
+        crate::firewall::release_inbound();
     }
 }

@@ -46,6 +46,7 @@ mod imp {
     };
     use windows_sys::Win32::Security::Credentials::SecHandle;
     use windows_sys::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
+    use windows_sys::Win32::System::Registry::{HKEY, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegOpenCurrentUser};
     use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 
     const SEC_E_OK: i32 = 0;
@@ -77,6 +78,34 @@ mod imp {
         }
         unsafe { CloseHandle(token) };
         out
+    }
+
+    /// The console user's own proxy (`ProxyServer` in their Internet
+    /// settings), read from their part of the registry while borrowing their
+    /// identity; this process's own settings when nobody is signed in
+    pub fn console_user_proxy() -> Option<String> {
+        as_console_user(|| unsafe {
+            let mut root: HKEY = std::ptr::null_mut();
+            if RegOpenCurrentUser(KEY_READ, &mut root) != 0 {
+                return None;
+            }
+            let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
+            let mut enable = 0u32;
+            let mut size = 4u32;
+            let enabled = RegGetValueW(root, key.as_ptr(), wide("ProxyEnable").as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut enable as *mut u32).cast(), &mut size) == 0
+                && enable != 0;
+            let mut out = None;
+            if enabled {
+                let mut buf = vec![0u16; 2048];
+                let mut bytes = (buf.len() * 2) as u32;
+                if RegGetValueW(root, key.as_ptr(), wide("ProxyServer").as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes) == 0 {
+                    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                    out = Some(String::from_utf16_lossy(&buf[..n]));
+                }
+            }
+            RegCloseKey(root);
+            out
+        })
     }
 
     pub struct Negotiator {

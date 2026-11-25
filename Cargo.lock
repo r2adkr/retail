@@ -3615,8 +3615,10 @@ name = "retail-proto"
 version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

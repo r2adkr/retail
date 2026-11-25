@@ -72,11 +72,11 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             match action.as_str() {
                 "register" => register(&me),
                 "stop" => {
-                    stop();
+                    stop(api);
                     Ok(())
                 }
                 _ => {
-                    stop();
+                    stop(api);
                     unregister();
                     remove_system_changes();
                     Ok(())
@@ -85,7 +85,7 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
         }
         Cmd::Uninstall { dir } => {
             require_admin()?;
-            stop();
+            stop(api);
             unregister();
             remove_system_changes();
             let dir = dir.unwrap_or_else(default_dir);
@@ -108,7 +108,7 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             let here = me.parent().context("retaild has no folder")?.to_path_buf();
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             if !no_service {
-                stop();
+                stop(api);
             }
             let same = here.canonicalize().ok() == dir.canonicalize().ok();
             let mut files = vec![exe("retaild"), exe("retail")];
@@ -264,6 +264,39 @@ fn run_quiet(program: &str, args: &[&str]) -> Result<()> {
 #[cfg(windows)]
 const TASK: &str = "retail\\retaild";
 
+/// Asks the running daemon to exit on its own and waits for it, so it undoes
+/// what it set up (name resolution rule, router ports, firewall rule): Task
+/// Scheduler and taskkill end it without a chance to. Needs the administrator
+/// token, so only an administrator can stop it this way.
+#[cfg(windows)]
+fn request_stop(api: SocketAddr) {
+    let Some(admin) = retail_proto::local::read_admin_token() else { return };
+    let token = retail_proto::local::read_token().unwrap_or_default();
+    if retail_proto::local::check_listener(api).is_err() {
+        return;
+    }
+    let Ok(mut s) = TcpStream::connect_timeout(&api, Duration::from_millis(500)) else { return };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let req = format!(
+        "POST /shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Retail-Local: 1\r\nX-Retail-Token: {token}\r\nX-Retail-Admin: {admin}\r\n\
+         Connection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    let mut head = [0u8; 10];
+    if s.write_all(req.as_bytes()).is_err() || s.read_exact(&mut head).is_err() || !head.starts_with(b"HTTP/1.1 2") {
+        return;
+    }
+    drop(s);
+    // The API stops listening once the cleanup is done
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        if TcpStream::connect_timeout(&api, Duration::from_millis(200)).is_err() {
+            std::thread::sleep(Duration::from_millis(500));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// Task Scheduler defaults would stop the daemon after 72 hours and on
 /// battery, and never restart it, so the task is imported from XML.
 #[cfg(windows)]
@@ -303,7 +336,8 @@ pub fn register(daemon: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub fn stop() {
+pub fn stop(api: SocketAddr) {
+    request_stop(api);
     let _ = run_quiet("schtasks", &["/End", "/TN", TASK]);
     // Not this process (`retaild service stop` itself)
     let _ = run_quiet("taskkill", &["/F", "/FI", &format!("PID ne {}", std::process::id()), "/IM", "retaild.exe"]);
@@ -329,7 +363,7 @@ pub fn register(daemon: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn stop() {
+pub fn stop(_api: SocketAddr) {
     let _ = run_quiet("systemctl", &["stop", "retaild"]);
 }
 
@@ -363,7 +397,7 @@ pub fn register(daemon: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn stop() {
+pub fn stop(_api: SocketAddr) {
     let _ = run_quiet("launchctl", &["bootout", "system", PLIST]);
 }
 

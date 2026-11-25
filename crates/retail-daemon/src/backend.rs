@@ -26,9 +26,15 @@ pub struct Options {
     pub memory_limit_mb: Option<u32>,
 }
 
+/// How long the session's cleanup (closing router ports) may take
+const GRACEFUL_STOP: std::time::Duration = std::time::Duration::from_secs(5);
+
 struct Session {
     engine: Arc<Engine>,
     tasks: JoinSet<()>,
+    /// Tasks that watch `stop` and undo what they set up (router ports), so
+    /// they are given a moment to finish before the rest is cut short
+    graceful: JoinSet<()>,
     threads: Vec<std::thread::JoinHandle<()>>,
     stop: watch::Sender<bool>,
     /// Exit-node routing (we use an exit), undone on drop
@@ -55,6 +61,8 @@ pub struct Backend {
     /// Set once the web admin page listens
     pub web: std::sync::OnceLock<retail_web::WebAdmin>,
     pub updater: Arc<crate::update::Updater>,
+    /// An administrator asked the daemon to exit (`POST /shutdown`)
+    pub stop_requested: tokio::sync::Notify,
 }
 
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -69,7 +77,7 @@ impl Backend {
     pub fn new(opts: Options) -> Result<Self> {
         let state_path = opts.state_dir.join("state.json");
         let persisted = Persisted::load(&state_path)?;
-        crate::proxy::set_preference(persisted.prefs.proxy.as_deref());
+        crate::proxy::set_preference(persisted.prefs.proxy.as_deref(), persisted.prefs.proxy_sign_in);
         let host = crate::host::Host::new(&opts.state_dir);
         let helper = crate::helper_host::HelperHost::new(&opts.state_dir);
         let updater = Arc::new(crate::update::Updater::new(&opts.state_dir));
@@ -86,6 +94,7 @@ impl Backend {
             helper,
             web: std::sync::OnceLock::new(),
             updater,
+            stop_requested: tokio::sync::Notify::new(),
         })
     }
 
@@ -337,7 +346,8 @@ impl Backend {
     }
 
     /// Changes user settings, applied at once when the tunnel is up
-    pub async fn set_prefs(&self, req: PrefsRequest) -> Result<()> {
+    /// `admin`: the request came from an administrator/root
+    pub async fn set_prefs(&self, req: PrefsRequest, admin: bool) -> Result<()> {
         let mut p = self.persisted.lock().await;
         let mut session = self.session.lock().await;
         let mut prefs = p.prefs.clone();
@@ -371,7 +381,11 @@ impl Backend {
                     Some(url.to_string())
                 }
             };
-            crate::proxy::set_preference(prefs.proxy.as_deref());
+            // Any user who may control retail can set a proxy; only an
+            // administrator's may receive a Windows sign-in, which would
+            // otherwise be another user's or the computer's
+            prefs.proxy_sign_in = admin && prefs.proxy.as_deref().is_some_and(|p| p != "off");
+            crate::proxy::set_preference(prefs.proxy.as_deref(), prefs.proxy_sign_in);
         }
         if let Some(on) = req.auto_update {
             prefs.auto_update = on;
@@ -475,14 +489,22 @@ impl Backend {
         self.host.invite(&req).await
     }
 
+    /// The daemon is exiting: the session ends, and hosting and the helper
+    /// node stop without being turned off, so their router ports and firewall
+    /// rule go now and come back at the next start
     pub async fn shutdown(&self) {
         self.stop_session().await;
+        self.host.halt().await;
+        self.helper.halt().await;
     }
 
     async fn stop_session(&self) {
         if let Some(mut s) = self.session.lock().await.take() {
-            // Wait for every task so the TUN device is released before a new session reuses its name
             let _ = s.stop.send(true);
+            let graceful = &mut s.graceful;
+            let _ = tokio::time::timeout(GRACEFUL_STOP, async { while graceful.join_next().await.is_some() {} }).await;
+            s.graceful.shutdown().await;
+            // Wait for every task so the TUN device is released before a new session reuses its name
             s.tasks.shutdown().await;
             for t in s.threads {
                 let _ = tokio::task::spawn_blocking(move || t.join()).await;
@@ -531,7 +553,8 @@ impl Backend {
         }
         self.spawn(&mut tasks, "timers", engine.clone().timer_loop());
         self.spawn(&mut tasks, "magicdns", engine.clone().dns_loop());
-        self.spawn(&mut tasks, "helper-role", crate::helper_role::run(engine.clone(), self.opts.state_dir.join("helper-device")));
+        let mut graceful = JoinSet::new();
+        self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), self.opts.state_dir.join("helper-device"), stop.subscribe()));
         self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun));
         self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token));
         // While hosting, the router's mapping is this device's public endpoint
@@ -600,7 +623,7 @@ impl Backend {
                 }
             }
         });
-        let mut session = Session { engine, tasks, threads, stop, exit_routes: None, gateway, _dns: dns };
+        let mut session = Session { engine, tasks, graceful, threads, stop, exit_routes: None, gateway, _dns: dns };
         if let Err(e) = apply_exit_prefs(&mut session, &p.prefs) {
             // The mesh still works, so only report the exit-node problem
             tracing::warn!("{e:#}");

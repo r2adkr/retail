@@ -124,7 +124,6 @@ struct Running {
     reach: Arc<Mutex<Reach>>,
     portmap: Option<tokio::task::JoinHandle<()>>,
     mapped: Arc<Mutex<Option<portmap::Outcome>>>,
-    firewall: bool,
     domain: Option<String>,
     reality: Option<HostReality>,
     fronts: Vec<String>,
@@ -246,7 +245,7 @@ impl Host {
         .await
         .context("starting the server")?;
 
-        let firewall = crate::firewall::allow_inbound();
+        crate::firewall::allow_inbound();
         let reach = Arc::new(Mutex::new(Reach::default()));
         let mapped = Arc::new(Mutex::new(None));
         let stun = Stun {
@@ -280,7 +279,6 @@ impl Host {
             reach,
             portmap,
             mapped,
-            firewall,
             domain: domain.clone(),
             reality: reality.clone(),
             fronts: fronts.clone(),
@@ -430,6 +428,13 @@ impl Host {
         let mut c = self.config();
         c.enabled = false;
         self.save_config(&c)?;
+        self.halt().await;
+        Ok(())
+    }
+
+    /// Stops hosting but keeps it enabled, for the daemon's own shutdown: the
+    /// router's ports and the firewall rule go, and come back at the next start
+    pub async fn halt(&self) {
         if let Some(r) = self.running.lock().await.take() {
             if let Some(t) = r.portmap {
                 t.abort();
@@ -444,13 +449,10 @@ impl Host {
             if let Some(m) = mapped {
                 portmap::close(&m).await;
             }
-            if r.firewall {
-                crate::firewall::remove_inbound();
-            }
+            crate::firewall::release_inbound();
             self.public_wg.send_replace(None);
             r.server.stop().await;
         }
-        Ok(())
     }
 
     fn addresses(r: &Running) -> (Option<String>, Vec<String>) {

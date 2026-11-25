@@ -6,7 +6,15 @@
 //!
 //! Which proxies: the `proxy` preference if set, otherwise the system's: what
 //! the tray app reports for the signed-in user, `HTTPS_PROXY`/`ALL_PROXY`, the
-//! WinHTTP machine setting on Windows and the network settings on macOS.
+//! WinHTTP machine setting and the console user's own proxy on Windows, and
+//! the network settings on macOS.
+//!
+//! The Windows sign-in is someone's identity (the console user's, or the
+//! computer's), so it goes only to proxies that identity's owner or an
+//! administrator chose: the console user's own settings, the machine
+//! settings, the daemon's environment, and a `proxy` preference an
+//! administrator set. Any local user who may control retail can name other
+//! proxies, which get Basic authentication only.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -31,6 +39,8 @@ pub struct Proxy {
     pub host: String,
     pub port: u16,
     pub auth: Option<(String, String)>,
+    /// May be given the Windows sign-in (see the module notes)
+    pub sign_in: bool,
 }
 
 impl Proxy {
@@ -71,7 +81,7 @@ impl Proxy {
             Kind::Http => 8080,
             Kind::Socks5 => 1080,
         });
-        Some(Proxy { kind, host: host.to_string(), port, auth })
+        Some(Proxy { kind, host: host.to_string(), port, auth, sign_in: false })
     }
 
     /// For logs and status, without the password
@@ -153,6 +163,7 @@ impl Proxy {
                 format!("{} {}", n.scheme(), B64.encode(token))
             } else if let Some(scheme) = ["Negotiate", "NTLM"].into_iter().find(|s| pick(s).is_some())
                 && crate::sspi::available()
+                && self.sign_in
             {
                 let mut n = crate::sspi::Negotiator::new(scheme, &self.host)?;
                 let token = n.step(None)?;
@@ -161,6 +172,13 @@ impl Proxy {
             } else if pick("Basic").is_some() && basic.is_some() && auth.is_none() {
                 basic.clone().unwrap_or_default()
             } else {
+                if !self.sign_in && crate::sspi::available() && ["Negotiate", "NTLM"].into_iter().any(|s| pick(s).is_some()) {
+                    bail!(
+                        "proxy {} asks for the Windows sign-in, which retail gives only to proxies in this computer's settings \
+                         or set by an administrator (`retail set --proxy` in an administrator terminal)",
+                        self.label()
+                    );
+                }
                 bail!("proxy {} needs a sign-in retail cannot give (set one with `retail set --proxy http://user:password@host:port`)", self.label());
             };
             auth = Some(next);
@@ -256,12 +274,13 @@ static PREFERENCE: Mutex<Option<Option<Proxy>>> = Mutex::new(None);
 static USER: Mutex<Vec<Proxy>> = Mutex::new(Vec::new());
 static OS: Mutex<Option<(Instant, Vec<Proxy>)>> = Mutex::new(None);
 
-/// From the `proxy` preference: unset, `off`, or a proxy URL
-pub fn set_preference(pref: Option<&str>) {
+/// From the `proxy` preference: unset, `off`, or a proxy URL. `sign_in`:
+/// an administrator set it.
+pub fn set_preference(pref: Option<&str>, sign_in: bool) {
     let value = match pref.map(str::trim) {
         None | Some("") | Some("auto") => None,
         Some("off") | Some("none") | Some("direct") => Some(None),
-        Some(url) => Some(Proxy::parse(url)),
+        Some(url) => Some(Proxy::parse(url).map(|p| Proxy { sign_in, ..p })),
     };
     *PREFERENCE.lock().unwrap() = value;
 }
@@ -277,19 +296,27 @@ pub fn current() -> Vec<Proxy> {
         return pref.into_iter().collect();
     }
     let mut out: Vec<Proxy> = USER.lock().unwrap().clone();
+    // The daemon's environment is the administrator's
     for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Some(p) = std::env::var(var).ok().as_deref().and_then(Proxy::parse) {
-            out.push(p);
+            out.push(Proxy { sign_in: true, ..p });
         }
     }
     out.extend(os_proxies());
-    let mut seen = Vec::new();
-    out.retain(|p| {
-        let key = (p.kind, p.host.to_ascii_lowercase(), p.port);
-        let fresh = !seen.contains(&key);
-        seen.push(key);
-        fresh
-    });
+    dedup(out)
+}
+
+/// One entry per proxy, in the first one's place; it may be given the sign-in
+/// if any source that names it may
+fn dedup(list: Vec<Proxy>) -> Vec<Proxy> {
+    let key = |p: &Proxy| (p.kind, p.host.to_ascii_lowercase(), p.port);
+    let mut out: Vec<Proxy> = Vec::new();
+    for p in list {
+        match out.iter_mut().find(|q| key(q) == key(&p)) {
+            Some(q) => q.sign_in |= p.sign_in,
+            None => out.push(p),
+        }
+    }
     out
 }
 
@@ -345,7 +372,12 @@ fn read_os_proxies() -> Vec<Proxy> {
     };
     let list = take(info.lpszProxy);
     let _ = take(info.lpszProxyBypass);
-    if info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY { parse_proxy_list(&list) } else { Vec::new() }
+    let mut out = if info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY { parse_proxy_list(&list) } else { Vec::new() };
+    if let Some(user) = crate::sspi::console_user_proxy() {
+        out.extend(parse_proxy_list(&user));
+    }
+    // The machine's settings are an administrator's, the console user's their own
+    out.into_iter().map(|p| Proxy { sign_in: true, ..p }).collect()
 }
 
 /// # Safety
@@ -422,7 +454,7 @@ mod tests {
             assert!(req.contains("Proxy-Authorization: Basic YTpi"), "{req}");
             s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\nhello").await.unwrap();
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: Some(("a".into(), "b".into())) };
+        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: Some(("a".into(), "b".into())), sign_in: false };
         let mut io = p.connect("example.net", 443).await.unwrap();
         let mut got = [0u8; 5];
         io.read_exact(&mut got).await.unwrap();
@@ -439,8 +471,37 @@ mod tests {
             let _ = s.read(&mut buf).await.unwrap();
             s.write_all(b"HTTP/1.1 407 Auth\r\nProxy-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\n\r\n").await.unwrap();
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None };
+        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false };
         let err = p.connect("example.net", 443).await.err().unwrap().to_string();
         assert!(err.contains("sign-in"), "{err}");
+    }
+
+    /// A proxy any local user could have named asks for NTLM: it gets no
+    /// Windows sign-in, only a refusal
+    #[tokio::test]
+    async fn untrusted_proxy_gets_no_windows_sign_in() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            while let Ok(Ok((mut s, _))) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await {
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = s
+                    .write_all(b"HTTP/1.1 407 Auth\r\nProxy-Authenticate: NTLM\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+            requests
+        });
+        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false };
+        let err = p.connect("example.net", 443).await.err().unwrap().to_string();
+        assert!(err.contains("sign-in"), "{err}");
+        let requests = seen.await.unwrap();
+        assert!(requests.iter().all(|r| !r.contains("Proxy-Authorization")), "{requests:?}");
+        // Settings of the machine, the console user or an administrator may
+        let trusted = dedup(vec![p.clone(), Proxy { sign_in: true, ..p.clone() }]);
+        assert_eq!(trusted.len(), 1);
+        assert!(trusted[0].sign_in);
     }
 }

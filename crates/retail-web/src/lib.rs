@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use retail_proto::api::{ApiError, InviteRequest, InviteResponse, ServerStatus};
@@ -129,7 +129,7 @@ impl WebAdmin {
         let ctx = Ctx { web: self.clone(), listener: which };
         let app = Router::new()
             .route("/", get(page))
-            .route("/login", get(login))
+            .route("/login", get(login).post(login))
             .route("/api/status", get(status))
             .route("/api/server/start", post(start))
             .route("/api/server/stop", post(stop))
@@ -205,7 +205,10 @@ async fn guard(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr
     if req.method() != Method::GET && req.method() != Method::POST {
         return deny(StatusCode::METHOD_NOT_ALLOWED, "GET or POST");
     }
-    if req.method() == Method::POST {
+    // The sign-in form is posted from a local file (origin `null`); its
+    // one-time token is the proof, so it needs no page header
+    let sign_in = req.uri().path() == "/login" && ctx.listener == Listener::Local;
+    if req.method() == Method::POST && !sign_in {
         let origin_ok = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()).is_none_or(|o| {
             let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
             o == format!("http://{host}")
@@ -252,8 +255,12 @@ async fn mesh_allowed(ctx: &Ctx, peer: IpAddr, own: Ipv4Addr) -> bool {
     status.nodes.iter().any(|n| n.ip == ip && admins.contains(&n.id))
 }
 
-async fn login(State(ctx): State<Ctx>, uri: axum::http::Uri) -> Response {
-    let token = uri.query().unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("t=")).unwrap_or("").to_string();
+/// The one-time sign-in, from a link (`?t=`) or, so the token stays off
+/// command lines and out of history, a form the CLI or tray app has the
+/// browser post from a private file (`t=` in the body)
+async fn login(State(ctx): State<Ctx>, uri: axum::http::Uri, body: String) -> Response {
+    let field = |s: &str| s.split('&').find_map(|kv| kv.strip_prefix("t=")).map(str::to_string);
+    let token = field(uri.query().unwrap_or("")).or_else(|| field(&body)).unwrap_or_default();
     let valid = {
         let mut logins = ctx.web.logins.lock().unwrap();
         logins.remove(&token).is_some_and(|t| t.elapsed() < LOGIN_TTL)
@@ -264,7 +271,11 @@ async fn login(State(ctx): State<Ctx>, uri: axum::http::Uri) -> Response {
     let session = random_token();
     ctx.web.sessions.lock().unwrap().insert(session.clone(), Instant::now());
     let cookie = format!("{SESSION_COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}", SESSION_TTL.as_secs());
-    ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
+    // Moving on from this page rather than redirecting: a navigation the page
+    // itself starts is same-site, so the strict cookie goes along even when
+    // the sign-in came from a local file
+    let next = "<!DOCTYPE html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=/\"><title>retail</title>";
+    ([(header::SET_COOKIE, cookie), (header::CACHE_CONTROL, "no-store".to_string())], Html(next)).into_response()
 }
 
 async fn page() -> Response {

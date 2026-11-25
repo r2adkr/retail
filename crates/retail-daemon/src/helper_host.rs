@@ -85,10 +85,16 @@ impl HelperHost {
         let mut c = self.config();
         c.enabled = false;
         self.save(&c)?;
+        self.halt().await;
+        Ok(())
+    }
+
+    /// Stops the helper node but keeps it enabled, for the daemon's own shutdown
+    pub async fn halt(&self) {
         if let Some((h, _)) = self.running.lock().await.take() {
             h.stop().await;
+            crate::firewall::release_inbound();
         }
-        Ok(())
     }
 
     pub async fn status(&self) -> HelperStatus {

@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -16,7 +17,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(4);
 /// Mappings are renewed at half the lease
 pub const LEASE: Duration = Duration::from_secs(3600);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Proto {
     Tcp,
     Udp,
@@ -31,14 +32,14 @@ impl Proto {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
     pub proto: Proto,
     pub internal: u16,
     pub external: u16,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Method {
     /// The nonce identifies the mappings for renewal and removal
     Pcp { gateway: Ipv4Addr, nonce: [u8; 12] },
@@ -46,7 +47,7 @@ pub enum Method {
     Upnp { control: String, service: String },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Outcome {
     pub method: Method,
     pub external_ip: Option<IpAddr>,
@@ -67,9 +68,67 @@ impl Outcome {
     }
 }
 
+/// Mappings open on the router, kept in a file so that ones a stopped or
+/// killed daemon left behind (a router may take only permanent UPnP
+/// mappings) are removed when it starts again
+static RECORD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// The ports an outcome is about, which identify it in the record
+fn ports_of(o: &Outcome) -> Vec<(Proto, u16)> {
+    let mut p: Vec<(Proto, u16)> = o.mappings.iter().map(|m| (m.proto, m.internal)).collect();
+    p.sort_by_key(|(proto, port)| (*proto as u8, *port));
+    p
+}
+
+fn read_record(path: &std::path::Path) -> Vec<Outcome> {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Adds `o` to the record, or with `remove` takes it out
+fn note(o: &Outcome, remove: bool) {
+    let guard = RECORD.lock().unwrap();
+    let Some(path) = guard.as_ref() else { return };
+    let mut all = read_record(path);
+    all.retain(|x| ports_of(x) != ports_of(o));
+    if !remove && !o.mappings.is_empty() {
+        all.push(o.clone());
+    }
+    let result = if all.is_empty() {
+        std::fs::remove_file(path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+    } else {
+        std::fs::write(path, serde_json::to_vec(&all).unwrap_or_default())
+    };
+    if let Err(e) = result {
+        tracing::debug!("recording port mappings: {e}");
+    }
+}
+
+/// Keeps the record in `state_dir` and removes what an earlier run left open
+pub async fn init(state_dir: &std::path::Path) {
+    let path = state_dir.join("portmaps.json");
+    let stale = read_record(&path);
+    *RECORD.lock().unwrap() = Some(path);
+    if stale.is_empty() {
+        return;
+    }
+    tracing::info!("removing {} router port mapping(s) left from the last run", stale.len());
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        for o in &stale {
+            close(o).await;
+        }
+    })
+    .await;
+}
+
 /// Asks for the same external port as each internal one. Ports after the
 /// first `required` are mapped if the router allows, skipped otherwise.
 pub async fn open(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
+    let o = open_new(ports, required).await?;
+    note(&o, false);
+    Ok(o)
+}
+
+async fn open_new(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
     let gateway = default_gateway().context("no default gateway")?;
     let mut nonce = [0u8; 12];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
@@ -86,14 +145,21 @@ pub async fn open(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
 
 pub async fn renew(outcome: &Outcome, required: usize) -> Result<Outcome> {
     let ports: Vec<(Proto, u16)> = outcome.mappings.iter().map(|m| (m.proto, m.internal)).collect();
-    match &outcome.method {
+    let o = match &outcome.method {
         Method::Pcp { gateway, nonce } => pcp_open(*gateway, *nonce, &ports, required).await,
         Method::NatPmp { gateway } => natpmp_open(*gateway, &ports, required).await,
         Method::Upnp { .. } => upnp_open(&ports, required).await,
-    }
+    }?;
+    note(&o, false);
+    Ok(o)
 }
 
 pub async fn close(outcome: &Outcome) {
+    close_on_router(outcome).await;
+    note(outcome, true);
+}
+
+async fn close_on_router(outcome: &Outcome) {
     match &outcome.method {
         Method::Pcp { gateway, nonce } => {
             for m in &outcome.mappings {
@@ -468,6 +534,45 @@ pub fn default_gateway() -> Option<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mappings a killed daemon left on a (fake) UPnP router are deleted at
+    /// the next start, and a clean close leaves nothing recorded
+    #[tokio::test]
+    async fn stale_mappings_are_removed_at_start() {
+        let router = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control = format!("http://127.0.0.1:{}/ctl", router.local_addr().unwrap().port());
+        let deleted = tokio::spawn(async move {
+            let mut got = Vec::new();
+            while let Ok(Ok((mut s, _))) = tokio::time::timeout(Duration::from_secs(2), router.accept()).await {
+                let mut buf = vec![0u8; 8192];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                if req.contains("DeletePortMapping") {
+                    got.push(tag(&req, "NewExternalPort").unwrap_or_default().to_string());
+                }
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+            }
+            got
+        });
+        let dir = std::env::temp_dir().join(format!("retail-portmap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let left = Outcome {
+            method: Method::Upnp { control, service: "urn:schemas-upnp-org:service:WANIPConnection:1".into() },
+            external_ip: None,
+            mappings: vec![Mapping { proto: Proto::Tcp, internal: 443, external: 443 }, Mapping { proto: Proto::Udp, internal: 3478, external: 3478 }],
+        };
+        std::fs::write(dir.join("portmaps.json"), serde_json::to_vec(&vec![left.clone()]).unwrap()).unwrap();
+        init(&dir).await;
+        assert!(!dir.join("portmaps.json").exists(), "the record is cleared once removed");
+        assert_eq!(deleted.await.unwrap(), ["443", "3478"]);
+        // Recorded while open, gone after a clean close
+        note(&left, false);
+        assert_eq!(read_record(&dir.join("portmaps.json")).len(), 1);
+        note(&left, true);
+        assert!(!dir.join("portmaps.json").exists());
+        *RECORD.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn parsing_router_answers() {

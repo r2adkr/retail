@@ -1,4 +1,5 @@
-//! The local API token file is readable only by users allowed to control retail
+//! The local API token file is readable only by users allowed to control
+//! retail; the administrator token next to it only by administrators/root
 
 use std::path::Path;
 
@@ -7,10 +8,49 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 
-pub fn write_new() -> Result<String> {
+fn new_token() -> String {
     let mut b = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut b);
-    let token = URL_SAFE_NO_PAD.encode(b);
+    URL_SAFE_NO_PAD.encode(b)
+}
+
+/// Written after `write_new`, which makes and protects the folder
+pub fn write_admin() -> Result<String> {
+    let token = new_token();
+    let path = retail_proto::local::admin_token_path();
+    let _ = std::fs::remove_file(&path);
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        f.write_all(token.as_bytes())?;
+    }
+    #[cfg(windows)]
+    {
+        // Empty and protected first, so the token is never readable by others
+        std::fs::write(&path, b"").with_context(|| format!("writing {}", path.display()))?;
+        let ok = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(["/inheritance:r", "/grant:r", "*S-1-5-18:F", "/grant:r", "*S-1-5-32-544:F", "/Q"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        anyhow::ensure!(ok, "could not restrict access to {}", path.display());
+        std::fs::write(&path, &token).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(token)
+}
+
+pub fn write_new() -> Result<String> {
+    let token = new_token();
+    // The last run's administrator token goes first: the folder's permissions
+    // are set again below and would reach it
+    let _ = std::fs::remove_file(retail_proto::local::admin_token_path());
     let path = retail_proto::local::token_path();
     let dir = path.parent().context("token path has no directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -50,6 +90,7 @@ fn group_id(name: &str) -> Option<u32> {
 
 #[cfg(windows)]
 fn restrict(dir: &Path, _file: &Path) -> Result<()> {
+    crate::state::take_over(dir);
     // SYSTEM and Administrators get full access, INTERACTIVE (local logons) read
     // SIDs rather than account names, which are localized
     let ok = std::process::Command::new("icacls")

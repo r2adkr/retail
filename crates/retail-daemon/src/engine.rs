@@ -76,6 +76,9 @@ const RELAY_FRAME_BYTES: usize = 60 * 1024;
 /// much per job.
 const RELAY_JOB_WAIT: Duration = Duration::from_millis(2);
 const MAX_PACKET: usize = 65536;
+/// Handshake initiations per second that get a Diffie-Hellman without proof
+/// of their source address; past it senders must first echo a cookie
+const HANDSHAKE_RATE_LIMIT: u64 = 100;
 /// boringtun derives session indices as `peer_index << 8 | n`, so peer indices are 24-bit
 const INDEX_MASK: u32 = 0x00FF_FFFF;
 const SOCKET_BUFFER: usize = 8 << 20;
@@ -605,7 +608,8 @@ pub struct Engine {
     control_addr: Mutex<Option<SocketAddr>>,
     /// How the control connection reaches the server, while connected
     control_via: Mutex<Option<String>>,
-    /// Checks handshake initiations' mac1 before the expensive part
+    /// Checks handshake initiations' mac1 before the expensive part and,
+    /// under load, makes senders prove their address with a cookie
     mac1: boringtun::noise::rate_limiter::RateLimiter,
     /// MagicDNS names of this device and its peers
     names: RwLock<crate::magicdns::Names>,
@@ -704,7 +708,7 @@ impl Engine {
             control_addr: Mutex::default(),
             control_via: Mutex::default(),
             names: RwLock::default(),
-            mac1: boringtun::noise::rate_limiter::RateLimiter::new(&public, 0),
+            mac1: boringtun::noise::rate_limiter::RateLimiter::new(&public, HANDSHAKE_RATE_LIMIT),
             self_dns_name: Mutex::default(),
             dns_queries,
             dns_queries_rx: Mutex::new(Some(dns_queries_rx)),
@@ -1149,6 +1153,32 @@ impl Engine {
             }
         };
         self.send_routed(peer, &init);
+    }
+
+    /// The load gate for handshake initiations, before any Diffie-Hellman. A
+    /// replayed or forged initiation passes mac1, so past the limit a sender
+    /// gets a cookie reply and must come back with it (WireGuard's mac2);
+    /// over the relay, which has no address to bind a cookie to, it is dropped.
+    fn handshake_allowed(&self, dgram: &[u8], src: Src) -> bool {
+        if dgram.len() != 148 || dgram[..4] != [1, 0, 0, 0] {
+            return true;
+        }
+        self.mac1.reset_count();
+        let addr = match src {
+            Src::Udp(addr) => Some(addr),
+            Src::Relay => None,
+        };
+        let mut cookie = [0u8; 64];
+        match self.mac1.verify_packet(addr.map(|a| a.ip()), dgram, &mut cookie) {
+            Ok(_) => true,
+            Err(TunnResult::WriteToNetwork(reply)) => {
+                if let Some(addr) = addr {
+                    self.send_now(reply, addr);
+                }
+                false
+            }
+            Err(_) => false,
+        }
     }
 
     fn lookup_incoming(&self, pkt: &[u8]) -> Option<Arc<Peer>> {
@@ -1655,6 +1685,9 @@ impl Engine {
     fn receive(&self, dgram: &[u8], src: Src, out: &mut Vec<u8>) -> bool {
         if matches!(src, Src::Udp(_)) && stun::is_stun(dgram) {
             self.handle_stun(dgram);
+            return false;
+        }
+        if !self.handshake_allowed(dgram, src) {
             return false;
         }
         let Some(peer) = self.lookup_incoming(dgram) else {

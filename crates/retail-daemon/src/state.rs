@@ -192,6 +192,18 @@ impl Persisted {
 /// is readable by every local user by default, which would let any of them
 /// impersonate this device. Applied on every save so existing directories get
 /// fixed too.
+/// A folder under %ProgramData% may have been made by any user before retail
+/// first ran, and its maker stays its owner, who can always change who may
+/// read it. Administrators become the owner of it and everything in it, and
+/// every permission added by hand goes (the caller then sets its own). Only
+/// works elevated; a daemon run by a plain user keeps what it has.
+#[cfg(windows)]
+pub fn take_over(dir: &Path) {
+    for args in [&["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"][..], &["/reset", "/T", "/C", "/Q"][..]] {
+        let _ = std::process::Command::new("icacls").arg(dir).args(args).output();
+    }
+}
+
 pub fn secure_dir(dir: &Path) {
     #[cfg(unix)]
     {
@@ -209,6 +221,7 @@ pub fn secure_dir(dir: &Path) {
         if done.iter().any(|d| d == dir) {
             return;
         }
+        take_over(dir);
         // SYSTEM and Administrators by SID, since account names are localized
         let ok = std::process::Command::new("icacls")
             .arg(dir)
