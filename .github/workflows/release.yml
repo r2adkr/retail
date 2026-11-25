@@ -223,13 +223,21 @@ jobs:
           Get-ChildItem "$dir\bin"
           & "$dir\bin\retail.exe" status
           if ($LASTEXITCODE -ne 0) { throw "retail status failed" }
-          & "$dir\bin\retail.exe" set --auto-update false
-          if ($LASTEXITCODE -ne 0) { throw "retail set failed" }
+          # A change: the listener check must pass (the daemon is this
+          # session's). The daemon then takes it if this shell may read its
+          # token: elevated, or signed in at the computer (INTERACTIVE); a
+          # runner's service logon unelevated may not, and is refused by the daemon
+          whoami /groups | Select-String 'Mandatory Label|INTERACTIVE|SERVICE '
+          $out = & "$dir\bin\retail.exe" set --auto-update false 2>&1 | Out-String
+          $out
+          if ($LASTEXITCODE -ne 0 -and $out -notmatch 'not allowed') { throw "retail set failed before reaching the daemon" }
           # Again over the running programs, as an update by hand does
           $code = Run-Installer again.txt @('--yes','--prefix',$dir,'--no-service','--no-autostart')
           if ($code -ne 0) { throw "installing over the running programs: exit $code" }
           Get-ChildItem "$dir\bin"
           Stop-Process -Name retaild -Force
+          # A refused change above left its exit code, which the step would report
+          exit 0
 
   # The server image (retaild and retail, no tunnel of its own) for
   # 64-bit Intel and ARM, from the same programs as the release
