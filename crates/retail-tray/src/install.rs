@@ -43,6 +43,9 @@ struct Opts {
     yes: bool,
     /// The raised step writes its error here for the window that started it
     result: Option<PathBuf>,
+    /// This is the window, raised to administrator at the start (Windows);
+    /// the user's own process that raised it does the per-user steps
+    raised_window: bool,
 }
 
 impl Opts {
@@ -56,6 +59,7 @@ impl Opts {
             invite: value("--invite").filter(|i| !i.trim().is_empty()),
             yes: args.iter().any(|a| a == "--yes") || std::env::var_os("RETAIL_INSTALL_YES").is_some(),
             result: value("--result").map(PathBuf::from),
+            raised_window: args.iter().any(|a| a == "--raised-window"),
         }
     }
 
@@ -176,6 +180,15 @@ pub fn run(args: &[String]) -> Option<i32> {
     opts.switch = current.is_some();
     // The installer's own window where there is a desktop to show it on
     if !opts.yes && has_desktop() {
+        // Windows asks for administrator rights as the installer opens; this
+        // process waits and then sets up the tray app for the user. Declined,
+        // the window opens here and asks again when installing.
+        #[cfg(windows)]
+        if !opts.raised_window && !is_admin()
+            && let Some(code) = raised_window(&me, &opts, installed)
+        {
+            return Some(code);
+        }
         let kind = match (&invite, &current) {
             (Some(_), Some(cur)) => setup::Kind::Switch { current: crate::settings::server_label(cur), network: network.clone() },
             (Some(_), None) => setup::Kind::Join { network: network.clone() },
@@ -192,7 +205,15 @@ pub fn run(args: &[String]) -> Option<i32> {
                 o.invite = typed;
             }
             install_now(&me, &source, &manifest, &o)?;
-            after_install(&o, installed);
+            match (&o.result, o.raised_window) {
+                // Tells the user's process waiting for this window
+                (Some(f), true) => {
+                    let _ = std::fs::write(f, INSTALLED);
+                }
+                _ => {
+                    after_install(&o, installed);
+                }
+            }
             Ok(())
         };
         if let Some(code) = setup::run_window(kind, version, &dir, joined, Box::new(work)) {
@@ -229,6 +250,34 @@ pub fn run(args: &[String]) -> Option<i32> {
     };
     tell(&done);
     Some(0)
+}
+
+/// What the raised window writes once it has installed
+#[cfg(any(windows, test))]
+const INSTALLED: &str = "installed";
+
+/// Runs the installer window as administrator and waits for it. When it
+/// says it has installed, the tray app is set up here, as the user (a raised
+/// process would start it as administrator, in the administrator's sign-in
+/// settings). `None` if the user declined.
+#[cfg(windows)]
+fn raised_window(me: &Path, opts: &Opts, installed: bool) -> Option<i32> {
+    let result = std::env::temp_dir().join(format!("retail-window-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&result);
+    let raised = Opts { result: Some(result.clone()), ..opts.clone() };
+    let mut done = false;
+    let code = elevate_with(me, "--raised-window", &raised, || {
+        if !done && std::fs::read_to_string(&result).is_ok_and(|s| s == INSTALLED) {
+            done = true;
+            after_install(opts, installed);
+        }
+    })
+    .ok()?;
+    if !done && std::fs::read_to_string(&result).is_ok_and(|s| s == INSTALLED) {
+        after_install(opts, installed);
+    }
+    let _ = std::fs::remove_file(&result);
+    Some(code)
 }
 
 /// Installs, raising itself to administrator if it is not one: the raised
@@ -519,11 +568,18 @@ fn is_admin() -> bool {
 /// Runs this executable with `--install` as administrator and waits for it
 #[cfg(windows)]
 fn elevate(me: &Path, o: &Opts) -> Result<i32, String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+    elevate_with(me, "--install", o, || {})
+}
+
+/// Runs this executable with `step` as administrator, calling `tick` now
+/// and then until it ends
+#[cfg(windows)]
+fn elevate_with(me: &Path, step: &str, o: &Opts, mut tick: impl FnMut()) -> Result<i32, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
     use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-    let mut params = vec!["--install".to_string()];
+    let mut params = vec![step.to_string()];
     params.extend(o.forward().into_iter().map(|a| format!("\"{a}\"")));
     let (verb, file, params) = (wide("runas"), wide(&me.display().to_string()), wide(&params.join(" ")));
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
@@ -532,13 +588,17 @@ fn elevate(me: &Path, o: &Opts) -> Result<i32, String> {
     info.lpVerb = verb.as_ptr();
     info.lpFile = file.as_ptr();
     info.lpParameters = params.as_ptr();
-    info.nShow = 0;
+    // Windows applies this to the program's first window: hidden for the
+    // install step, which has none, shown for the installer window
+    info.nShow = if step == "--raised-window" { 1 } else { 0 }; // SW_SHOWNORMAL, SW_HIDE
     if unsafe { ShellExecuteExW(&mut info) } == 0 || info.hProcess.is_null() {
         return Err("administrator permission was not given".into());
     }
+    while unsafe { WaitForSingleObject(info.hProcess, 300) } == WAIT_TIMEOUT {
+        tick();
+    }
     let mut code = 1u32;
     unsafe {
-        WaitForSingleObject(info.hProcess, INFINITE);
         GetExitCodeProcess(info.hProcess, &mut code);
         CloseHandle(info.hProcess);
     }
