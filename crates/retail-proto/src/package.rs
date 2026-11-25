@@ -9,9 +9,9 @@
 //! releases will need the data placed where signatures allow it.
 //!
 //! The official installer of each release is a package without an invite
-//! (`scripts/bundle.py`); for macOS it sits in a zip as `retail.app`. Daemons
-//! update themselves from it, and servers take other systems' programs out
-//! of it for their packages.
+//! (`scripts/bundle.py`); for macOS it is a resource of `retail.app`, in a
+//! zip. Daemons update themselves from it, and servers take other systems'
+//! programs out of it for their packages.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 pub const MAGIC: &[u8; 16] = b"RETAIL-PACKAGE-1";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
-/// The installer's place in the macOS zip
-pub const APP_EXECUTABLE: &str = "retail.app/Contents/MacOS/retail";
+/// The installer's place in the macOS zip: a resource of `retail.app`, whose
+/// own program is the plain tray app, so the app can be signed as a whole
+pub const APP_PACKAGE: &str = "retail.app/Contents/Resources/retail.package";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -252,7 +253,7 @@ mod tests {
         // A zip with one stored entry before it, as bundle.py writes them
         let mut zip = Vec::new();
         let mut central = Vec::new();
-        for (name, data) in [("retail.app/Contents/Info.plist", &b"<plist/>"[..]), (APP_EXECUTABLE, &pkg[..])] {
+        for (name, data) in [("retail.app/Contents/Info.plist", &b"<plist/>"[..]), (APP_PACKAGE, &pkg[..])] {
             let at = zip.len() as u32;
             let mut local = b"PK\x03\x04".to_vec();
             local.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -281,7 +282,7 @@ mod tests {
         zip.extend_from_slice(&[0, 0]);
 
         let mut cur = std::io::Cursor::new(&zip);
-        let (start, len) = zip_entry(&mut cur, APP_EXECUTABLE).unwrap();
+        let (start, len) = zip_entry(&mut cur, APP_PACKAGE).unwrap();
         assert_eq!(len, pkg.len() as u64);
         let mut w = Window::new(cur, start, len);
         let got = read_manifest(&mut w).unwrap();
@@ -302,7 +303,7 @@ mod tests {
     fn bundle_py_zip() {
         let Some(path) = std::env::var_os("RETAIL_BUNDLE_ZIP") else { return };
         let mut f = std::fs::File::open(path).unwrap();
-        let (start, len) = zip_entry(&mut f, APP_EXECUTABLE).expect("the installer is in the zip, stored");
+        let (start, len) = zip_entry(&mut f, APP_PACKAGE).expect("the installer is in the zip, stored");
         let m = read_manifest(&mut Window::new(f, start, len)).expect("it is a package");
         assert!(m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"), "{m:?}");
     }

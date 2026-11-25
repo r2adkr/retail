@@ -126,7 +126,14 @@ jobs:
           ./out/retail-linux-x86_64 --package-info
           sudo ./out/retail-linux-x86_64 --yes --prefix "$RUNNER_TEMP/r" --no-service --no-autostart
           ls -l "$RUNNER_TEMP/r/bin"
-          sudo "$RUNNER_TEMP/r/bin/retail" status
+          "$RUNNER_TEMP/r/bin/retail" status
+          # A change from another user than the daemon's (root), not in the
+          # retail group: the listener check passes (root's socket) and the
+          # daemon then refuses for want of its token
+          out=$("$RUNNER_TEMP/r/bin/retail" set --auto-update false 2>&1) && { echo "a non-member changed settings: $out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "not allowed" || { echo "expected the daemon's refusal"; exit 1; }
+          sudo "$RUNNER_TEMP/r/bin/retail" set --auto-update false
           sudo pkill -f "$RUNNER_TEMP/r/bin/retaild"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -147,7 +154,9 @@ jobs:
           path: dist
           pattern: programs-macos-*
           merge-multiple: true
-      - name: Universal programs and the installer
+      # retail.app runs the plain tray app, which finds the installer among
+      # its resources; signed ad hoc as a whole (no Developer ID yet)
+      - name: Universal programs and the app
         run: |
           mkdir uni out
           for b in retail-tray retaild retail; do
@@ -155,15 +164,27 @@ jobs:
             lipo -info "uni/$b"
           done
           python3 scripts/bundle.py uni/installer uni/retail-tray retaild=uni/retaild retail=uni/retail
-          python3 scripts/bundle.py --app out/retail-macos.zip uni/installer
+          python3 scripts/bundle.py --app retail.app uni/installer uni/retail-tray
+          codesign --force --deep --sign - retail.app
+          codesign --verify --deep --strict --verbose=2 retail.app
+          python3 scripts/bundle.py --zip out/retail-macos.zip retail.app
           ls -l out
       - name: Try the macOS installer
         run: |
           mkdir try && cd try && ditto -x -k ../out/retail-macos.zip .
+          # As a browser download arrives: what Gatekeeper makes of it (an
+          # unsigned app is expected to be refused here; the point is "refused", not "damaged")
+          xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" retail.app
+          spctl --assess --type execute --verbose=4 retail.app || true
+          codesign --verify --deep --strict --verbose=2 retail.app
+          xattr -d com.apple.quarantine retail.app
           ./retail.app/Contents/MacOS/retail --package-info
           sudo ./retail.app/Contents/MacOS/retail --yes --prefix "$RUNNER_TEMP/r" --no-service --no-autostart
           ls -l "$RUNNER_TEMP/r/bin"
-          sudo "$RUNNER_TEMP/r/bin/retail" status
+          "$RUNNER_TEMP/r/bin/retail" status
+          # A change from a user other than the daemon's (root): the listener
+          # check must find root's socket, and the admin group may control retail
+          "$RUNNER_TEMP/r/bin/retail" set --auto-update false
           sudo pkill -f "$RUNNER_TEMP/r/bin/retaild"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -193,6 +214,13 @@ jobs:
           Get-ChildItem "$dir\bin"
           & "$dir\bin\retail.exe" status
           if ($LASTEXITCODE -ne 0) { throw "retail status failed" }
+          & "$dir\bin\retail.exe" set --auto-update false
+          if ($LASTEXITCODE -ne 0) { throw "retail set failed" }
+          # Again over the running programs, as an update by hand does
+          $p = Start-Process $inst -ArgumentList '--yes','--prefix',$dir,'--no-service','--no-autostart' -Wait -PassThru -RedirectStandardOutput again.txt
+          Get-Content again.txt
+          if ($p.ExitCode -ne 0) { throw "installing over the running programs: exit $($p.ExitCode)" }
+          Get-ChildItem "$dir\bin"
           Stop-Process -Name retaild -Force
 
   # The server image (retaild and retail, no tunnel of its own) for

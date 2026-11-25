@@ -98,6 +98,16 @@ fn api_addr() -> SocketAddr {
         .unwrap_or_else(|| retail_proto::LOCAL_API_ADDR.parse().expect("valid default address"))
 }
 
+/// The package this program is, or on macOS the one in the app it runs from
+/// (`retail.app/Contents/Resources/retail.package`, next to `MacOS/retail`)
+fn package(me: &Path) -> Option<(PathBuf, Manifest)> {
+    let read = |p: &Path| File::open(p).ok().and_then(|mut f| read_manifest(&mut f)).map(|m| (p.to_path_buf(), m));
+    read(me).or_else(|| {
+        let macos = me.parent().filter(|d| cfg!(target_os = "macos") && d.ends_with("Contents/MacOS"))?;
+        read(&macos.parent()?.join("Resources").join("retail.package"))
+    })
+}
+
 /// Handles the installer flags, or this executable being a package. Returns
 /// the exit code when it did; `None` means start the tray app as usual.
 pub fn run(args: &[String]) -> Option<i32> {
@@ -106,15 +116,15 @@ pub fn run(args: &[String]) -> Option<i32> {
     if args.iter().any(|a| a == "--uninstall") {
         return Some(report(uninstall(&opts)));
     }
-    let manifest = File::open(&me).ok().and_then(|mut f| read_manifest(&mut f));
+    let found = package(&me);
     if args.iter().any(|a| a == "--package-info") {
-        match &manifest {
-            Some(m) => println!("{}", serde_json::to_string_pretty(m).unwrap_or_default()),
+        match &found {
+            Some((_, m)) => println!("{}", serde_json::to_string_pretty(m).unwrap_or_default()),
             None => println!("not a package"),
         }
         return Some(0);
     }
-    let manifest = manifest?;
+    let (source, manifest) = found?;
     crate::i18n::set(crate::config::Config::load().language);
     QUIET.store(opts.yes, std::sync::atomic::Ordering::Relaxed);
     // The command line's code, the package's, or none (the official installer)
@@ -130,7 +140,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         }
     };
     if args.iter().any(|a| a == "--install") {
-        return Some(report(privileged(&me, &manifest, &opts)));
+        return Some(report(privileged(&source, &manifest, &opts)));
     }
     let network = if manifest.network.is_empty() {
         tr("a retail network").to_string()
@@ -162,7 +172,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     }
     opts.switch = current.is_some();
     let code = if is_admin() {
-        report(privileged(&me, &manifest, &opts))
+        report(privileged(&source, &manifest, &opts))
     } else {
         match elevate(&me, &opts) {
             Ok(code) => code,
@@ -186,17 +196,20 @@ pub fn run(args: &[String]) -> Option<i32> {
         (None, _) => tr("retail is installed. Join a network with `retail up --invite <code>`, or host one with `retail server start`.").to_string(),
     };
     tell(&done);
-    if desktop {
-        // An older tray app still running restarts itself when it sees the new daemon
+    // On an update a tray app already running restarts itself into the new
+    // one when it sees the newer daemon; starting another would make two
+    if desktop && !installed {
         let _ = std::process::Command::new(&tray).spawn();
     }
     Some(0)
 }
 
-/// Whether a desktop session can show the tray app (Linux may be a server)
+/// Whether a desktop session can show the tray app (Linux may be a server).
+/// Under sudo the tray app would be root's, so it is left out: run without
+/// sudo on a desktop and the installer asks for the password itself.
 fn has_desktop() -> bool {
     if cfg!(target_os = "linux") {
-        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        (std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()) && std::env::var_os("SUDO_USER").is_none()
     } else {
         true
     }
@@ -225,14 +238,14 @@ fn report(r: Result<(), String>) -> i32 {
 }
 
 /// The raised part: files, boot registration, joining
-fn privileged(me: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
+fn privileged(source: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
     let dir = bin_dir(o);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     if o.service {
         // A daemon installed before is stopped by its own program
         let _ = daemon_service(&dir.join(exe("retaild")), "stop");
     }
-    let mut src = File::open(me).map_err(|e| format!("reading the installer: {e}"))?;
+    let mut src = File::open(source).map_err(|e| format!("reading the installer: {e}"))?;
     copy_range(&mut src, 0, m.base_len, &dir.join(exe("retail-tray")))?;
     for f in &m.files {
         if !safe_name(&f.name) {
@@ -271,6 +284,18 @@ fn copy_range(src: &mut File, offset: u64, len: u64, dest: &Path) -> Result<(), 
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(err)?;
+    }
+    // Windows will not overwrite a running program (the tray app, when this
+    // installs over itself) but lets it be renamed: it moves aside to `.old`,
+    // which the daemon removes when it next starts
+    #[cfg(windows)]
+    if dest.exists() {
+        let old = dest.with_extension(match dest.extension().and_then(|e| e.to_str()) {
+            Some(ext) => format!("{ext}.old"),
+            None => "old".into(),
+        });
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(dest, &old).map_err(err)?;
     }
     std::fs::rename(&tmp, dest).map_err(err)
 }

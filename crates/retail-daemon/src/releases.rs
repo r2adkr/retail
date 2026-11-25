@@ -112,10 +112,10 @@ pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: 
 
 /// Writes `files` out of the installer at `path` (a zip holding it for macOS)
 fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
-    use retail_proto::package::{APP_EXECUTABLE, Window, extract, read_manifest, zip_entry};
+    use retail_proto::package::{APP_PACKAGE, Window, extract, read_manifest, zip_entry};
     let mut f = std::fs::File::open(path)?;
     let (start, len) = if path.to_string_lossy().ends_with(".zip.download") {
-        zip_entry(&mut f, APP_EXECUTABLE).context("the zip holds no installer")?
+        zip_entry(&mut f, APP_PACKAGE).context("the zip holds no installer")?
     } else {
         (0, f.metadata()?.len())
     };

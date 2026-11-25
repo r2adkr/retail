@@ -36,7 +36,7 @@ Download the installer for your system from [Releases](https://github.com/r2adkr
 | Linux on 64-bit ARM (Raspberry Pi 3/4/5) | `retail-linux-aarch64` |
 | Linux on 32-bit ARM (Raspberry Pi OS 32-bit, routers) | `retail-linux-arm` |
 
-Run it and confirm; it asks for administrator rights once. On Linux: `chmod +x retail-linux-* && sudo ./retail-linux-*`. The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time. Running a newer installer over an installed retail updates it, though installed devices also update themselves.
+Run it and confirm; it asks for administrator rights once. On a Linux desktop: `chmod +x retail-linux-* && ./retail-linux-*` (without sudo, so the tray app is yours). The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time. Running a newer installer over an installed retail updates it, though installed devices also update themselves.
 
 **Joining**: after installing, paste an invite code in the tray app. Or use an installer from your network's server, which also joins: on the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page).
 
