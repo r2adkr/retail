@@ -322,13 +322,30 @@ async fn ensure_program(dir: &Path) -> Result<PathBuf> {
     }
     let _ = std::fs::remove_file(&exe);
     if a.tgz {
-        let out = std::process::Command::new("tar").arg("-xzf").arg(&download).arg("-C").arg(dir).arg("cloudflared").output();
+        // Into a folder of its own, whatever the archive calls its member
+        // (`cloudflared` or `./cloudflared`)
+        let unpack = dir.join("unpack");
+        let _ = std::fs::remove_dir_all(&unpack);
+        std::fs::create_dir_all(&unpack)?;
+        let out = std::process::Command::new("tar").arg("-xzf").arg(&download).arg("-C").arg(&unpack).output();
         let _ = std::fs::remove_file(&download);
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => bail!("unpacking cloudflared: {}", String::from_utf8_lossy(&o.stderr).trim()),
-            Err(e) => bail!("unpacking cloudflared: {e}"),
-        }
+        let found = match out {
+            Ok(o) if o.status.success() => find_program(&unpack),
+            Ok(o) => {
+                let _ = std::fs::remove_dir_all(&unpack);
+                bail!("unpacking cloudflared: {}", String::from_utf8_lossy(&o.stderr).trim())
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&unpack);
+                bail!("unpacking cloudflared: {e}")
+            }
+        };
+        let moved = match found {
+            Some(f) => std::fs::rename(&f, &exe).context("putting cloudflared in place"),
+            None => Err(anyhow::anyhow!("the cloudflared archive has no cloudflared in it")),
+        };
+        let _ = std::fs::remove_dir_all(&unpack);
+        moved?;
     } else {
         std::fs::rename(&download, &exe)?;
     }
@@ -340,6 +357,15 @@ async fn ensure_program(dir: &Path) -> Result<PathBuf> {
     let h = sha256_file(&exe).context("reading cloudflared")?;
     std::fs::write(dir.join("cloudflared.sha256"), &h)?;
     Ok(exe)
+}
+
+/// The file named `cloudflared` in `dir` or a folder in it
+fn find_program(dir: &Path) -> Option<PathBuf> {
+    let direct = dir.join("cloudflared");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path().join("cloudflared")).find(|p| p.is_file())
 }
 
 /// Started apart from retaild, so stopping retaild (an update, a restart)
@@ -438,6 +464,19 @@ fn is(pid: u32, exe: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_program_in_an_unpacked_archive() {
+        let dir = std::env::temp_dir().join(format!("retail-cf-unpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        assert_eq!(find_program(&dir), None);
+        std::fs::write(dir.join("a").join("cloudflared"), b"x").unwrap();
+        assert_eq!(find_program(&dir), Some(dir.join("a").join("cloudflared")));
+        std::fs::write(dir.join("cloudflared"), b"x").unwrap();
+        assert_eq!(find_program(&dir), Some(dir.join("cloudflared")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn host_names_are_checked() {
