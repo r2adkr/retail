@@ -381,12 +381,12 @@ jobs:
           $rel = "$env:RUNNER_TEMP\rel"; $ca = "C:\ProgramData\retail-ci"
           New-Item -ItemType Directory -Force "$rel\latest", "$rel\v9.9.9", $ca | Out-Null
           Copy-Item $inst "$rel\v9.9.9\"
-          Set-Content -NoNewline "$rel\latest\VERSION" '9.9.9'
+          [IO.File]::WriteAllText("$rel\latest\VERSION", '9.9.9')
           $sum = (Get-FileHash "$rel\v9.9.9\retail-windows-x86_64.exe" -Algorithm SHA256).Hash.ToLower()
-          Set-Content -NoNewline "$rel\v9.9.9\SHA256SUMS" "$sum  retail-windows-x86_64.exe`n"
+          [IO.File]::WriteAllText("$rel\v9.9.9\SHA256SUMS", "$sum  retail-windows-x86_64.exe`n")
           openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj /CN=retail-test-ca -keyout "$ca\ca.key" -out "$ca\ca.crt" 2>$null
           openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=127.0.0.1 -keyout "$ca\rel.key" -out "$ca\rel.csr" 2>$null
-          Set-Content "$ca\rel.ext" "subjectAltName=IP:127.0.0.1`nbasicConstraints=CA:FALSE"
+          [IO.File]::WriteAllText("$ca\rel.ext", "subjectAltName=IP:127.0.0.1`nbasicConstraints=CA:FALSE`n")
           openssl x509 -req -in "$ca\rel.csr" -CA "$ca\ca.crt" -CAkey "$ca\ca.key" -CAcreateserial -days 2 -extfile "$ca\rel.ext" -out "$ca\rel.crt" 2>$null
           if (-not (Test-Path "$ca\rel.crt")) { throw "no certificate for the mirror" }
           Set-Content "$ca\mirror.py" @'
