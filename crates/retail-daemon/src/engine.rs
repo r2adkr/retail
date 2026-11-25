@@ -610,8 +610,9 @@ pub struct Engine {
     control_addr: Mutex<Option<SocketAddr>>,
     /// How the control connection reaches the server, while connected
     control_via: Mutex<Option<String>>,
-    /// Why the last try to reach the server failed, until one works
-    control_problem: Mutex<Option<retail_proto::api::ConnectionProblem>>,
+    /// Why the last try to reach the server failed, until one works, and
+    /// since when tries have failed
+    control_problem: Mutex<Option<(retail_proto::api::ConnectionProblem, Instant)>>,
     /// Checks handshake initiations' mac1 before the expensive part and,
     /// under load, makes senders prove their address with a cookie
     mac1: boringtun::noise::rate_limiter::RateLimiter,
@@ -1914,11 +1915,16 @@ impl Engine {
     }
 
     pub fn set_control_problem(&self, problem: Option<retail_proto::api::ConnectionProblem>) {
-        *self.control_problem.lock().unwrap() = problem;
+        let mut p = self.control_problem.lock().unwrap();
+        let since = p.as_ref().map_or_else(Instant::now, |(_, at)| *at);
+        *p = problem.map(|x| (x, since));
     }
 
+    /// Once tries have failed for a few seconds: a way that fails while
+    /// another is about to work says nothing to the user
     pub fn control_problem(&self) -> Option<retail_proto::api::ConnectionProblem> {
-        self.control_problem.lock().unwrap().clone()
+        let p = self.control_problem.lock().unwrap();
+        p.as_ref().filter(|(_, at)| at.elapsed() >= Duration::from_secs(3)).map(|(x, _)| x.clone())
     }
 
     pub fn set_control_via(&self, via: Option<String>) {

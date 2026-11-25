@@ -364,14 +364,11 @@ fn open_browser(url: &str) {
 /// the server could not be reached (two lines), else as it came
 fn api_error(body: &[u8], code: u16) -> String {
     let Ok(e) = serde_json::from_slice::<ApiError>(body) else { return format!("HTTP {code}") };
-    match e.reason.filter(|_| !known(&e.error)).and_then(crate::ui::reason_text) {
+    // A rejected auth key or a damaged code carries no reason
+    match e.reason.and_then(crate::ui::reason_text) {
         Some((what, hint)) => format!("{what}\n{hint}"),
         None => friendly(e.error),
     }
-}
-
-fn known(msg: &str) -> bool {
-    friendly(msg.to_string()) != msg
 }
 
 fn friendly(msg: String) -> String {
@@ -387,4 +384,20 @@ fn friendly(msg: String) -> String {
         ("the server is not running", "The server is not running."),
     ];
     known.iter().find(|(k, _)| msg.contains(k)).map_or(msg, |(_, en)| tr(en).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_say_why_the_server_was_not_reached() {
+        crate::i18n::set(crate::i18n::LangPref::En);
+        let timeout = br#"{"error":"contacting https://vpn.example.com: connecting to 203.0.113.5:443 timed out","reason":"timeout"}"#;
+        assert_eq!(api_error(timeout, 400), "No answer from the server\nThe network may block it, or the server is off");
+        // No reason: the known message
+        let key = br#"{"error":"registration rejected (HTTP 401): invalid, used or expired auth key"}"#;
+        assert_eq!(api_error(key, 400), "The invite code or auth key is wrong, already used, or expired.");
+        assert_eq!(api_error(b"not json", 502), "HTTP 502");
+    }
 }

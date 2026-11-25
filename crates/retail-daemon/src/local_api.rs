@@ -156,6 +156,11 @@ fn error(status: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 fn failed(e: anyhow::Error) -> Response {
+    error(StatusCode::BAD_REQUEST, format!("{e:#}"))
+}
+
+/// `failed` for a request that contacts the server: says why it could not be reached
+fn not_reached(e: anyhow::Error) -> Response {
     let reason = Some(crate::failure::classify(&e)).filter(|r| *r != retail_proto::api::FailReason::Other);
     (StatusCode::BAD_REQUEST, Json(ApiError { error: format!("{e:#}"), reason })).into_response()
 }
@@ -167,7 +172,7 @@ async fn status(State(b): State<Arc<Backend>>) -> Response {
 async fn up(State(b): State<Arc<Backend>>, Json(req): Json<UpRequest>) -> Response {
     match b.up(req).await {
         Ok(()) => Json(b.status().await).into_response(),
-        Err(e) => failed(e),
+        Err(e) => not_reached(e),
     }
 }
 
@@ -202,7 +207,7 @@ async fn update_install(State(b): State<Arc<Backend>>) -> Response {
 async fn switch_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSelect>) -> Response {
     match b.switch_server(&req.server).await {
         Ok(()) => Json(b.status().await).into_response(),
-        Err(e) => failed(e),
+        Err(e) => not_reached(e),
     }
 }
 
