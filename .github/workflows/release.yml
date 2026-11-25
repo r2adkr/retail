@@ -348,7 +348,22 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
           [ "$(ls | wc -l)" = 7 ] || { echo "expected 5 installers, VERSION and SHA256SUMS"; ls; exit 1; }
+      # The notes: docs/releases/<tag>.md where there is one (otherwise
+      # GitHub's list of changes), and the checksums at the end
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: src
+          sparse-checkout: docs/releases
+      - run: |
+          notes="src/docs/releases/${GITHUB_REF_NAME}.md"
+          generate=--generate-notes
+          if [ -f "$notes" ]; then cp "$notes" notes.md; generate=; else : > notes.md; fi
+          { echo; echo "## SHA-256 checksums"; echo; echo '```'; grep -v ' VERSION$' dist/SHA256SUMS; echo '```'; } >> notes.md
+          echo "GENERATE=$generate" >> "$GITHUB_ENV"
+          cat notes.md
       - if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "retail ${GITHUB_REF_NAME#v}" --notes-file notes.md $GENERATE

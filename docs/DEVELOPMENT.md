@@ -37,7 +37,7 @@ retail-tray --preview server.png --server --state running
 
 ## Releases
 
-Pushing a tag `vX.Y.Z` that matches the version in `Cargo.toml` runs `.github/workflows/release.yml`: it builds every platform, puts each system's programs into one installer (`scripts/bundle.py`; macOS gets universal programs, as `retail.app` in a disk image; Linux a `.deb` per processor), installs each on a runner of its system, writes `SHA256SUMS` and `VERSION`, and publishes the GitHub release that servers fetch clients from and daemons update from. A push to the `release-rehearsal` branch does all of it except publishing.
+Pushing a tag `vX.Y.Z` that matches the version in `Cargo.toml` runs `.github/workflows/release.yml`: it builds every platform, puts each system's programs into one installer (`scripts/bundle.py`; macOS gets universal programs, as `retail.app` in a disk image; Linux a `.deb` per processor), installs each on a runner of its system, writes `SHA256SUMS` and `VERSION`, and publishes the GitHub release that servers fetch clients from and daemons update from. A push to the `release-rehearsal` branch does all of it except publishing. The release page shows `docs/releases/vX.Y.Z.md` (write it before tagging; without it GitHub lists the changes) followed by the checksums.
 
 ## Layout
 
