@@ -365,9 +365,11 @@ jobs:
           if ($server -match 'not running') { throw "the server did not come back after the update" }
           & $retail set --auto-update false
           if ($LASTEXITCODE -ne 0) { throw "retail set was refused after the update" }
-          # Every file the daemon keeps is still readable to it
+          # Every file the daemon keeps is still readable to it (the log
+          # while the daemon writes it too)
           Get-ChildItem C:\ProgramData\retail -Recurse -File | ForEach-Object {
-            try { $null = [IO.File]::ReadAllBytes($_.FullName) } catch { throw "unreadable after the update: $($_.FullName)" }
+            $f = $_.FullName
+            try { [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite, Delete').Dispose() } catch { throw "unreadable after the update: $f ($_)" }
           }
           # The task as this version defines it: a minute's trigger starts
           # retaild again should it be gone
@@ -443,7 +445,7 @@ jobs:
           if ($old) { $old; throw "old programs stayed" }
           $server = & $retail server status | Out-String
           if ($server -match 'not running') { $server; throw "the server did not come back after the self-update" }
-          if (-not (Select-String -Quiet 'restarting through Task Scheduler' C:\ProgramData\retail\retaild.log)) { throw "the log does not say how retaild restarted" }
+          if ((Get-Content -Raw C:\ProgramData\retail\retaild.log) -notmatch 'restarting through Task Scheduler') { throw "the log does not say how retaild restarted" }
           # Stopped, it stays stopped: the minute's trigger is off until
           # the next registration
           & "C:\Program Files\retail\retaild.exe" service stop
