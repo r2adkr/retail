@@ -262,10 +262,11 @@ impl Dashboard {
             rows.push((tr("This network"), lan.clone(), t.text));
         }
         match &s.router {
-            Some(RouterState::Opened { method, tcp, udp }) => {
+            Some(RouterState::Opened { method, tcp, udp, alt }) => {
+                let tcp = tcp_ports(*tcp, *alt);
                 rows.push((
                     tr("Router ports"),
-                    trf("Opened with {method} (TCP {tcp}, UDP {udp})", &[("method", method), ("tcp", tcp), ("udp", udp)]),
+                    trf("Opened with {method} (TCP {tcp}, UDP {udp})", &[("method", method), ("tcp", &tcp), ("udp", udp)]),
                     t.text,
                 ));
             }
@@ -684,10 +685,18 @@ fn notice_text(n: &ServerNotice) -> String {
             "The router's external address ({router_ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Make a device they can reach the helper node: Manage on the web, then that device's ⋯ menu. Devices on the same network can join as they are.",
             &[("router_ip", router_ip)],
         ),
-        ServerNotice::ForwardPorts { tcp, udp } => trf(
+        ServerNotice::ForwardPorts { tcp, udp, alt } => trf(
             "The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",
-            &[("tcp", tcp), ("udp", udp)],
+            &[("tcp", &tcp_ports(*tcp, *alt)), ("udp", udp)],
         ),
+    }
+}
+
+/// `443` or `443, 24581`: the server port and the second one
+fn tcp_ports(tcp: u16, alt: Option<u16>) -> String {
+    match alt {
+        Some(a) => format!("{tcp}, {a}"),
+        None => tcp.to_string(),
     }
 }
 

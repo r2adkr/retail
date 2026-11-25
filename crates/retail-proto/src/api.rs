@@ -172,8 +172,14 @@ pub struct ServerStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouterState {
-    /// Ports opened by PCP, NAT-PMP or UPnP
-    Opened { method: String, tcp: u16, udp: u16 },
+    /// Ports opened by PCP, NAT-PMP or UPnP; `alt` is the second server port
+    Opened {
+        method: String,
+        tcp: u16,
+        udp: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt: Option<u16>,
+    },
     /// The router did not open them
     Unavailable,
 }
@@ -183,8 +189,13 @@ pub enum RouterState {
 pub enum ServerNotice {
     /// The router's own address is private: other networks cannot reach it
     Cgnat { router_ip: std::net::IpAddr },
-    /// Ports must be forwarded by hand
-    ForwardPorts { tcp: u16, udp: u16 },
+    /// Ports must be forwarded by hand; `alt` is the second server port
+    ForwardPorts {
+        tcp: u16,
+        udp: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt: Option<u16>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

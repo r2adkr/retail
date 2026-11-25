@@ -143,6 +143,18 @@ async fn open_new(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
     upnp_open(ports, required).await.context("the router answered none of PCP, NAT-PMP and UPnP")
 }
 
+/// The router's internet address, asked without opening anything: for a
+/// router that maps no ports (UPnP off), whose user forwards them by hand
+pub async fn router_ip() -> Option<IpAddr> {
+    let gateway = default_gateway()?;
+    if let Ok(resp) = natpmp_request(gateway, &[0, 0], 12).await {
+        return Some(IpAddr::V4(Ipv4Addr::new(resp[8], resp[9], resp[10], resp[11])));
+    }
+    let (control, service, _) = discover().await.ok()?;
+    let body = soap(&control, &service, "GetExternalIPAddress", "").await.ok()?;
+    tag(&body, "NewExternalIPAddress").and_then(|s| s.trim().parse().ok())
+}
+
 pub async fn renew(outcome: &Outcome, required: usize) -> Result<Outcome> {
     let ports: Vec<(Proto, u16)> = outcome.mappings.iter().map(|m| (m.proto, m.internal)).collect();
     let o = match &outcome.method {

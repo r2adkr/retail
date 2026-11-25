@@ -44,7 +44,7 @@ Other devices join with `retail up --invite retail1.…`.
 
 ### Reaching the server from outside
 
-When the server starts, retail **opens ports on the router automatically with PCP or NAT-PMP, falling back to UPnP** (TCP 443 and 80, UDP 3478, UDP 41641). The router ports row of the server window shows the result. On Windows it also adds firewall rules that apply only to retaild, and removes them when the server stops.
+When the server starts, retail **opens ports on the router automatically with PCP or NAT-PMP, falling back to UPnP** (TCP 443 and 80, UDP 3478, UDP 41641), and a second TCP port picked at random once per server (20000–31999), for providers that block 80 and 443 coming in and routers that keep 443 for themselves. Invites name the public address on both TCP ports and devices try them at once. The router ports row of the server window shows the result. A router that opens nothing still tells its public address, which invites then name too: forward the same port numbers by hand and devices on other networks can join. On Windows it also adds firewall rules that apply only to retaild, and removes them when the server stops.
 
 - If the router does not support automatic port opening, the server window explains how to forward the ports by hand.
 - If the router's external address is private (carrier-grade NAT, or two routers in a row), the window warns that the server cannot be reached from outside. Devices on the same network can still join, and devices outside can join through a **helper node** (below).

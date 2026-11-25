@@ -1613,7 +1613,7 @@ mod preview {
                 public: Some("203.0.113.24:443".into()),
                 lan: vec!["192.168.1.20:443".into()],
                 port_mapping: Some("opened by UPnP (TCP 443, UDP 3478)".into()),
-                router: Some(retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478 }),
+                router: Some(retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: Some(24581) }),
                 nodes: vec![
                     node(1, "work-laptop", 1, true, false),
                     node(2, "desktop-home", 2, true, true),

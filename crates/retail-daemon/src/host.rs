@@ -14,6 +14,11 @@ use crate::portmap::{self, Proto};
 const DEFAULT_PORT: u16 = 443;
 /// Also served, for networks that let only web ports out
 const HTTP_PORT: u16 = 80;
+/// A second server port, picked at random once per server from here: some
+/// providers block 80 and 443 coming in, and some routers keep 443 for
+/// themselves. Below the systems' own ranges for outgoing connections
+/// (Linux 32768, Windows 49152), so nothing else takes it by chance.
+const ALT_PORTS: std::ops::Range<u16> = 20000..32000;
 /// The server, STUN and WireGuard ports; port 80 is extra
 const REQUIRED_PORTS: usize = 3;
 const INVITE_TTL: Duration = Duration::from_secs(24 * 3600);
@@ -36,6 +41,9 @@ struct HostConfig {
     /// Nodes allowed to open the web admin page over the network
     #[serde(default)]
     web_admins: Vec<i64>,
+    /// The second server port (see `ALT_PORTS`), kept so invites stay valid
+    #[serde(default)]
+    alt_port: Option<u16>,
 }
 
 /// Persisted so the keys survive restarts and existing invites keep working
@@ -111,6 +119,11 @@ struct Reach {
     public_ip: Option<IpAddr>,
     /// External ports mapped on the router
     tcp: Option<u16>,
+    /// The second server port's
+    alt: Option<u16>,
+    /// The router's internet address when it maps nothing: ports forwarded
+    /// by hand may make the server reachable there
+    unmapped_ip: Option<IpAddr>,
     stun: Option<u16>,
     wg: Option<u16>,
     mapping: Option<String>,
@@ -121,6 +134,7 @@ struct Reach {
 
 struct Running {
     server: retail_control::Server,
+    alt_port: Option<u16>,
     reach: Arc<Mutex<Reach>>,
     portmap: Option<tokio::task::JoinHandle<()>>,
     mapped: Arc<Mutex<Option<portmap::Outcome>>>,
@@ -228,11 +242,18 @@ impl Host {
             Some(code) => Some(retail_proto::invite::HelperCode::decode(code).map_err(anyhow::Error::msg)?),
             None => None,
         };
-        let extra_listen = if port == HTTP_PORT || req.insecure_http {
-            Vec::new()
-        } else {
-            vec![SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, HTTP_PORT))]
-        };
+        let any = |p: u16| SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, p));
+        let alt_port = (!req.insecure_http).then(|| {
+            saved
+                .alt_port
+                .filter(|p| *p != port && ALT_PORTS.contains(p))
+                .unwrap_or_else(|| rand::Rng::gen_range(&mut rand::rngs::OsRng, ALT_PORTS))
+        });
+        let mut extra_listen = Vec::new();
+        if port != HTTP_PORT && !req.insecure_http {
+            extra_listen.push(any(HTTP_PORT));
+        }
+        extra_listen.extend(alt_port.map(any));
         let server = retail_control::Server::start(retail_control::Config {
             data_dir: self.dir.clone(),
             listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
@@ -244,6 +265,8 @@ impl Host {
         })
         .await
         .context("starting the server")?;
+        // Taken by another program: the next start picks another
+        let alt_port = alt_port.filter(|p| server.extra_ports().contains(p));
 
         crate::firewall::allow_inbound();
         let reach = Arc::new(Mutex::new(Reach::default()));
@@ -262,7 +285,7 @@ impl Host {
             let mut ports = vec![(Proto::Tcp, server.port()), (Proto::Udp, server.stun_port()), (Proto::Udp, wg_port)];
             ports.extend(server.extra_ports().iter().map(|p| (Proto::Tcp, *p)));
             let public_wg = self.public_wg.clone();
-            tokio::spawn(keep_ports_open(ports, reach.clone(), mapped.clone(), stun.clone(), public_wg))
+            tokio::spawn(keep_ports_open(ports, alt_port, reach.clone(), mapped.clone(), stun.clone(), public_wg))
         });
         let helper_linked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let helper_link = match (&helper, server.injector()) {
@@ -276,6 +299,7 @@ impl Host {
         });
         *running = Some(Running {
             server,
+            alt_port,
             reach,
             portmap,
             mapped,
@@ -298,6 +322,7 @@ impl Host {
             fronts,
             helper: helper_code,
             web_admins: saved.web_admins.clone(),
+            alt_port,
         })?;
         *self.last_error.lock().unwrap() = None;
         drop(running);
@@ -467,10 +492,13 @@ impl Host {
         (public, lan)
     }
 
-    /// Public first, then the helpers, then global IPv6 (often reachable even
-    /// behind CGNAT), then the rest of the LAN
+    /// Public first (on each server port), then the helpers, then the
+    /// router's address where it mapped nothing, then global IPv6 (often
+    /// reachable even behind CGNAT), then the rest of the LAN
     fn invite_addrs(r: &Running) -> Vec<String> {
-        let (public, lan) = Self::addresses(r);
+        let (_, lan) = Self::addresses(r);
+        let reach = r.reach.lock().unwrap().clone();
+        let (public, guessed) = public_addrs(r.domain.as_deref(), r.server.port(), r.alt_port, &reach);
         let helper = r.helper.iter().flat_map(|h| h.addrs.iter().cloned());
         let device = r.device_helper.lock().unwrap().clone();
         let device = device.iter().flat_map(|h| h.addrs.iter().cloned()).collect::<Vec<_>>();
@@ -478,7 +506,7 @@ impl Host {
             a.parse::<SocketAddr>().is_ok_and(|sa| sa.is_ipv6() && !portmap::is_private(sa.ip()))
         });
         let mut out: Vec<String> = Vec::new();
-        for a in public.into_iter().chain(helper).chain(device).chain(global).chain(private) {
+        for a in public.into_iter().chain(helper).chain(device).chain(guessed).chain(global).chain(private) {
             if !out.contains(&a) {
                 out.push(a);
             }
@@ -706,8 +734,42 @@ fn normalize_front(url: &str) -> Result<String> {
     Ok(url.to_string())
 }
 
+/// `443` or `443, 24581`: the server port and the second one
+fn tcp_ports(tcp: u16, alt: Option<u16>) -> String {
+    match alt {
+        Some(a) => format!("{tcp}, {a}"),
+        None => tcp.to_string(),
+    }
+}
+
+/// Where other networks may reach the server: what is known to be open,
+/// and what may be (the router's address on ports forwarded by hand)
+fn public_addrs(domain: Option<&str>, port: u16, alt: Option<u16>, reach: &Reach) -> (Vec<String>, Vec<String>) {
+    let mut open = Vec::new();
+    let mut guessed = Vec::new();
+    match (domain, reach.public_ip.filter(|ip| !portmap::is_private(*ip))) {
+        // A domain (a VPS, or ports forwarded to the same numbers)
+        (Some(d), _) => {
+            open.push(format!("{d}:{port}"));
+            open.extend(alt.map(|a| format!("{d}:{}", reach.alt.unwrap_or(a))));
+        }
+        (None, Some(ip)) => {
+            open.extend(reach.tcp.map(|p| SocketAddr::new(ip, p).to_string()));
+            open.extend(reach.alt.map(|p| SocketAddr::new(ip, p).to_string()));
+        }
+        (None, None) => {
+            if let Some(ip) = reach.unmapped_ip.filter(|ip| !portmap::is_private(*ip)) {
+                guessed.push(SocketAddr::new(ip, port).to_string());
+                guessed.extend(alt.map(|a| SocketAddr::new(ip, a).to_string()));
+            }
+        }
+    }
+    (open, guessed)
+}
+
 async fn keep_ports_open(
     ports: Vec<(Proto, u16)>,
+    alt_port: Option<u16>,
     reach: Arc<Mutex<Reach>>,
     mapped: Arc<Mutex<Option<portmap::Outcome>>>,
     stun_servers: Stun,
@@ -722,22 +784,26 @@ async fn keep_ports_open(
         match result {
             Ok(o) => {
                 let tcp = o.external(Proto::Tcp, ports[0].1);
+                let alt = alt_port.and_then(|p| o.external(Proto::Tcp, p));
                 let stun = o.external(Proto::Udp, ports[1].1);
                 let now = Reach {
                     public_ip: o.external_ip,
                     tcp,
+                    alt,
+                    unmapped_ip: None,
                     stun,
                     wg: o.external(Proto::Udp, ports[2].1),
                     mapping: Some(format!(
                         "opened by {} (TCP {}, UDP {})",
                         o.method_name(),
-                        tcp.unwrap_or(0),
+                        tcp_ports(tcp.unwrap_or(0), alt),
                         stun.unwrap_or(0)
                     )),
                     router: Some(retail_proto::api::RouterState::Opened {
                         method: o.method_name().to_string(),
                         tcp: tcp.unwrap_or(0),
                         udp: stun.unwrap_or(0),
+                        alt,
                     }),
                     notice: o
                         .external_ip
@@ -767,14 +833,16 @@ async fn keep_ports_open(
                 tracing::info!("router port forwarding: {e:#}");
                 *mapped.lock().unwrap() = None;
                 let failed = Reach {
+                    unmapped_ip: portmap::router_ip().await,
                     mapping: Some("not available".into()),
                     router: Some(retail_proto::api::RouterState::Unavailable),
-                    notice: Some(retail_proto::api::ServerNotice::ForwardPorts { tcp: ports[0].1, udp: ports[1].1 }),
+                    notice: Some(retail_proto::api::ServerNotice::ForwardPorts { tcp: ports[0].1, udp: ports[1].1, alt: alt_port }),
                     warning: Some(format!(
                         "The router did not open the ports automatically (UPnP/NAT-PMP is off or unsupported). \
                          Devices on other networks can join after you forward TCP {} and UDP {} to this computer, \
                          or use a domain name.",
-                        ports[0].1, ports[1].1
+                        tcp_ports(ports[0].1, alt_port),
+                        ports[1].1
                     )),
                     ..Reach::default()
                 };
@@ -827,4 +895,53 @@ pub fn lan_ips() -> Vec<IpAddr> {
     ips.sort_by_key(|ip| (Some(*ip) != primary, ip.is_ipv6(), *ip));
     ips.dedup();
     ips
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reach(public: Option<&str>, tcp: Option<u16>, alt: Option<u16>, unmapped: Option<&str>) -> Reach {
+        Reach {
+            public_ip: public.map(|s| s.parse().unwrap()),
+            tcp,
+            alt,
+            unmapped_ip: unmapped.map(|s| s.parse().unwrap()),
+            ..Reach::default()
+        }
+    }
+
+    #[test]
+    fn invites_name_every_open_port() {
+        // Both ports mapped (UPnP may give the second another number)
+        let r = reach(Some("203.0.113.9"), Some(443), Some(24581), None);
+        assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec!["203.0.113.9:443".into(), "203.0.113.9:24581".into()], vec![]));
+        // Only the first mapped
+        let r = reach(Some("203.0.113.9"), Some(443), None, None);
+        assert_eq!(public_addrs(None, 443, Some(21000), &r).0, ["203.0.113.9:443"]);
+        // A domain names both ports
+        let r = reach(None, None, None, None);
+        assert_eq!(public_addrs(Some("vpn.example.com"), 443, Some(21000), &r).0, ["vpn.example.com:443", "vpn.example.com:21000"]);
+        // Behind CGNAT nothing is public
+        let r = reach(Some("100.64.3.4"), Some(443), Some(21000), None);
+        assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec![], vec![]));
+    }
+
+    /// A router that maps nothing still tells its address: ports forwarded
+    /// by hand, to the same numbers, make these work
+    #[test]
+    fn invites_guess_hand_forwarded_ports() {
+        let r = reach(None, None, None, Some("203.0.113.9"));
+        assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec![], vec!["203.0.113.9:443".into(), "203.0.113.9:21000".into()]));
+        let r = reach(None, None, None, Some("192.168.0.1"));
+        assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec![], vec![]));
+    }
+
+    /// The second port is new: a status from an older daemon still reads
+    #[test]
+    fn router_state_without_the_second_port() {
+        let old: retail_proto::api::RouterState = serde_json::from_str(r#"{"kind":"opened","method":"UPnP","tcp":443,"udp":3478}"#).unwrap();
+        assert_eq!(old, retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: None });
+        const { assert!(ALT_PORTS.start > 1024 && ALT_PORTS.end <= 32768) };
+    }
 }
