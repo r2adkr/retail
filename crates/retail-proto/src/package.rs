@@ -9,9 +9,12 @@
 //! releases will need the data placed where signatures allow it.
 //!
 //! The official installer of each release is a package without an invite
-//! (`scripts/bundle.py`); for macOS it is a resource of `retail.app`, in a
-//! zip. Daemons update themselves from it, and servers take other systems'
-//! programs out of it for their packages.
+//! (`scripts/bundle.py`). Daemons update themselves from it, and servers take
+//! other systems' programs out of it for their packages. For macOS it is a
+//! disk image holding `retail.app`, whose program is the plain tray app with
+//! the package among its resources; the same package also sits in front of
+//! the image's data (see `dmg_prefix`), where code can read it without
+//! mounting anything.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -21,9 +24,6 @@ use serde::{Deserialize, Serialize};
 pub const MAGIC: &[u8; 16] = b"RETAIL-PACKAGE-1";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
-/// The installer's place in the macOS zip: a resource of `retail.app`, whose
-/// own program is the plain tray app, so the app can be signed as a whole
-pub const APP_PACKAGE: &str = "retail.app/Contents/Resources/retail.package";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -88,8 +88,8 @@ pub fn tray_name(m: &Manifest) -> &'static str {
     if m.files.iter().any(|f| f.name.ends_with(".exe")) { "retail-tray.exe" } else { "retail-tray" }
 }
 
-/// A package from `start` to `start + len` of a larger file (an installer in
-/// a zip), seen as a file of its own
+/// A package from `start` to `start + len` of a larger file (the one in
+/// front of a disk image), seen as a file of its own
 pub struct Window<R> {
     inner: R,
     start: u64,
@@ -129,51 +129,23 @@ impl<R: Seek> Seek for Window<R> {
     }
 }
 
-/// Where an uncompressed (stored) file's bytes are in a zip: offset and length
-pub fn zip_entry<R: Read + Seek>(r: &mut R, name: &str) -> Option<(u64, u64)> {
+/// The length of what comes before a disk image's data: the package
+/// `scripts/bundle.py --dmg` puts there. A disk image (UDIF) ends in a
+/// 512-byte `koly` record that says where its data starts, so data put in
+/// front is skipped when the image is opened.
+pub fn dmg_prefix<R: Read + Seek>(r: &mut R) -> Option<u64> {
     let total = r.seek(SeekFrom::End(0)).ok()?;
-    // The end record is the last 22 bytes when the zip has no comment
-    let tail = total.min(22 + 0xFFFF);
-    r.seek(SeekFrom::Start(total - tail)).ok()?;
-    let mut buf = vec![0u8; tail as usize];
-    r.read_exact(&mut buf).ok()?;
-    let end = buf.windows(4).rposition(|w| w == b"PK\x05\x06")?;
-    let rec = buf.get(end..end + 22)?;
-    let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[i], b[i + 1]]) as u64;
-    let u32_at = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as u64;
-    let (count, dir_len, dir_at) = (u16_at(rec, 10), u32_at(rec, 12), u32_at(rec, 16));
-    if dir_len > 1 << 20 || dir_at + dir_len > total {
+    if total < 512 {
         return None;
     }
-    r.seek(SeekFrom::Start(dir_at)).ok()?;
-    let mut dir = vec![0u8; dir_len as usize];
-    r.read_exact(&mut dir).ok()?;
-    let mut i = 0usize;
-    for _ in 0..count {
-        let h = dir.get(i..i + 46)?;
-        if &h[..4] != b"PK\x01\x02" {
-            return None;
-        }
-        let (method, size, raw) = (u16_at(h, 10), u32_at(h, 20), u32_at(h, 24));
-        let (name_len, extra_len, comment_len) = (u16_at(h, 28) as usize, u16_at(h, 30) as usize, u16_at(h, 32) as usize);
-        let local = u32_at(h, 42);
-        let this = dir.get(i + 46..i + 46 + name_len)?;
-        if this == name.as_bytes() {
-            if method != 0 || size != raw {
-                return None;
-            }
-            r.seek(SeekFrom::Start(local)).ok()?;
-            let mut lh = [0u8; 30];
-            r.read_exact(&mut lh).ok()?;
-            if &lh[..4] != b"PK\x03\x04" {
-                return None;
-            }
-            let data = local + 30 + u16_at(&lh, 26) + u16_at(&lh, 28);
-            return (data + size <= total).then_some((data, size));
-        }
-        i += 46 + name_len + extra_len + comment_len;
+    r.seek(SeekFrom::Start(total - 512)).ok()?;
+    let mut koly = [0u8; 512];
+    r.read_exact(&mut koly).ok()?;
+    if &koly[..4] != b"koly" {
+        return None;
     }
-    None
+    let data_at = u64::from_be_bytes(koly[24..32].try_into().ok()?);
+    (data_at > 0 && data_at < total).then_some(data_at)
 }
 
 /// Writes the programs of the package in `r` into `dir` under their own
@@ -241,50 +213,27 @@ mod tests {
         assert!(safe_name("wintun.dll") && !safe_name("../evil") && !safe_name("a/b") && !safe_name(".x"));
     }
 
-    /// An official installer inside a stored zip, as macOS gets it: found,
-    /// read through a window, and its programs written out
+    /// A package in front of a disk image, as macOS gets it: found through
+    /// the image's own record, read through a window, its programs written out
     #[test]
-    fn installer_in_a_zip() {
+    fn installer_in_front_of_a_dmg() {
         let mut pkg = b"TRAY".to_vec();
         let files = vec![PackedFile { name: "retaild".into(), offset: 4, len: 6 }, PackedFile { name: "retail".into(), offset: 10, len: 3 }];
         pkg.extend_from_slice(b"daemoncli");
         let m = Manifest { invite: String::new(), network: String::new(), files, base_len: 4 };
         pkg.extend_from_slice(&trailer(&m));
-        // A zip with one stored entry before it, as bundle.py writes them
-        let mut zip = Vec::new();
-        let mut central = Vec::new();
-        for (name, data) in [("retail.app/Contents/Info.plist", &b"<plist/>"[..]), (APP_PACKAGE, &pkg[..])] {
-            let at = zip.len() as u32;
-            let mut local = b"PK\x03\x04".to_vec();
-            local.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            local.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            local.extend_from_slice(&0u16.to_le_bytes());
-            local.extend_from_slice(name.as_bytes());
-            zip.extend_from_slice(&local);
-            zip.extend_from_slice(data);
-            let mut c = b"PK\x01\x02".to_vec();
-            c.extend_from_slice(&[20, 3, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            c.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            c.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            c.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            c.extend_from_slice(&[0; 12]);
-            c.extend_from_slice(&at.to_le_bytes());
-            c.extend_from_slice(name.as_bytes());
-            central.extend_from_slice(&c);
-        }
-        let dir_at = zip.len() as u32;
-        zip.extend_from_slice(&central);
-        zip.extend_from_slice(b"PK\x05\x06\0\0\0\0\x02\0\x02\0");
-        zip.extend_from_slice(&(central.len() as u32).to_le_bytes());
-        zip.extend_from_slice(&dir_at.to_le_bytes());
-        zip.extend_from_slice(&[0, 0]);
+        // Image data, then its record pointing at where the data now starts
+        let mut file = pkg.clone();
+        file.extend_from_slice(&[0xAB; 1000]);
+        let mut koly = [0u8; 512];
+        koly[..4].copy_from_slice(b"koly");
+        koly[24..32].copy_from_slice(&(pkg.len() as u64).to_be_bytes());
+        file.extend_from_slice(&koly);
 
-        let mut cur = std::io::Cursor::new(&zip);
-        let (start, len) = zip_entry(&mut cur, APP_PACKAGE).unwrap();
+        let mut cur = std::io::Cursor::new(&file);
+        let len = dmg_prefix(&mut cur).unwrap();
         assert_eq!(len, pkg.len() as u64);
-        let mut w = Window::new(cur, start, len);
+        let mut w = Window::new(cur, 0, len);
         let got = read_manifest(&mut w).unwrap();
         assert_eq!(got, m);
         let dir = std::env::temp_dir().join(format!("retail-extract-{}", std::process::id()));
@@ -294,17 +243,17 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("retail-tray")).unwrap(), b"TRAY");
         assert_eq!(std::fs::read(dir.join("retaild")).unwrap(), b"daemon");
         let _ = std::fs::remove_dir_all(dir);
-        assert!(zip_entry(&mut std::io::Cursor::new(&zip), "missing").is_none());
+        assert!(dmg_prefix(&mut std::io::Cursor::new(&pkg)).is_none(), "not an image");
     }
 
-    /// A macOS zip made by `scripts/bundle.py --app` (given in
-    /// RETAIL_BUNDLE_ZIP, as the release workflow does) holds a readable installer
+    /// A disk image made by `scripts/bundle.py --dmg` (given in
+    /// RETAIL_BUNDLE_DMG, as the release workflow does) carries a readable installer
     #[test]
-    fn bundle_py_zip() {
-        let Some(path) = std::env::var_os("RETAIL_BUNDLE_ZIP") else { return };
+    fn bundle_py_dmg() {
+        let Some(path) = std::env::var_os("RETAIL_BUNDLE_DMG") else { return };
         let mut f = std::fs::File::open(path).unwrap();
-        let (start, len) = zip_entry(&mut f, APP_PACKAGE).expect("the installer is in the zip, stored");
-        let m = read_manifest(&mut Window::new(f, start, len)).expect("it is a package");
+        let len = dmg_prefix(&mut f).expect("an image with a package in front");
+        let m = read_manifest(&mut Window::new(f, 0, len)).expect("it is a package");
         assert!(m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"), "{m:?}");
     }
 }

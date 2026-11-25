@@ -9,9 +9,9 @@ Run, it installs retail; joining a network comes after, from the tray app.
   bundle.py --app OUT.app INSTALLER TRAY macOS: retail.app, with the plain tray
                                          app as its program and the installer
                                          as a resource (so it can be signed)
-  bundle.py --zip OUT.zip DIR            DIR in a zip, uncompressed, keeping
-                                         permissions (so the app runs after a
-                                         download, and the daemon reads it in place)
+  bundle.py --dmg OUT.dmg INSTALLER IMG  macOS: the disk image IMG (made with
+                                         hdiutil) with INSTALLER in front of its
+                                         data, where daemons and servers read it
 
 Layout: tray | payloads | manifest JSON | u64 LE manifest length | MAGIC.
 """
@@ -21,7 +21,6 @@ import os
 import shutil
 import struct
 import sys
-import zipfile
 
 MAGIC = b"RETAIL-PACKAGE-1"
 
@@ -32,7 +31,6 @@ INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <key>CFBundleIdentifier</key><string>dev.retail.installer</string>
 <key>CFBundleName</key><string>retail</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>LSUIElement</key><true/>
 </dict></plist>
 """
 
@@ -71,27 +69,33 @@ def app(out, installer, tray):
     shutil.copyfile(installer, os.path.join(contents, "Resources", "retail.package"))
 
 
-def zip_dir(out, top):
-    base = os.path.dirname(os.path.abspath(top))
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
-        for root, dirs, files in os.walk(top):
-            dirs.sort()
-            for name in sorted(files):
-                path = os.path.join(root, name)
-                info = zipfile.ZipInfo(os.path.relpath(path, base).replace(os.sep, "/"), date_time=(2024, 1, 1, 0, 0, 0))
-                info.create_system = 3  # Unix, so the permission bits below count
-                info.external_attr = (os.stat(path).st_mode & 0xFFFF) << 16
-                info.compress_type = zipfile.ZIP_STORED
-                with open(path, "rb") as f:
-                    z.writestr(info, f.read())
+def dmg(out, installer, image):
+    """A disk image ends in a 512-byte "koly" record whose offsets say where
+    its data, resource fork and XML plist are. Putting bytes in front and
+    moving those offsets keeps it a valid image; the package's own length is
+    then the record's data offset (dmg_prefix in package.rs)."""
+    with open(installer, "rb") as f:
+        front = f.read()
+    with open(image, "rb") as f:
+        data = bytearray(f.read())
+    koly = len(data) - 512
+    if data[koly:koly + 4] != b"koly":
+        sys.exit(f"{image} is not a disk image")
+    for at in (24, 40, 216):  # data fork, resource fork, XML plist offsets
+        (value,) = struct.unpack_from(">Q", data, koly + at)
+        if value or at == 24:
+            struct.pack_into(">Q", data, koly + at, value + len(front))
+    with open(out, "wb") as o:
+        o.write(front)
+        o.write(data)
 
 
 def main(argv):
     if len(argv) == 4 and argv[0] == "--app":
         app(argv[1], argv[2], argv[3])
         return
-    if len(argv) == 3 and argv[0] == "--zip":
-        zip_dir(argv[1], argv[2])
+    if len(argv) == 4 and argv[0] == "--dmg":
+        dmg(argv[1], argv[2], argv[3])
         return
     if len(argv) < 2 or argv[0].startswith("--"):
         sys.exit(__doc__)

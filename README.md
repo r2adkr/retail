@@ -31,14 +31,14 @@ Download the installer for your system from [Releases](https://github.com/r2adkr
 | System | Installer |
 |---|---|
 | Windows | `retail-windows-x86_64.exe` |
-| macOS (Apple silicon and Intel) | `retail-macos.zip`: open it, then open `retail.app` |
+| macOS (Apple silicon and Intel) | `retail-macos.dmg`: open it, then open `retail.app` |
 | Linux | `retail-linux-x86_64` |
 | Linux on 64-bit ARM (Raspberry Pi 3/4/5) | `retail-linux-aarch64` |
 | Linux on 32-bit ARM (Raspberry Pi OS 32-bit, routers) | `retail-linux-arm` |
 
-Run it and confirm; it asks for administrator rights once. On a Linux desktop: `chmod +x retail-linux-* && ./retail-linux-*` (without sudo, so the tray app is yours). The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time. Running a newer installer over an installed retail updates it, though installed devices also update themselves.
+Run it: a short setup in retail's own look installs everything, asks for administrator rights once, and offers to join a network with an invite code (or skip and join later from the tray icon). It ends by showing where retail's icon lives on your system. On a Linux desktop: `chmod +x retail-linux-* && ./retail-linux-*` (without sudo, so the tray app is yours). The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time. Running a newer installer over an installed retail updates it, though installed devices also update themselves.
 
-**Joining**: after installing, paste an invite code in the tray app. Or use an installer from your network's server, which also joins: on the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page).
+**Joining later**: paste an invite code in the tray app. Or use an installer from your network's server, which also joins: on the server, create an invite and save the installer for the other person's system from its ⋯ menu (in the server window or the web admin page).
 
 **Server without a screen** (Linux VPS, Raspberry Pi):
 

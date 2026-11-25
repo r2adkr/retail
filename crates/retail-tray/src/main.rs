@@ -6,6 +6,9 @@
 //! renders a window to a PNG without opening it. Popup states are `connected`,
 //! `stopped`, `login`, `offline`, `many`, `exit` and `exit-menu`. Settings
 //! adds `change`, and the server window takes `idle` or `running`.
+//! `--setup [--os windows|macos|linux]` draws the installer: `welcome`,
+//! `update`, `join`, `switch`, `network`, `network-error`, `working`, `done`,
+//! `done-joined` or `failed`.
 //! `--show` opens the popup at startup.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -19,6 +22,7 @@ mod icon;
 mod input;
 mod install;
 mod settings;
+mod setup;
 mod sysproxy;
 mod text;
 mod tray;
@@ -1182,6 +1186,9 @@ fn main() {
         i18n::set(lang.unwrap_or(LangPref::En));
         let result = if args.iter().any(|a| a == "--settings") {
             preview::render_settings(&out, state, dark)
+        } else if args.iter().any(|a| a == "--setup") {
+            let os = args.iter().position(|a| a == "--os").and_then(|i| args.get(i + 1)).map_or("this", |s| s.as_str());
+            preview::render_setup(&out, state, os, dark)
         } else if args.iter().any(|a| a == "--server") {
             preview::render_dashboard(&out, state, dark)
         } else {
@@ -1484,6 +1491,45 @@ mod preview {
         save(out, crate::dashboard::WIDTH, d.height(), |pix, s| {
             d.render(&fonts, pix, s);
         })
+    }
+
+    pub fn render_setup(out: &str, state: &str, os: &str, dark: bool) -> Result<(), String> {
+        use crate::setup::{Kind, Os, Setup, Step};
+        let fonts = Fonts::load()?;
+        let kind = match state {
+            "update" => Kind::Update,
+            "join" | "done-joined" => Kind::Join { network: "the retail network \"family\"".into() },
+            "switch" => Kind::Switch { current: "vpn.example.com".into(), network: "the retail network \"office\"".into() },
+            _ => Kind::Install,
+        };
+        let dir = if os == "windows" { r"C:\Program Files\retail" } else { "/usr/local/bin" };
+        let mut st = Setup::new(kind, env!("CARGO_PKG_VERSION"), dir, false);
+        st.dark = dark;
+        st.os = match os {
+            "windows" => Os::Windows,
+            "macos" => Os::Macos,
+            "linux" => Os::Linux,
+            _ => Os::this(),
+        };
+        st.step = match state {
+            "network" | "network-error" => Step::Network,
+            "working" => Step::Working,
+            "done" | "done-joined" => Step::Done,
+            "failed" => Step::Failed("retaild did not start: the local API port 127.0.0.1:41112 is taken by another program".into()),
+            _ => Step::Welcome,
+        };
+        if state == "network" {
+            st.input.set("retail1qw3er5ty7ui9op0as2df4gh6jk8l");
+            st.focus = true;
+        }
+        if state == "network-error" {
+            st.input.set("hello");
+            st.error = Some(crate::i18n::tr("This is not a retail invite code. Paste a code that starts with retail1.").into());
+        }
+        if state == "done-joined" {
+            st.network = Some("the retail network \"family\"".into());
+        }
+        save(out, crate::setup::WIDTH, crate::setup::HEIGHT, |pix, s| st.render(&fonts, pix, s))
     }
 
     fn save(out: &str, w: f32, h: f32, render: impl FnOnce(&mut Pixmap, f32)) -> Result<(), String> {

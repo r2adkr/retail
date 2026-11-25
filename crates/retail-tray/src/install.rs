@@ -27,9 +27,11 @@ use retail_proto::api::BackendState;
 use retail_proto::package::{Manifest, read_manifest, safe_name};
 
 use crate::i18n::{tr, trf};
+use crate::setup;
 
 const API_WAIT: Duration = Duration::from_secs(30);
 
+#[derive(Clone)]
 struct Opts {
     prefix: Option<PathBuf>,
     service: bool,
@@ -39,6 +41,8 @@ struct Opts {
     /// Given on the command line, in place of the package's
     invite: Option<String>,
     yes: bool,
+    /// The raised step writes its error here for the window that started it
+    result: Option<PathBuf>,
 }
 
 impl Opts {
@@ -51,6 +55,7 @@ impl Opts {
             switch: args.iter().any(|a| a == "--switch"),
             invite: value("--invite").filter(|i| !i.trim().is_empty()),
             yes: args.iter().any(|a| a == "--yes") || std::env::var_os("RETAIL_INSTALL_YES").is_some(),
+            result: value("--result").map(PathBuf::from),
         }
     }
 
@@ -64,6 +69,13 @@ impl Opts {
         if let Some(i) = &self.invite {
             out.push("--invite".into());
             out.push(i.clone());
+        }
+        if let Some(r) = &self.result {
+            out.push("--result".into());
+            out.push(r.display().to_string());
+        }
+        if self.yes {
+            out.push("--yes".into());
         }
         if !self.service {
             out.push("--no-service".into());
@@ -140,7 +152,13 @@ pub fn run(args: &[String]) -> Option<i32> {
         }
     };
     if args.iter().any(|a| a == "--install") {
-        return Some(report(privileged(&source, &manifest, &opts)));
+        let r = privileged(&source, &manifest, &opts);
+        // For the window that raised this step, which shows the error itself
+        if let Some(f) = &opts.result {
+            let _ = std::fs::write(f, r.as_ref().err().map_or("", String::as_str));
+            return Some(if r.is_ok() { 0 } else { 3 });
+        }
+        return Some(report(r));
     }
     let network = if manifest.network.is_empty() {
         tr("a retail network").to_string()
@@ -155,6 +173,33 @@ pub fn run(args: &[String]) -> Option<i32> {
         status.as_ref().filter(|s| s.state != BackendState::NeedsLogin).and_then(|s| s.server.clone()).filter(|s| *s != target)
     });
     let version = env!("CARGO_PKG_VERSION");
+    opts.switch = current.is_some();
+    // The installer's own window where there is a desktop to show it on
+    if !opts.yes && has_desktop() {
+        let kind = match (&invite, &current) {
+            (Some(_), Some(cur)) => setup::Kind::Switch { current: crate::settings::server_label(cur), network: network.clone() },
+            (Some(_), None) => setup::Kind::Join { network: network.clone() },
+            (None, _) if installed => setup::Kind::Update,
+            (None, _) => setup::Kind::Install,
+        };
+        let joined = status.as_ref().is_some_and(|s| s.state != BackendState::NeedsLogin && s.server.is_some());
+        let dir = bin_dir(&opts).display().to_string();
+        let work_opts = opts.clone();
+        let (me, source, manifest) = (me.clone(), source.clone(), manifest.clone());
+        let work = move |typed: Option<String>| -> Result<(), String> {
+            let mut o = work_opts.clone();
+            if typed.is_some() {
+                o.invite = typed;
+            }
+            install_now(&me, &source, &manifest, &o)?;
+            after_install(&o, installed);
+            Ok(())
+        };
+        if let Some(code) = setup::run_window(kind, version, &dir, joined, Box::new(work)) {
+            return Some(code);
+        }
+        // No window could open: ask in dialogs as below
+    }
     let (question, yes) = match (&invite, &current) {
         (Some(_), Some(cur)) => (
             trf(
@@ -170,24 +215,11 @@ pub fn run(args: &[String]) -> Option<i32> {
     if !opts.yes && !confirm("retail", &question, yes) {
         return Some(1);
     }
-    opts.switch = current.is_some();
-    let code = if is_admin() {
-        report(privileged(&source, &manifest, &opts))
-    } else {
-        match elevate(&me, &opts) {
-            Ok(code) => code,
-            Err(e) => report(Err(e)),
-        }
-    };
+    let code = report(install_now(&me, &source, &manifest, &opts));
     if code != 0 {
         return Some(code);
     }
-    let tray = bin_dir(&opts).join(exe("retail-tray"));
-    // A server without a desktop gets no tray app
-    let desktop = opts.autostart && has_desktop();
-    if desktop && let Err(e) = autostart(&tray) {
-        eprintln!("retail: could not start the tray app at sign-in: {e}");
-    }
+    let desktop = after_install(&opts, installed);
     let done = match (&invite, opts.switch) {
         (Some(_), true) => trf("This computer switched to {network}.", &[("network", &network)]),
         (Some(_), false) => trf("retail is installed and this computer joined {network}.", &[("network", &network)]),
@@ -196,12 +228,43 @@ pub fn run(args: &[String]) -> Option<i32> {
         (None, _) => tr("retail is installed. Join a network with `retail up --invite <code>`, or host one with `retail server start`.").to_string(),
     };
     tell(&done);
+    Some(0)
+}
+
+/// Installs, raising itself to administrator if it is not one: the raised
+/// copy runs `--install` and leaves its error in a file for this one
+fn install_now(me: &Path, source: &Path, m: &Manifest, opts: &Opts) -> Result<(), String> {
+    if is_admin() {
+        return privileged(source, m, opts);
+    }
+    let result = std::env::temp_dir().join(format!("retail-install-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&result);
+    let raised = Opts { result: Some(result.clone()), yes: true, ..opts.clone() };
+    let code = elevate(me, &raised)?;
+    let error = std::fs::read_to_string(&result).unwrap_or_default();
+    let _ = std::fs::remove_file(&result);
+    match (code, error.trim()) {
+        (0, _) => Ok(()),
+        (_, "") => Err(trf("The installation stopped (code {code}).", &[("code", &code)])),
+        (_, e) => Err(e.to_string()),
+    }
+}
+
+/// The user's part after installing: the tray app at sign-in and now.
+/// Returns whether there is a desktop for it.
+fn after_install(opts: &Opts, installed: bool) -> bool {
+    let tray = bin_dir(opts).join(exe("retail-tray"));
+    // A server without a desktop gets no tray app
+    let desktop = opts.autostart && has_desktop();
+    if desktop && let Err(e) = autostart(&tray) {
+        eprintln!("retail: could not start the tray app at sign-in: {e}");
+    }
     // On an update a tray app already running restarts itself into the new
     // one when it sees the newer daemon; starting another would make two
     if desktop && !installed {
         let _ = std::process::Command::new(&tray).spawn();
     }
-    Some(0)
+    desktop
 }
 
 /// Whether a desktop session can show the tray app (Linux may be a server).

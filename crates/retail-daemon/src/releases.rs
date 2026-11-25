@@ -1,6 +1,6 @@
 //! Official releases from GitHub Releases: a release holds one installer per
 //! system (`retail-windows-x86_64.exe`, `retail-linux-aarch64`,
-//! `retail-macos.zip`, ...) with every program inside, plus `VERSION` and
+//! `retail-macos.dmg`, ...) with every program inside, plus `VERSION` and
 //! `SHA256SUMS`. The installer is checked against the checksums and its
 //! programs taken out: by the updater for this device, and by a server for
 //! client packages of systems it has no programs for (kept in
@@ -27,11 +27,11 @@ pub fn base() -> Option<String> {
 }
 
 /// The release's installer for `<os>-<arch>`. macOS has one for both
-/// processors, in a zip so it stays runnable after a download.
+/// processors, a disk image.
 pub fn installer_asset(variant: &str) -> String {
     match variant.split_once('-').map(|(os, _)| os) {
         Some("windows") => format!("retail-{variant}.exe"),
-        Some("macos") => "retail-macos.zip".to_string(),
+        Some("macos") => "retail-macos.dmg".to_string(),
         _ => format!("retail-{variant}"),
     }
 }
@@ -110,16 +110,16 @@ pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: 
     .context("fetching took too long")?
 }
 
-/// Writes `files` out of the installer at `path` (a zip holding it for macOS)
+/// Writes `files` out of the installer at `path` (for macOS, in front of a disk image)
 fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
-    use retail_proto::package::{APP_PACKAGE, Window, extract, read_manifest, zip_entry};
+    use retail_proto::package::{Window, dmg_prefix, extract, read_manifest};
     let mut f = std::fs::File::open(path)?;
-    let (start, len) = if path.to_string_lossy().ends_with(".zip.download") {
-        zip_entry(&mut f, APP_PACKAGE).context("the zip holds no installer")?
+    let len = if path.to_string_lossy().ends_with(".dmg.download") {
+        dmg_prefix(&mut f).context("the disk image carries no installer")?
     } else {
-        (0, f.metadata()?.len())
+        f.metadata()?.len()
     };
-    let mut w = Window::new(f, start, len);
+    let mut w = Window::new(f, 0, len);
     let m = read_manifest(&mut w).context("not a retail installer")?;
     let written = extract(&mut w, &m, dir, |n| files.iter().any(|f| f == n))?;
     if let Some(missing) = files.iter().find(|f| !written.contains(f)) {
@@ -252,8 +252,8 @@ mod tests {
     fn installer_names() {
         assert_eq!(installer_asset("linux-x86_64"), "retail-linux-x86_64");
         assert_eq!(installer_asset("windows-x86_64"), "retail-windows-x86_64.exe");
-        assert_eq!(installer_asset("macos-aarch64"), "retail-macos.zip");
-        assert_eq!(installer_asset("macos-x86_64"), "retail-macos.zip");
+        assert_eq!(installer_asset("macos-aarch64"), "retail-macos.dmg");
+        assert_eq!(installer_asset("macos-x86_64"), "retail-macos.dmg");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Official releases, built when a version tag (v0.1.0, ...) is pushed. A
 # release holds one installer per system, with every program inside:
-#   retail-windows-x86_64.exe, retail-macos.zip (Apple silicon and Intel),
+#   retail-windows-x86_64.exe, retail-macos.dmg (Apple silicon and Intel),
 #   retail-linux-x86_64, retail-linux-aarch64, retail-linux-arm
 # plus `VERSION` and `SHA256SUMS`. Daemons update themselves from these, and
 # servers take other systems' programs out of them for their client packages.
@@ -141,8 +141,9 @@ jobs:
           name: installers-other
           path: out/*
 
-  # One macOS installer for both processors (universal programs), as
-  # retail.app in a zip so it stays runnable after a download
+  # One macOS installer for both processors (universal programs): a disk
+  # image holding retail.app, with the installer also in front of the image's
+  # data for daemons and servers to read (scripts/bundle.py --dmg)
   macos:
     needs: build
     runs-on: macos-15
@@ -158,22 +159,33 @@ jobs:
           merge-multiple: true
       # retail.app runs the plain tray app, which finds the installer among
       # its resources; signed ad hoc as a whole (no Developer ID yet)
-      - name: Universal programs and the app
+      - name: Universal programs, the app and the disk image
         run: |
-          mkdir uni out
+          mkdir uni out image
           for b in retail-tray retaild retail; do
             lipo -create "dist/$b-macos-aarch64" "dist/$b-macos-x86_64" -output "uni/$b"
             lipo -info "uni/$b"
           done
           python3 scripts/bundle.py uni/installer uni/retail-tray retaild=uni/retaild retail=uni/retail
-          python3 scripts/bundle.py --app retail.app uni/installer uni/retail-tray
-          codesign --force --deep --sign - retail.app
-          codesign --verify --deep --strict --verbose=2 retail.app
-          python3 scripts/bundle.py --zip out/retail-macos.zip retail.app
+          python3 scripts/bundle.py --app image/retail.app uni/installer uni/retail-tray
+          codesign --force --deep --sign - image/retail.app
+          codesign --verify --deep --strict --verbose=2 image/retail.app
+          hdiutil create -volname retail -srcfolder image -format UDZO -ov plain.dmg
+          python3 scripts/bundle.py --dmg out/retail-macos.dmg uni/installer plain.dmg
           ls -l out
+      # macOS still opens the image with the installer in front, and the
+      # daemon's reader finds it there
+      - name: Check the disk image
+        run: |
+          hdiutil verify out/retail-macos.dmg
+          rustup show active-toolchain || rustup toolchain install
+          RETAIL_BUNDLE_DMG="$PWD/out/retail-macos.dmg" cargo test --locked -p retail-proto bundle_py_dmg -- --nocapture
       - name: Try the macOS installer
         run: |
-          mkdir try && cd try && ditto -x -k ../out/retail-macos.zip .
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/vol" out/retail-macos.dmg
+          mkdir try && ditto "$RUNNER_TEMP/vol/retail.app" try/retail.app
+          hdiutil detach "$RUNNER_TEMP/vol"
+          cd try
           # As a browser download arrives: what Gatekeeper makes of it (an
           # unsigned app is expected to be refused here; the point is "refused", not "damaged")
           xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" retail.app
