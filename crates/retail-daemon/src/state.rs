@@ -222,10 +222,13 @@ pub fn secure_dir(dir: &Path) {
             return;
         }
         take_over(dir);
-        // SYSTEM and Administrators by SID, since account names are localized
+        // SYSTEM and Administrators by SID, since account names are localized.
+        // The folder only: with /T icacls would put these folder-only entries
+        // on every file in it too, which leaves the files readable by nobody
+        // (the daemon itself included, after a restart)
         let ok = std::process::Command::new("icacls")
             .arg(dir)
-            .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"])
+            .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/Q"])
             .output()
             .is_ok_and(|o| o.status.success());
         // Also the account this runs as, so a daemon started by an administrator
@@ -233,11 +236,11 @@ pub fn secure_dir(dir: &Path) {
         if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME"))
             && !user.ends_with('$')
         {
-            let _ = std::process::Command::new("icacls")
-                .arg(dir)
-                .args(["/grant", &format!("{domain}\\{user}:(OI)(CI)F"), "/T", "/Q"])
-                .output();
+            let _ = std::process::Command::new("icacls").arg(dir).args(["/grant", &format!("{domain}\\{user}:(OI)(CI)F"), "/Q"]).output();
         }
+        // Everything in it takes the folder's entries, which also mends files
+        // an earlier version left with none
+        let _ = std::process::Command::new("icacls").arg(dir.join("*")).args(["/reset", "/T", "/C", "/Q"]).output();
         if ok {
             done.push(dir.to_path_buf());
         } else {

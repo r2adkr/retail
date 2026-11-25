@@ -256,7 +256,12 @@ impl App {
                 self.hide_popup();
                 self.open_dashboard(el);
             }
-            Action::Quit => std::process::exit(0),
+            Action::Quit => {
+                // Its icon goes with it (exit skips the destructors, and
+                // Windows would keep showing it until the pointer passes)
+                self.tray = None;
+                std::process::exit(0)
+            }
             Action::Menu(key) => {
                 self.ui.gear = false;
                 self.ui.menu = if self.ui.menu == Some(key) { None } else { Some(key) };
@@ -754,14 +759,16 @@ impl App {
 
     /// The daemon updated itself and replaced this program's file: start the
     /// new one in its place
-    fn after_update(&self, daemon_version: &str) {
+    fn after_update(&mut self, daemon_version: &str) {
         if !newer_version(daemon_version, env!("CARGO_PKG_VERSION")) {
             return;
         }
         let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) else { return };
         let me = dir.join(if cfg!(windows) { "retail-tray.exe" } else { "retail-tray" });
         let replaced = std::fs::metadata(&me).and_then(|m| m.modified()).is_ok_and(|t| t > self.started);
-        if replaced && std::process::Command::new(&me).spawn().is_ok() {
+        // The new one waits for this one to end before it takes over
+        if replaced && std::process::Command::new(&me).arg(single::REPLACING).spawn().is_ok() {
+            self.tray = None;
             std::process::exit(0);
         }
     }
@@ -1227,15 +1234,13 @@ fn main() {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         builder.with_activation_policy(ActivationPolicy::Accessory);
     }
-    #[cfg(unix)]
-    let single = match single::claim() {
+    let single = match single::claim(args.iter().any(|a| a == single::REPLACING)) {
         Some(l) => l,
         // Another runs: it shows its popup instead
         None => return,
     };
     let event_loop = builder.build().expect("creating the event loop");
     let proxy = event_loop.create_proxy();
-    #[cfg(unix)]
     single::serve(single, proxy.clone());
 
     let fast_poll = Arc::new(AtomicBool::new(false));
@@ -1274,17 +1279,22 @@ fn main() {
     }
 }
 
-/// One tray app per user. Started again (the app menu entry, while it runs
-/// from sign-in), it asks the running one to show its popup and exits.
+/// One tray app per user. Started again (the app menu entry, the Start
+/// menu, an installer), it asks the running one to show its popup and exits.
+/// The tray app that replaces itself after an update instead waits for the
+/// old one to end.
 #[cfg(unix)]
 mod single {
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use winit::event_loop::EventLoopProxy;
 
     use crate::UserEvent;
+
+    pub const REPLACING: &str = "--replacing";
 
     fn path() -> PathBuf {
         let uid = unsafe { libc::geteuid() };
@@ -1296,9 +1306,14 @@ mod single {
 
     /// `None` when another tray app took the request to show itself.
     /// `Some(None)`: this is the only one, but others cannot reach it.
-    pub fn claim() -> Option<Option<UnixListener>> {
+    pub fn claim(replacing: bool) -> Option<Option<UnixListener>> {
         let p = path();
-        if let Ok(mut s) = UnixStream::connect(&p) {
+        if replacing {
+            let start = Instant::now();
+            while UnixStream::connect(&p).is_ok() && start.elapsed() < Duration::from_secs(15) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        } else if let Ok(mut s) = UnixStream::connect(&p) {
             let _ = s.write_all(b"show");
             return None;
         }
@@ -1314,6 +1329,66 @@ mod single {
                 let mut buf = [0u8; 8];
                 if stream.read(&mut buf).is_ok_and(|n| &buf[..n] == b"show") {
                     let _ = proxy.send_event(UserEvent::Show);
+                }
+            }
+        });
+    }
+}
+
+/// The same on Windows: a mutex per sign-in session that the running tray
+/// app holds, and an event it waits on to show its popup
+#[cfg(windows)]
+mod single {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
+    };
+    use winit::event_loop::EventLoopProxy;
+
+    use crate::UserEvent;
+
+    pub const REPLACING: &str = "--replacing";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    const MUTEX: &str = r"Local\retail-tray";
+    const SHOW: &str = r"Local\retail-tray-show";
+
+    /// `None` when another tray app took the request to show itself.
+    /// `Some(None)`: this one runs, but others cannot reach it.
+    pub fn claim(replacing: bool) -> Option<Option<usize>> {
+        // Held by this (the main) thread for as long as the app runs; the
+        // system lets go of it when the process ends
+        let mutex = unsafe { CreateMutexW(std::ptr::null(), 1, wide(MUTEX).as_ptr()) };
+        if mutex.is_null() {
+            return Some(None);
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            if replacing {
+                let r = unsafe { WaitForSingleObject(mutex, 15_000) };
+                if r != WAIT_OBJECT_0 && r != WAIT_ABANDONED {
+                    return None;
+                }
+            } else {
+                let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, wide(SHOW).as_ptr()) };
+                if !event.is_null() {
+                    unsafe { SetEvent(event) };
+                }
+                return None;
+            }
+        }
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, wide(SHOW).as_ptr()) };
+        Some((!event.is_null()).then_some(event as usize))
+    }
+
+    pub fn serve(event: Option<usize>, proxy: EventLoopProxy<UserEvent>) {
+        let Some(event) = event else { return };
+        std::thread::spawn(move || {
+            while unsafe { WaitForSingleObject(event as _, INFINITE) } == WAIT_OBJECT_0 {
+                if proxy.send_event(UserEvent::Show).is_err() {
+                    break;
                 }
             }
         });

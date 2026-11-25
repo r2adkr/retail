@@ -298,7 +298,9 @@ fn request_stop(api: SocketAddr) {
 }
 
 /// Task Scheduler defaults would stop the daemon after 72 hours and on
-/// battery, and never restart it, so the task is imported from XML.
+/// battery, and never restart it, so the task is imported from XML. Starting
+/// it replaces an instance Task Scheduler still counts as running (a daemon
+/// just ended for an update), which would otherwise ignore the start.
 #[cfg(windows)]
 pub fn register(daemon: &Path) -> Result<()> {
     let xml = format!(
@@ -308,7 +310,7 @@ pub fn register(daemon: &Path) -> Result<()> {
   <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
   <Principals><Principal id="System"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
@@ -393,7 +395,19 @@ pub fn register(daemon: &Path) -> Result<()> {
     );
     std::fs::write(PLIST, plist).context("writing the launchd job")?;
     let _ = run_quiet("launchctl", &["bootout", "system", PLIST]);
-    run_quiet("launchctl", &["bootstrap", "system", PLIST])
+    // bootout returns before the job is gone, and bootstrap fails ("5:
+    // Input/output error") until it is
+    let mut tries = 0;
+    loop {
+        match run_quiet("launchctl", &["bootstrap", "system", PLIST]) {
+            Ok(()) => return Ok(()),
+            Err(e) if tries >= 20 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

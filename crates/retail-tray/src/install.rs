@@ -464,9 +464,19 @@ fn wait_for_daemon() -> Result<retail_proto::api::StatusResponse, String> {
 /// only if the user agreed (`switch`); the daemon keeps it as a saved server.
 fn join(invite: &str, switch: bool) -> Result<(), String> {
     let addr = api_addr();
-    let status = wait_for_daemon()?;
+    let mut status = wait_for_daemon()?;
     let code = retail_proto::invite::Invite::decode(invite).map_err(|e| e.to_string())?;
     let target = format!("https://{}", code.addrs[0]);
+    // Already in this network: the daemon answers before it has reconnected
+    // (an update), so give it a moment rather than joining again
+    let start = Instant::now();
+    while status.server.as_deref() == Some(target.as_str()) && status.state == BackendState::Stopped && start.elapsed() < API_WAIT {
+        std::thread::sleep(Duration::from_millis(500));
+        match crate::api::status_blocking(addr) {
+            Ok(s) => status = s,
+            Err(_) => break,
+        }
+    }
     match status.server {
         Some(s) if !switch && status.state != BackendState::NeedsLogin && s != target => {
             return Err(trf(

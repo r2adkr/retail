@@ -117,6 +117,11 @@ async fn main() -> Result<()> {
     }
     let state_dir = args.state_dir.unwrap_or_else(state::default_state_dir);
     tracing::info!("state directory: {}", state_dir.display());
+    // Before anything in it is read: an earlier version (Windows) could leave
+    // its files with no one allowed to read them
+    if state_dir.is_dir() {
+        state::secure_dir(&state_dir);
+    }
 
     let backend = Arc::new(backend::Backend::new(backend::Options {
         state_dir: state_dir.clone(),
@@ -134,45 +139,56 @@ async fn main() -> Result<()> {
     if let Some(web) = web::start(backend.clone(), state_dir.clone(), args.web_port).await {
         let _ = backend.web.set(web);
     }
-    // Before anything maps ports again: what a killed daemon left on the router
-    portmap::init(&state_dir).await;
-    // A network hosted here comes back first so this device can rejoin it
-    backend.host.resume(args.port).await;
-    if args.serve {
-        let req = retail_proto::api::ServerStartRequest {
-            join: false,
-            port: args.serve_port,
-            domain: args.serve_domain.clone(),
-            insecure_http: false,
-            reality: args.serve_reality.clone(),
-            fronts: (!args.serve_front.is_empty()).then(|| args.serve_front.clone()),
-            helper: args.serve_helper.clone(),
-        };
-        if let Err(e) = backend.host.start(&req, args.port).await {
-            tracing::error!("could not start the server: {e:#}");
-        }
-    }
-    backend.helper.resume().await;
-    if args.helper {
-        let req = retail_proto::api::HelperStartRequest { port: None, public: args.helper_public.clone() };
-        match backend.helper.start(&req).await {
-            Ok(()) => {
-                if let Some(code) = backend.helper.status().await.code {
-                    tracing::info!("helper code: {code}");
-                }
-            }
-            Err(e) => tracing::error!("could not start the helper node: {e:#}"),
-        }
-    }
-    if let Err(e) = backend.start_if_wanted().await {
-        tracing::error!("could not resume session: {e:#}");
-    }
-    backend.exempt_own_node().await;
-
+    // The local API answers first, while what was running before comes back:
+    // an installer or the tray app waits for it, and a hosted server, the
+    // tunnel and the router's ports can take long to come up
     let listener = tokio::net::TcpListener::bind(args.api)
         .await
         .with_context(|| format!("binding local API on {}", args.api))?;
     tracing::info!("local API on http://{}", args.api);
+    let token = Arc::new(local_token::write_new().context("writing the local API token")?);
+    let admin = Arc::new(local_token::write_admin().context("writing the administrator token")?);
+
+    let api = args.api;
+    let b = backend.clone();
+    let dir = state_dir.clone();
+    let port = args.port;
+    let resume = tokio::spawn(async move {
+        // Before anything maps ports again: what a killed daemon left on the router
+        portmap::init(&dir).await;
+        // A network hosted here comes back first so this device can rejoin it
+        b.host.resume(port).await;
+        if args.serve {
+            let req = retail_proto::api::ServerStartRequest {
+                join: false,
+                port: args.serve_port,
+                domain: args.serve_domain.clone(),
+                insecure_http: false,
+                reality: args.serve_reality.clone(),
+                fronts: (!args.serve_front.is_empty()).then(|| args.serve_front.clone()),
+                helper: args.serve_helper.clone(),
+            };
+            if let Err(e) = b.host.start(&req, port).await {
+                tracing::error!("could not start the server: {e:#}");
+            }
+        }
+        b.helper.resume().await;
+        if args.helper {
+            let req = retail_proto::api::HelperStartRequest { port: None, public: args.helper_public.clone() };
+            match b.helper.start(&req).await {
+                Ok(()) => {
+                    if let Some(code) = b.helper.status().await.code {
+                        tracing::info!("helper code: {code}");
+                    }
+                }
+                Err(e) => tracing::error!("could not start the helper node: {e:#}"),
+            }
+        }
+        if let Err(e) = b.start_if_wanted().await {
+            tracing::error!("could not resume session: {e:#}");
+        }
+        b.exempt_own_node().await;
+    });
 
     update::clean_up(&state_dir);
     update::spawn(backend.clone());
@@ -188,10 +204,8 @@ async fn main() -> Result<()> {
 
     let shutdown_backend = backend.clone();
     let updater = backend.updater.clone();
-    let token = Arc::new(local_token::write_new().context("writing the local API token")?);
-    let admin = Arc::new(local_token::write_admin().context("writing the administrator token")?);
     // The peer's address lets Linux tell who is asking (local_api::local_user)
-    let app = local_api::router(backend, token, admin, args.api).into_make_service_with_connect_info::<SocketAddr>();
+    let app = local_api::router(backend, token, admin, api).into_make_service_with_connect_info::<SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::select! {
@@ -200,6 +214,8 @@ async fn main() -> Result<()> {
                 _ = shutdown_backend.stop_requested.notified() => {}
             }
             tracing::info!("shutting down");
+            // Nothing comes back up behind the shutdown
+            resume.abort();
             shutdown_backend.shutdown().await;
         })
         .await?;

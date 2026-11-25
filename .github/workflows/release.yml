@@ -280,6 +280,51 @@ jobs:
           Stop-Process -Name retaild -Force
           # A refused change above left its exit code, which the step would report
           exit 0
+      # As a user installs: Task Scheduler, Program Files, ProgramData. Then
+      # an update over a device that hosts a network, which must come back
+      # with the server and its files, and in time for the installer
+      - name: Install for real, host a network, update over it
+        shell: pwsh
+        run: |
+          $inst = "out\retail-windows-x86_64.exe"
+          function Run-Installer($out, [string[]]$params) {
+            $p = Start-Process $inst -ArgumentList $params -PassThru -RedirectStandardOutput $out
+            if (-not $p.WaitForExit(180000)) { Stop-Process -Id $p.Id -Force; throw "installer $params did not finish" }
+            Get-Content $out | Write-Host
+            return $p.ExitCode
+          }
+          $retail = "C:\Program Files\retail\retail.exe"
+          $code = Run-Installer first.txt @('--yes','--no-autostart')
+          if ($code -ne 0) { throw "installer exit $code" }
+          & $retail status
+          if ($LASTEXITCODE -ne 0) { throw "retail status failed" }
+          # Signed-in users read the token through the folder's entries; a
+          # file without them is readable by no one
+          $acl = icacls C:\ProgramData\retail-api\token | Out-String
+          $acl
+          if ($acl -notmatch 'INTERACTIVE') { throw "the token file does not let signed-in users read it" }
+          & $retail set --auto-update false
+          if ($LASTEXITCODE -ne 0) { throw "retail set was refused" }
+          & $retail server start --no-join
+          if ($LASTEXITCODE -ne 0) { throw "retail server start failed" }
+          & $retail server status
+          # The update: the installer stops the daemon, replaces the programs
+          # and waits for the new daemon
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          $code = Run-Installer update.txt @('--yes','--no-autostart')
+          "update took $($t.Elapsed.TotalSeconds) s"
+          if ($code -ne 0) { throw "updating: exit $code" }
+          $server = & $retail server status | Out-String
+          $server
+          if ($server -match 'not running') { throw "the server did not come back after the update" }
+          & $retail set --auto-update false
+          if ($LASTEXITCODE -ne 0) { throw "retail set was refused after the update" }
+          # Every file the daemon keeps is still readable to it
+          Get-ChildItem C:\ProgramData\retail -Recurse -File | ForEach-Object {
+            try { $null = [IO.File]::ReadAllBytes($_.FullName) } catch { throw "unreadable after the update: $($_.FullName)" }
+          }
+          Start-Process "C:\Program Files\retail\retail-tray.exe" -ArgumentList '--uninstall','--yes' -Wait
+          exit 0
 
   # The server image (retaild and retail, no tunnel of its own) for
   # 64-bit Intel and ARM, from the same programs as the release

@@ -94,10 +94,12 @@ fn group_id(name: &str) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn restrict(dir: &Path, _file: &Path) -> Result<()> {
+fn restrict(dir: &Path, file: &Path) -> Result<()> {
     crate::state::take_over(dir);
     // SYSTEM and Administrators get full access, INTERACTIVE (local logons) read
-    // SIDs rather than account names, which are localized
+    // SIDs rather than account names, which are localized. The folder only:
+    // with /T icacls would put these folder-only entries on the file too,
+    // which leaves it readable by nobody
     let ok = std::process::Command::new("icacls")
         .arg(dir)
         .args([
@@ -108,11 +110,16 @@ fn restrict(dir: &Path, _file: &Path) -> Result<()> {
             "*S-1-5-32-544:(OI)(CI)F",
             "/grant:r",
             "*S-1-5-4:(OI)(CI)R",
-            "/T",
             "/Q",
         ])
         .output()
         .is_ok_and(|o| o.status.success());
     anyhow::ensure!(ok, "could not restrict access to {}", dir.display());
+    // The token takes the folder's entries (the administrator token, written
+    // later, gets its own)
+    if file.exists() {
+        let ok = std::process::Command::new("icacls").arg(file).args(["/reset", "/Q"]).output().is_ok_and(|o| o.status.success());
+        anyhow::ensure!(ok, "could not set access to {}", file.display());
+    }
     Ok(())
 }
