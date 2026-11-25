@@ -36,7 +36,7 @@ Download the installer for your system from [Releases](https://github.com/r2adkr
 | Ubuntu, Debian on 64-bit ARM (Raspberry Pi 3/4/5) | `retail-linux-aarch64.deb` |
 | 32-bit ARM (Raspberry Pi OS 32-bit) | `retail-linux-arm.deb` |
 
-**Windows and macOS**: run it. A short setup in retail's own look installs everything (Windows asks for administrator rights as it opens, macOS for your password) and offers to join a network with an invite code, or skip and join later from the tray icon. It ends by showing where retail's icon lives. The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time.
+**Windows and macOS**: run it. A short setup in retail's own look installs everything (Windows asks for administrator rights as it opens, macOS for your password) and offers to join a network with an invite code, or skip and join later from the tray icon. It ends by showing where retail's icon lives. retail then appears with your other apps (the Start menu, Applications, the app menu on Linux): opening it shows retail's window at its icon. On Windows, Settings → Installed apps removes it. The installers are not code-signed yet, so Windows asks to confirm (**More info → Run anyway**) and macOS wants **right-click → Open** the first time.
 
 **Ubuntu and Debian**: open the `.deb` (App Center installs it), then open **retail** from the app menu and paste an invite code. Administrators of the computer (the `sudo` group) may control retail from the tray app.
 

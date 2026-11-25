@@ -130,7 +130,25 @@ pub fn run(args: &[String]) -> Option<i32> {
     let mut opts = Opts::parse(args);
     let me = std::env::current_exe().ok()?;
     if args.iter().any(|a| a == "--uninstall") {
-        return Some(report(uninstall(&opts)));
+        crate::i18n::set(crate::config::Config::load().language);
+        QUIET.store(opts.yes, std::sync::atomic::Ordering::Relaxed);
+        // From Settings → Installed apps, which starts it unraised: the raised
+        // copy does the work and tells how it went
+        #[cfg(windows)]
+        if !is_admin() {
+            return Some(elevate_with(&me, "--uninstall", &opts, || {}).unwrap_or_else(|e| {
+                tell(&e);
+                1
+            }));
+        }
+        let r = uninstall(&opts, &me);
+        if r.is_ok() {
+            let done = tr("retail was removed from this computer. Its settings and keys stay, should you install it again.");
+            // A window on Windows (Settings → Installed apps starts it); on
+            // Linux and macOS it runs from a terminal or the package manager
+            if cfg!(windows) { tell(done) } else { println!("{done}") }
+        }
+        return Some(report(r));
     }
     let found = package(&me);
     if args.iter().any(|a| a == "--package-info") {
@@ -312,7 +330,8 @@ fn after_install(opts: &Opts, installed: bool) -> bool {
     if desktop && !installed {
         // Not on the installer's output, which a script may be reading to its end
         use std::process::Stdio;
-        let _ = std::process::Command::new(&tray).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        // With its popup open, so it is plain that retail is there
+        let _ = std::process::Command::new(&tray).arg("--show").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
     desktop
 }
@@ -370,6 +389,13 @@ fn privileged(source: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if o.service {
         let_user_control();
+    }
+    // In the system's list of apps (not for a trial install under --prefix)
+    if o.service
+        && o.prefix.is_none()
+        && let Err(e) = crate::app_entry::add(&dir, env!("CARGO_PKG_VERSION"))
+    {
+        eprintln!("retail: could not add retail to the list of apps: {e}");
     }
     let daemon = dir.join(exe("retaild"));
     if o.service {
@@ -492,7 +518,7 @@ fn join(invite: &str, switch: bool) -> Result<(), String> {
     crate::api::post_blocking_timeout(addr, "/up", &body, Duration::from_secs(60)).map_err(|e| trf("Joining failed: {error}", &[("error", &e)]))
 }
 
-fn uninstall(o: &Opts) -> Result<(), String> {
+fn uninstall(o: &Opts, me: &Path) -> Result<(), String> {
     if !is_admin() {
         return Err("run the uninstaller as administrator/root".into());
     }
@@ -500,6 +526,10 @@ fn uninstall(o: &Opts) -> Result<(), String> {
     if o.service {
         let _ = daemon_service(&dir.join(exe("retaild")), "remove");
     }
+    if o.prefix.is_none() {
+        crate::app_entry::remove(&dir);
+    }
+    end_other_tray_apps();
     for name in ["retaild", "retail", "retail-tray"] {
         let _ = std::fs::remove_file(dir.join(exe(name)));
     }
@@ -507,8 +537,34 @@ fn uninstall(o: &Opts) -> Result<(), String> {
         let _ = std::fs::remove_file(dir.join("wintun.dll"));
         let _ = std::fs::remove_dir(&dir);
     }
+    // Run from the folder it removes (Settings → Installed apps): Windows
+    // keeps a running program's file, so the folder goes once this has ended
+    #[cfg(windows)]
+    if dir.exists() && me.starts_with(&dir) {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", &format!("ping -n 3 127.0.0.1 >NUL & rmdir /S /Q \"{}\"", dir.display())])
+            .creation_flags(0x0800_0000)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = me;
     remove_autostart();
     Ok(())
+}
+
+/// The tray apps still running, every signed-in user's, but not this
+/// process (which is one of the same program)
+fn end_other_tray_apps() {
+    #[cfg(windows)]
+    let _ = run_quiet("taskkill", &["/F", "/IM", "retail-tray.exe", "/FI", &format!("PID ne {}", std::process::id())]);
+    #[cfg(unix)]
+    if let Ok(out) = std::process::Command::new("pgrep").args(["-x", "retail-tray"]).output() {
+        let me = std::process::id().to_string();
+        for pid in String::from_utf8_lossy(&out.stdout).split_whitespace().filter(|p| *p != me) {
+            let _ = std::process::Command::new("kill").arg(pid).status();
+        }
+    }
 }
 
 #[cfg(windows)]

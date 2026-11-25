@@ -129,7 +129,7 @@ set -e
 case "$1" in
 remove|purge)
     if [ -x /usr/local/bin/retail-tray ]; then
-        /usr/local/bin/retail-tray --uninstall || true
+        /usr/local/bin/retail-tray --uninstall --yes || true
     fi
     ;;
 esac
@@ -141,7 +141,7 @@ Type=Application
 Name=retail
 Comment=Your devices in one private network
 Exec=/usr/local/bin/retail-tray --show
-Icon=network-vpn
+Icon=/usr/local/share/icons/hicolor/256x256/apps/retail.png
 Categories=Network;
 """
 

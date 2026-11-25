@@ -138,6 +138,10 @@ jobs:
           id
           sudo apt-get install -y ./out/retail-linux-x86_64.deb
           systemctl is-active retaild
+          # In the app menu, with its icon
+          test -f /usr/share/applications/retail.desktop
+          test -f /usr/local/share/icons/hicolor/256x256/apps/retail.png
+          file /usr/local/share/icons/hicolor/256x256/apps/retail.png | grep -q PNG
           getent group retail
           retail status
           # Root may change settings, and members of the retail group without
@@ -156,7 +160,11 @@ jobs:
           RETAIL_RELEASES="file://$PWD/rel" RETAIL_NO_APT=1 sh scripts/install.sh
           systemctl is-active retaild
           retail status
-          sudo /usr/local/bin/retail-tray --uninstall
+          # Without the package the installer makes the app menu entry
+          grep -q 'Exec=/usr/local/bin/retail-tray --show' /usr/local/share/applications/retail.desktop
+          sudo /usr/local/bin/retail-tray --uninstall --yes
+          test ! -e /usr/local/share/applications/retail.desktop
+          test ! -e /usr/local/share/icons/hicolor/256x256/apps/retail.png
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installers-other
@@ -229,7 +237,13 @@ jobs:
           RETAIL_RELEASES="file://$PWD/rel" sh scripts/install.sh
           sleep 2
           /usr/local/bin/retail status
-          sudo /usr/local/bin/retail-tray --uninstall
+          # retail.app in Applications, which opens the menu bar app's popup
+          plutil -lint /Applications/retail.app/Contents/Info.plist
+          test -x /Applications/retail.app/Contents/MacOS/retail
+          grep -q 'retail-tray.*--show' /Applications/retail.app/Contents/MacOS/retail
+          test -s /Applications/retail.app/Contents/Resources/retail.icns
+          sudo /usr/local/bin/retail-tray --uninstall --yes
+          test ! -e /Applications/retail.app
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installers-macos
@@ -305,6 +319,15 @@ jobs:
           if ($acl -notmatch 'INTERACTIVE') { throw "the token file does not let signed-in users read it" }
           & $retail set --auto-update false
           if ($LASTEXITCODE -ne 0) { throw "retail set was refused" }
+          # In the Start menu and in Settings → Installed apps
+          $lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\retail.lnk"
+          if (-not (Test-Path $lnk)) { throw "no Start menu entry" }
+          $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          "$($s.TargetPath) $($s.Arguments) $($s.IconLocation)"
+          if ($s.Arguments -ne '--show') { throw "the Start menu entry does not open the popup" }
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\retail'
+          Get-ItemProperty $key | Format-List DisplayName,DisplayVersion,UninstallString,DisplayIcon,EstimatedSize
+          if ((Get-ItemProperty $key).DisplayName -ne 'retail') { throw "not in Installed apps" }
           & $retail server start --no-join
           if ($LASTEXITCODE -ne 0) { throw "retail server start failed" }
           & $retail server status
@@ -323,7 +346,12 @@ jobs:
           Get-ChildItem C:\ProgramData\retail -Recurse -File | ForEach-Object {
             try { $null = [IO.File]::ReadAllBytes($_.FullName) } catch { throw "unreadable after the update: $($_.FullName)" }
           }
+          # As Settings → Installed apps does, from the installed program
           Start-Process "C:\Program Files\retail\retail-tray.exe" -ArgumentList '--uninstall','--yes' -Wait
+          Start-Sleep 5
+          if (Test-Path $lnk) { throw "the Start menu entry stayed" }
+          if (Test-Path $key) { throw "the Installed apps entry stayed" }
+          if (Test-Path "C:\Program Files\retail") { Get-ChildItem "C:\Program Files\retail"; throw "the program folder stayed" }
           exit 0
 
   # The server image (retaild and retail, no tunnel of its own) for

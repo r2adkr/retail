@@ -14,6 +14,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod api;
+mod app_entry;
 mod config;
 mod dashboard;
 mod draw;

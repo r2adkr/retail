@@ -8,6 +8,23 @@ use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 /// light/dark menu bars. Otherwise it draws a coloured tile (blue when
 /// connected).
 pub fn rgba(size: u32, connected: bool, template: bool) -> Vec<u8> {
+    draw(size, connected, template)
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
+}
+
+/// The app's icon (the blue tile), `size`×`size`, as PNG: for the app lists
+/// (Start menu, Applications, the Linux app menu)
+pub fn app_png(size: u32) -> Option<Vec<u8>> {
+    draw(size, true, false).encode_png().ok()
+}
+
+fn draw(size: u32, connected: bool, template: bool) -> Pixmap {
     let mut pix = Pixmap::new(size, size).expect("non-zero icon size");
     let s = size as f32 / 32.0;
     let ts = Transform::from_scale(s, s);
@@ -41,13 +58,7 @@ pub fn rgba(size: u32, connected: bool, template: bool) -> Vec<u8> {
         }
     }
 
-    pix.pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+    pix
 }
 
 fn rounded_square(x: f32, y: f32, w: f32, r: f32) -> Option<tiny_skia::Path> {
