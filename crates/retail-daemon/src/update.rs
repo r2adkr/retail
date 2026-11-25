@@ -195,12 +195,15 @@ fn replace(new: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(&staged, target)
 }
 
-/// Removes what an earlier update left behind
+/// Removes what an earlier update or installer left behind
 pub fn clean_up(state_dir: &Path) {
     if let Some(bin) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
         for f in programs() {
             let _ = std::fs::remove_file(bin.join(&f).with_extension(if cfg!(windows) { "exe.old" } else { "old" }));
         }
+        // The installer moves it aside while a daemon still has it loaded
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(bin.join("wintun.dll.old"));
     }
     let _ = std::fs::remove_dir_all(state_dir.join("update"));
 }
