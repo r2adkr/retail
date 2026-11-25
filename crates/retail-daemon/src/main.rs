@@ -3,6 +3,7 @@ mod backup;
 mod control;
 mod crypto;
 mod engine;
+mod failure;
 mod exit;
 mod filter;
 mod cloudflared;
@@ -133,6 +134,8 @@ async fn main() -> Result<()> {
     if state_dir.is_dir() {
         state::secure_dir(&state_dir);
     }
+    #[cfg(target_os = "macos")]
+    service::leave_shared_folder();
 
     let backend = Arc::new(backend::Backend::new(backend::Options {
         state_dir: state_dir.clone(),
@@ -188,13 +191,9 @@ async fn main() -> Result<()> {
         if args.helper {
             let req = retail_proto::api::HelperStartRequest { port: None, public: args.helper_public.clone() };
             match b.helper.start(&req).await {
-                Ok(()) => {
-                    // In a container this is where the operator finds it; the
-                    // log is for administrators only
-                    if let Some(code) = b.helper.status().await.code {
-                        tracing::info!("helper code: {code}");
-                    }
-                }
+                // The code lets a server use this node: not in the log, which
+                // a container's operator tooling may collect and ship elsewhere
+                Ok(()) => tracing::info!("helper node running; `retail helper status` prints its code"),
                 Err(e) => tracing::error!("could not start the helper node: {e:#}"),
             }
         }
@@ -212,10 +211,18 @@ async fn main() -> Result<()> {
     // with the router's public address or the LAN
     let b = backend.clone();
     tokio::spawn(async move {
+        let (mut last, mut ticks) = (None, 0u32);
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            b.host.set_mesh_ip(b.own_mesh_ip().await);
-            b.host.publish_addrs().await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            // This device's mesh address as soon as it has one (a device
+            // that lost the tunnel's address needs it), everything every 30 s
+            let ip = b.own_mesh_ip().await;
+            ticks += 1;
+            if ip != last || ticks % 10 == 0 {
+                last = ip;
+                b.host.set_mesh_ip(ip);
+                b.host.publish_addrs().await;
+            }
         }
     });
 

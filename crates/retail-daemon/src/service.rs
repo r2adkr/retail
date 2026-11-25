@@ -27,7 +27,7 @@ pub enum Cmd {
         /// A host name pointing at this machine, for invites
         #[arg(long, requires = "server")]
         domain: Option<String>,
-        /// Where the programs go (default: /usr/local/bin, or %ProgramFiles%\retail)
+        /// Where the programs go (default: /usr/local/bin, /Library/retail/bin on macOS, or %ProgramFiles%\retail)
         #[arg(long)]
         dir: Option<PathBuf>,
         /// Start the daemon directly instead of registering a service (tests)
@@ -97,6 +97,10 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             for name in ["retaild", "retail"] {
                 let _ = std::fs::remove_file(dir.join(exe(name)));
             }
+            #[cfg(target_os = "macos")]
+            if dir == default_dir() {
+                retail_proto::programs::unlink(&dir, Path::new(retail_proto::programs::MACOS_LINKS));
+            }
             if cfg!(windows) {
                 let _ = std::fs::remove_file(dir.join("wintun.dll"));
                 let _ = std::fs::remove_dir(&dir);
@@ -108,9 +112,14 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             if !no_service {
                 require_admin()?;
             }
+            let custom = dir.is_some();
             let dir = dir.unwrap_or_else(default_dir);
             let me = std::env::current_exe()?;
             let here = me.parent().context("retaild has no folder")?.to_path_buf();
+            #[cfg(target_os = "macos")]
+            if !custom {
+                retail_proto::programs::make_root_only(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             if !no_service {
                 stop(api);
@@ -130,6 +139,11 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
                 }
                 copy(&src, &dir.join(f)).with_context(|| format!("installing {f}"))?;
             }
+            #[cfg(target_os = "macos")]
+            if !custom {
+                retail_proto::programs::link(&dir, Path::new(retail_proto::programs::MACOS_LINKS)).context("linking the programs")?;
+            }
+            let _ = custom;
             let daemon = dir.join(exe("retaild"));
             if no_service {
                 let mut cmd = std::process::Command::new(&daemon);
@@ -182,6 +196,8 @@ fn exe(name: &str) -> String {
 fn default_dir() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into())).join("retail")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from(retail_proto::programs::MACOS_DIR)
     } else {
         PathBuf::from("/usr/local/bin")
     }
@@ -469,6 +485,46 @@ pub fn register(daemon: &Path) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(500));
             }
         }
+    }
+}
+
+/// A daemon started by launchd from /usr/local/bin (installed before 1.0.2)
+/// copies the programs to the root-only folder, leaves links behind, and has
+/// launchd run the copy: the registration it starts ends this process
+#[cfg(target_os = "macos")]
+pub fn leave_shared_folder() {
+    use retail_proto::programs::{MACOS_DIR, MACOS_LINKS, NAMES, link, make_root_only};
+    let Ok(me) = std::env::current_exe() else { return };
+    let (old, new) = (Path::new(MACOS_LINKS), Path::new(MACOS_DIR));
+    let registered = std::fs::read_to_string(PLIST).is_ok_and(|p| p.contains("<string>/usr/local/bin/retaild</string>"));
+    if me.parent() != Some(old) || !registered {
+        return;
+    }
+    tracing::info!("moving the programs from {MACOS_LINKS} to {MACOS_DIR}");
+    let moved = make_root_only(new).map_err(anyhow::Error::from).and_then(|()| {
+        for name in NAMES {
+            let from = old.join(name);
+            if from.is_file() {
+                copy(&from, &new.join(name)).with_context(|| format!("copying {name}"))?;
+            }
+        }
+        link(new, old).context("linking the programs")?;
+        use std::os::unix::process::CommandExt;
+        // In a process group of its own, which the job's end leaves running
+        std::process::Command::new(new.join("retaild"))
+            .args(["service", "register"])
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("registering the moved retaild")?;
+        Ok(())
+    });
+    match moved {
+        // launchd ends this process when it takes the new registration
+        Ok(()) => std::thread::sleep(Duration::from_secs(30)),
+        Err(e) => tracing::warn!("could not move the programs: {e:#}"),
     }
 }
 

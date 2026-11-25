@@ -61,7 +61,7 @@ retail tui                                  # the same in a full-screen terminal
 sudo retaild uninstall                      # removes the service and programs (the server data stays)
 ```
 
-On Debian and Ubuntu the script installs the release's `.deb` with apt (`sudo apt install ./retail-linux-x86_64.deb` does the same by hand, and `sudo apt remove retail` removes it); elsewhere it takes the installer out of the package and runs it. Either way the programs go to `/usr/local/bin` and the daemon is registered with systemd (launchd on macOS). `retaild install --server` starts the server on an installed device; `--port` and `--domain` set the server's port and a name for invites.
+On Debian and Ubuntu the script installs the release's `.deb` with apt (`sudo apt install ./retail-linux-x86_64.deb` does the same by hand, and `sudo apt remove retail` removes it); elsewhere it takes the installer out of the package and runs it. Either way the programs go to `/usr/local/bin` and the daemon is registered with systemd. On macOS they go to `/Library/retail/bin`, which only root can change, with links in `/usr/local/bin`, and launchd runs the daemon. `retaild install --server` starts the server on an installed device; `--port` and `--domain` set the server's port and a name for invites.
 
 On a machine with less than 1 GB of memory the daemon picks its smallest buffers by itself (about 9 MB); `retail set --memory-limit` overrides it. The web admin page is on the server's loopback: `ssh -L 41180:127.0.0.1:41180 server`, then open the link `retail server web --print` prints there.
 
@@ -132,7 +132,7 @@ retail server start --helper retailh1.…
 retail server invite                 # invite codes now carry the helper's address
 ```
 
-Ports to open on the VPS: TCP 443 and 80, UDP 3478. In Docker, turn it on with `retaild --helper` (`RETAIL_HELPER=1`).
+Ports to open on the VPS: TCP 443 and 80, UDP 3478. In Docker, turn it on with `retaild --helper` (`RETAIL_HELPER=1`); `docker compose -f packaging/docker/compose.yml exec retail-server retail helper status` prints the code. retaild does not write it to its log.
 
 ## Networks that block the server's address: CDN
 

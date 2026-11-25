@@ -324,7 +324,7 @@ fn insecure(peer: &crate::tls::PeerAddr) -> Option<Response> {
 }
 
 fn api_error(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(ApiError { error: msg.into() })).into_response()
+    (status, Json(ApiError { error: msg.into(), reason: None })).into_response()
 }
 
 async fn register(

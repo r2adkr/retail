@@ -1175,6 +1175,16 @@ run_scenario() {
         local left
         left=$(nsx rB iptables-legacy -t nat -S MINIUPNPD | grep -c -- '-A MINIUPNPD')
         [ "$left" = 0 ] && echo "  router mappings removed" || { echo "  $left router mappings left behind"; ok=0; }
+        # What the tray app tells the user: nothing listens there now (the
+        # router's address stays silent until its 10 s timeout; the mesh
+        # address answers at once)
+        local why="" t=0
+        for i in $(seq 150); do
+            why=$(cli A status --json | jq -r '.problem.reason // empty')
+            [ "$why" = refused ] && { t=$i; break; }
+            sleep 0.1
+        done
+        [ "$why" = refused ] && echo "  A says why after $(awk -v t="$t" 'BEGIN{printf "%.1f", t/10}')s: $why" || { echo "  A gave '$why' as the reason, not refused"; ok=0; }
         cli B server start >/dev/null
         local up=0
         for i in $(seq 300); do
@@ -1185,8 +1195,8 @@ run_scenario() {
         nsx hA ping -c3 -i0.2 -q "$ip_b" | grep -q " 0% packet loss" || { echo "  no ping after the restart"; ok=0; }
     fi
     if [ "$sc" = mesh-fallback ] && [ "$ok" = 1 ]; then
-        # B tells the devices its addresses every 30 s, its mesh address last
-        sleep 35
+        # B tells the devices its mesh address (last) once it has one
+        sleep 8
         # Both ways, as when cloudflared goes: silence, no reset
         nsx rB iptables -I FORWARD 1 -i wanB -p tcp -j DROP
         nsx rB iptables -I FORWARD 1 -o wanB -p tcp -j DROP
@@ -1196,6 +1206,8 @@ run_scenario() {
             sleep 0.1
         done
         echo "  TCP to B cut: A lost the server after $(awk -v t="$down" 'BEGIN{printf "%.1f", t/10}')s"
+        sleep 2
+        echo "  A says why: $(cli A status --json | jq -r '.problem.reason // "nothing"')"
         for i in $(seq 600); do
             [ "$(cli A status --json | jq -r .control_connected)" = true ] && { up=$i; break; }
             sleep 0.1

@@ -92,6 +92,12 @@ impl Way {
 static LAST: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 pub async fn dial(target: &Target) -> Result<Dialed> {
+    dial_reporting(target, |_| {}).await
+}
+
+/// `dial`, telling `report` the most telling error so far each time a way
+/// fails: the slowest way can take long to give up
+pub async fn dial_reporting(target: &Target, report: impl Fn(&anyhow::Error)) -> Result<Dialed> {
     let ways = ways(target, &proxy::current());
     let last = LAST.lock().unwrap().iter().find(|(u, _)| *u == target.url).map(|(_, l)| l.clone());
     let mut ways = ways;
@@ -117,7 +123,7 @@ pub async fn dial(target: &Target) -> Result<Dialed> {
             tracing::debug!(via = %label, "trying");
             let r = match tokio::time::timeout(ATTEMPT_TIMEOUT, attempt(&target, &way)).await {
                 Ok(r) => r,
-                Err(_) => Err(anyhow!("timed out")),
+                Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
             };
             if let Err(e) = &r {
                 tracing::debug!(via = %label, "failed: {e:#}");
@@ -140,7 +146,14 @@ pub async fn dial(target: &Target) -> Result<Dialed> {
             }
             Err(e) => {
                 tracing::debug!(via = %label, "{e:#}");
-                first_err.get_or_insert(e.context(label));
+                // The most telling, not the first: that may be an IPv6 or proxy try
+                let e = e.context(label);
+                let best = match first_err.take() {
+                    Some(f) => crate::failure::better(f, e),
+                    None => e,
+                };
+                report(&best);
+                first_err = Some(best);
             }
         }
     }

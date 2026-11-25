@@ -649,7 +649,7 @@ impl App {
                 self.redraw_all();
             }
             SettingsAction::CheckUpdate => {
-                st.busy = Some(Instant::now());
+                st.checking = Some(Instant::now());
                 st.message = None;
                 let _ = self.commands.send(Command::CheckUpdate);
             }
@@ -719,13 +719,15 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Tab) if form => {
-                let n = 3;
-                st.focus = Some(match (st.focus, self.mods.shift_key()) {
+                let fields = st.form_fields();
+                let n = fields.len();
+                let at = st.focus.and_then(|f| fields.iter().position(|&i| i == f));
+                st.focus = Some(fields[match (at, self.mods.shift_key()) {
                     (None, false) => 0,
                     (None, true) => n - 1,
                     (Some(i), false) => (i + 1) % n,
                     (Some(i), true) => (i + n - 1) % n,
-                });
+                }]);
                 return;
             }
             Key::Named(NamedKey::Enter) if form => {
@@ -815,15 +817,16 @@ impl App {
     fn on_action(&mut self, origin: Origin, kind: ActionKind, result: Result<StatusResponse, String>) {
         match (origin, result) {
             (Origin::Settings, Ok(s)) if kind == ActionKind::Update => {
-                self.settings.busy = None;
+                self.settings.checking = None;
                 self.on_status(Ok(s));
             }
+            // The switch itself shows the new setting
+            (Origin::Settings, Ok(s)) if kind == ActionKind::Prefs => self.on_status(Ok(s)),
             (Origin::Settings, Ok(s)) => {
                 let st = &mut self.settings;
                 st.busy = None;
                 st.message = Some(match kind {
                     ActionKind::Logout => (tr("Logged out. This device's keys were deleted.").into(), false),
-                    ActionKind::Prefs => (tr("Saved.").into(), false),
                     ActionKind::Forget => (tr("Removed from the list.").into(), false),
                     // The update row says how it went
                     ActionKind::Update => (String::new(), false),
@@ -837,13 +840,17 @@ impl App {
                 self.on_status(Ok(s));
             }
             (Origin::Settings, Err(e)) => {
-                self.settings.busy = None;
+                if kind == ActionKind::Update {
+                    self.settings.checking = None;
+                } else if kind != ActionKind::Prefs {
+                    self.settings.busy = None;
+                }
                 self.settings.message = Some((e, true));
             }
             (Origin::Popup, Ok(s)) => self.on_status(Ok(s)),
             (Origin::Popup, Err(e)) => {
                 self.ui.pending = None;
-                self.ui.toast = Some((e, Instant::now()));
+                self.ui.toast = Some((e.replace('\n', ". "), Instant::now()));
             }
         }
     }
@@ -1514,7 +1521,11 @@ mod preview {
         View::Status(Box::new(StatusResponse {
             state: backend,
             server: (backend != BackendState::NeedsLogin).then(|| "https://vpn.example.com".into()),
-            control_connected: backend == BackendState::Running,
+            control_connected: backend == BackendState::Running && state != "unreachable",
+            problem: (state == "unreachable").then(|| retail_proto::api::ConnectionProblem {
+                reason: retail_proto::api::FailReason::Timeout,
+                detail: "HTTPS: connecting to 203.0.113.5:443 timed out".into(),
+            }),
             self_node: (backend != BackendState::NeedsLogin).then(|| SelfStatus {
                 hostname: "work-laptop".into(),
                 ip: std::net::Ipv4Addr::new(100, 64, 0, 1),
@@ -1583,7 +1594,11 @@ mod preview {
     pub fn render_settings(out: &str, state: &str, dark: bool) -> Result<(), String> {
         let fonts = Fonts::load()?;
         let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System }, crate::LangPref::System);
-        st.view = sample(if matches!(state, "change" | "server-menu" | "many-servers" | "language") { "connected" } else { state });
+        st.view = sample(match state {
+            "change" | "server-menu" | "many-servers" | "language" => "connected",
+            "join" => "login",
+            _ => state,
+        });
         st.lang_open = state == "language";
         // The daemon gone: off, or restarting after an update
         if matches!(state, "offline" | "restarting") {

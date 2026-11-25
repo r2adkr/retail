@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use retail_proto::Key;
-use retail_proto::api::{BackendState, PeerStatus, StatusResponse, UpdateStage};
+use retail_proto::api::{BackendState, FailReason, PeerStatus, StatusResponse, UpdateStage};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::draw::{Canvas, Theme, contains, shade, with_alpha};
@@ -215,7 +215,11 @@ impl Ui {
             Some(s) if s.state == BackendState::Stopped => CARD_H + 12.0 + NOTE_H,
             Some(s) if s.state != BackendState::NeedsLogin => {
                 let rows = s.peers.len().clamp(1, MAX_ROWS) as f32;
-                let error = if error_text(s).is_some() { 44.0 } else { 0.0 };
+                let error = match error_text(s) {
+                    Some((_, Some(_))) => 60.0,
+                    Some(_) => 44.0,
+                    None => 0.0,
+                };
                 CARD_H + 12.0 + SECTION_H + rows * ROW_H + error + 8.0
             }
             Some(_) => MESSAGE_H,
@@ -325,9 +329,13 @@ impl Ui {
             View::Status(s) => {
                 y = self.device_card(&mut c, &t, &s, y + 4.0);
                 y = self.devices(&mut c, &t, &s, y + 8.0);
-                if let Some(err) = &error_text(&s) {
-                    c.fill_rrect(PAD, y + 4.0, WIDTH - 2.0 * PAD, 36.0, 8.0, with_alpha(t.red, 0.12));
+                if let Some((err, hint)) = &error_text(&s) {
+                    let h = if hint.is_some() { 52.0 } else { 36.0 };
+                    c.fill_rrect(PAD, y + 4.0, WIDTH - 2.0 * PAD, h, 8.0, with_alpha(t.red, 0.12));
                     c.text(err, PAD + 12.0, y + 26.0, 12.0, Weight::Regular, t.red, Some(WIDTH - 2.0 * PAD - 24.0));
+                    if let Some(hint) = hint {
+                        c.text(hint, PAD + 12.0, y + 43.0, 11.5, Weight::Regular, t.dim, Some(WIDTH - 2.0 * PAD - 24.0));
+                    }
                 }
             }
         }
@@ -456,6 +464,8 @@ impl Ui {
             let relayed = p.path.as_deref() == Some("relay");
             let (dot, path) = match (p.online, p.endpoint) {
                 (_, Some(_)) => (t.accent, tr("Direct").to_string()),
+                // The relay is the server: down with it
+                (_, None) if relayed && !s.control_connected => (t.amber, tr("Relay unavailable").to_string()),
                 (_, None) if relayed => (t.accent, tr("Relay").to_string()),
                 (true, None) => (t.amber, tr("Connecting…").to_string()),
                 (false, None) => (t.gray, tr("Offline").to_string()),
@@ -463,7 +473,7 @@ impl Ui {
             c.circle(PAD + 5.0, y + ROW_H / 2.0, 4.5, dot);
             c.text(&p.hostname, PAD + 20.0, y + 23.0, 14.0, Weight::Regular, t.text, Some(WIDTH - 2.0 * PAD - 120.0));
             let detail = match p.last_handshake_secs {
-                Some(secs) if p.endpoint.is_some() || relayed => format!("{path} · {}", ago(secs)),
+                Some(secs) if p.endpoint.is_some() || (relayed && s.control_connected) => format!("{path} · {}", ago(secs)),
                 _ => path,
             };
             let in_use = s.prefs.exit_node == Some(p.node_key);
@@ -603,12 +613,35 @@ impl Ui {
 }
 
 /// The exit node in use (hostname) and whether it is unreachable
-/// What goes in the red box under the devices
-fn error_text(s: &StatusResponse) -> Option<String> {
+/// What goes in the red box under the devices: a line, and maybe a hint
+fn error_text(s: &StatusResponse) -> Option<(String, Option<String>)> {
     if s.key_expired {
-        return Some(tr("Key expired · ask the admin to renew it").to_string());
+        return Some((tr("Key expired · ask the admin to renew it").to_string(), None));
     }
-    s.last_error.clone()
+    if let Some(p) = s.problem.as_ref().filter(|_| s.state == BackendState::Running && !s.control_connected) {
+        return Some(match reason_text(p.reason) {
+            Some((what, hint)) => (what.to_string(), Some(hint.to_string())),
+            None => (tr("Can't reach the server").to_string(), Some(p.detail.clone())),
+        });
+    }
+    s.last_error.clone().map(|e| (e, None))
+}
+
+/// Why the server cannot be reached, and what to do: a line each
+pub fn reason_text(r: FailReason) -> Option<(&'static str, &'static str)> {
+    let (what, hint) = match r {
+        FailReason::Timeout => ("No answer from the server", "The network may block it, or the server is off"),
+        FailReason::Refused => ("The server refused the connection", "Is retail running on the server's computer?"),
+        FailReason::Reset => ("The connection was cut on the way", "This network may be blocking VPN connections"),
+        FailReason::Dns => ("Could not look up the server's name", "Check this device's internet connection"),
+        FailReason::Unreachable => ("No route to the server", "Check that this device is online"),
+        FailReason::Intercepted => ("Something answered in the server's place", "A filtering proxy or a Wi-Fi sign-in page"),
+        FailReason::Rejected => ("The server turned this device away", "Ask the administrator for a new invite"),
+        FailReason::ProxyAuth => ("The network's proxy wants a sign-in", "Set one with retail set --proxy"),
+        FailReason::ServerError => ("The server answered with an error", "It may be starting up; retail keeps trying"),
+        FailReason::Other => return None,
+    };
+    Some((tr(what), tr(hint)))
 }
 
 fn exit_in_use(s: &StatusResponse) -> Option<(String, bool)> {

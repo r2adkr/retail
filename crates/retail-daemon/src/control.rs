@@ -109,7 +109,10 @@ pub async fn control_loop(engine: Arc<Engine>, target: Target, token: String) ->
             .collect();
         match run_once(&engine, &target, &token, &mut relay_out).await {
             Ok(()) => tracing::info!("control connection closed by server"),
-            Err(e) => tracing::warn!("control connection: {e:#}"),
+            Err(e) => {
+                tracing::warn!("control connection: {e:#}");
+                problem(&engine, &e);
+            }
         }
         engine.control_connected.store(false, Ordering::Relaxed);
         if started.elapsed() > Duration::from_secs(60) {
@@ -119,6 +122,12 @@ pub async fn control_loop(engine: Arc<Engine>, target: Target, token: String) ->
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
+/// Why the server cannot be reached, for the tray app
+fn problem(engine: &Engine, e: &anyhow::Error) {
+    let reason = crate::failure::classify(e);
+    engine.set_control_problem(Some(retail_proto::api::ConnectionProblem { reason, detail: format!("{e:#}") }));
+}
+
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// Both sides ping, so silence this long means a NAT or middlebox dropped the
 /// connection. Reconnecting beats waiting for TCP to give up.
@@ -161,7 +170,7 @@ async fn run_once(
     let mut req = poll_url(server)?.into_client_request()?;
     req.headers_mut()
         .insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
-    let dialed = crate::transport::dial(target).await?;
+    let dialed = crate::transport::dial_reporting(target, |e| problem(engine, e)).await?;
     // Its mesh address is no STUN server for the tunnel's own socket
     if let Some(addr) = dialed.server_addr.filter(|a| !matches!(a, std::net::SocketAddr::V4(v4) if retail_proto::in_mesh(*v4.ip()))) {
         engine.set_control_addr(addr);
@@ -174,7 +183,7 @@ async fn run_once(
     let handshake = tokio_tungstenite::client_async_with_config(req, dialed.io, Some(ws_config()));
     let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
         .await
-        .map_err(|_| anyhow::anyhow!("no answer from {server} within {}s", HANDSHAKE_TIMEOUT.as_secs()))?
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer from {server} within {}s", HANDSHAKE_TIMEOUT.as_secs())))?
         .with_context(|| format!("connecting to {server}"))?
         .0;
     let result = session(engine, ws, relay_out).await;
@@ -192,6 +201,7 @@ where
     // Frames queued while disconnected are stale and WireGuard retries on its own
     while relay_out.try_recv().is_ok() {}
     engine.control_connected.store(true, Ordering::Relaxed);
+    engine.set_control_problem(None);
     tracing::info!("connected to control server");
 
     let (mut tx, mut rx) = ws.split();

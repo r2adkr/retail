@@ -41,8 +41,8 @@ async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
                     tracing::debug!(host, "name lookup failed; using the last known addresses");
                     Ok(addrs)
                 }
-                (None, Ok(Err(e))) => Err(e),
-                (None, _) => Err(io::Error::new(io::ErrorKind::TimedOut, format!("looking up {host} timed out"))),
+                (None, Ok(Err(e))) => Err(crate::failure::name_lookup(host, e)),
+                (None, _) => Err(crate::failure::name_lookup(host, "timed out")),
             }
         }
     }
@@ -85,7 +85,7 @@ pub async fn connect_many(host: &str, port: u16, alts: &[String]) -> io::Result<
                     }
                 }
             }
-            Err(e) => last_err = Some(e),
+            Err(e) => last_err = Some(keep(last_err, e)),
         }
     }
     if addrs.is_empty() {
@@ -169,6 +169,14 @@ fn split_host_port(s: &str) -> Option<(String, u16)> {
     Some((h.trim_matches(['[', ']']).to_string(), p.parse().ok()?))
 }
 
+/// The more telling of an earlier error and a new one
+fn keep(old: Option<io::Error>, new: io::Error) -> io::Error {
+    match old {
+        Some(old) => crate::failure::better_io(old, new),
+        None => new,
+    }
+}
+
 pub async fn connect_addrs(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
     if addrs.is_empty() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "no addresses to connect to"));
@@ -192,7 +200,7 @@ pub async fn connect_addrs(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
             done = attempts.join_next() => match done {
                 Some(Ok(Ok(stream))) => return Ok(stream), // Dropping the set aborts the rest
                 Some(Ok(Err(e))) => {
-                    last_err = Some(e);
+                    last_err = Some(keep(last_err.take(), e));
                     if let Some(addr) = pending.next() {
                         start(&mut attempts, addr);
                     }

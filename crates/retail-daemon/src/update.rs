@@ -142,6 +142,11 @@ impl Updater {
 
     async fn install_version(&self, version: &str) -> Result<()> {
         let bin = std::env::current_exe()?.parent().context("the daemon has no folder")?.to_path_buf();
+        // What lands there runs as root: not in a folder someone else can change
+        #[cfg(target_os = "macos")]
+        if unsafe { libc::geteuid() } == 0 && !retail_proto::programs::root_only(&bin) {
+            bail!("other users can change {}; run the installer from the releases page once", bin.display());
+        }
         let dir = self.state_dir.join("update").join(format!("v{version}"));
         // Only the programs that are installed here: a server-only machine may have no tray
         let files: Vec<String> = programs().into_iter().filter(|f| bin.join(f).is_file()).collect();

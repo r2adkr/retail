@@ -181,7 +181,7 @@ fn random_token() -> String {
 }
 
 fn deny(status: StatusCode, msg: &str) -> Response {
-    (status, Json(ApiError { error: msg.into() })).into_response()
+    (status, Json(ApiError { error: msg.into(), reason: None })).into_response()
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {

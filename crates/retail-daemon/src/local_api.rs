@@ -152,11 +152,12 @@ async fn shutdown(State(b): State<Arc<Backend>>, axum::Extension(Admin(admin)): 
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(ApiError { error: msg.into() })).into_response()
+    (status, Json(ApiError { error: msg.into(), reason: None })).into_response()
 }
 
 fn failed(e: anyhow::Error) -> Response {
-    error(StatusCode::BAD_REQUEST, format!("{e:#}"))
+    let reason = Some(crate::failure::classify(&e)).filter(|r| *r != retail_proto::api::FailReason::Other);
+    (StatusCode::BAD_REQUEST, Json(ApiError { error: format!("{e:#}"), reason })).into_response()
 }
 
 async fn status(State(b): State<Arc<Backend>>) -> Response {

@@ -119,13 +119,16 @@ case "$ASSET" in
         hdiutil detach "$TMP/vol" >/dev/null ;;
 esac
 
+# Where the installer put the programs
+BIN=/usr/local/bin
+[ "$(uname -s)" = Darwin ] && BIN=/Library/retail/bin
 if [ -n "$INVITE" ] && [ "$JOINED" = 0 ]; then
     say "joining"
-    $SUDO /usr/local/bin/retail up --invite "$INVITE"
+    $SUDO "$BIN/retail" up --invite "$INVITE"
 fi
 if [ "$SERVER" = 1 ]; then
     # Starts a server that does not join itself and prints the first invite
-    $SUDO /usr/local/bin/retaild install --server
+    $SUDO "$BIN/retaild" install --server
 fi
 if [ -z "$INVITE" ] && [ "$SERVER" = 0 ]; then
     say "installed. Join a network with: retail up --invite <code>   or host one with: sudo retaild install --server"

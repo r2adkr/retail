@@ -876,6 +876,10 @@ fn print_status(st: &StatusResponse) {
             _ => "not connected".to_string(),
         };
         println!("server:  {server} ({conn})");
+        if let Some(p) = st.problem.as_ref().filter(|_| !st.control_connected) {
+            println!("         {}", p.reason.summary());
+            println!("         {}", p.detail);
+        }
     }
     if let Some(n) = &st.self_node {
         let name = if n.dns_name.is_empty() { &n.hostname } else { &n.dns_name };

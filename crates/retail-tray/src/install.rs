@@ -102,6 +102,8 @@ fn bin_dir(o: &Opts) -> PathBuf {
     }
     if cfg!(windows) {
         PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into())).join("retail")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from(retail_proto::programs::MACOS_DIR)
     } else {
         PathBuf::from("/usr/local/bin")
     }
@@ -398,6 +400,10 @@ fn report(r: Result<(), String>) -> i32 {
 /// The raised part: files, boot registration, joining
 fn privileged(source: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
     let dir = bin_dir(o);
+    #[cfg(target_os = "macos")]
+    if o.prefix.is_none() {
+        retail_proto::programs::make_root_only(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    }
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     if o.service {
         // A daemon installed before is stopped by its own program
@@ -410,6 +416,11 @@ fn privileged(source: &Path, m: &Manifest, o: &Opts) -> Result<(), String> {
             return Err(format!("the installer contains an unexpected file name: {}", f.name));
         }
         copy_range(&mut src, f.offset, f.len, &dir.join(&f.name))?;
+    }
+    #[cfg(target_os = "macos")]
+    if o.prefix.is_none() {
+        retail_proto::programs::link(&dir, Path::new(retail_proto::programs::MACOS_LINKS))
+            .map_err(|e| format!("linking the programs in {}: {e}", retail_proto::programs::MACOS_LINKS))?;
     }
     // Before the daemon starts, so it gives the group its token file
     #[cfg(target_os = "linux")]
@@ -550,7 +561,12 @@ fn uninstall(o: &Opts, me: &Path) -> Result<(), String> {
     }
     let dir = bin_dir(o);
     if o.service {
-        let _ = daemon_service(&dir.join(exe("retaild")), "remove");
+        let mut daemon = dir.join(exe("retaild"));
+        // Installed before 1.0.2, in the folder the links are in now
+        if cfg!(target_os = "macos") && o.prefix.is_none() && !daemon.is_file() {
+            daemon = Path::new(retail_proto::programs::MACOS_LINKS).join("retaild");
+        }
+        let _ = daemon_service(&daemon, "remove");
     }
     if o.prefix.is_none() {
         crate::app_entry::remove(&dir);
@@ -562,6 +578,12 @@ fn uninstall(o: &Opts, me: &Path) -> Result<(), String> {
     if cfg!(windows) {
         let _ = std::fs::remove_file(dir.join("wintun.dll"));
         let _ = std::fs::remove_dir(&dir);
+    }
+    #[cfg(target_os = "macos")]
+    if o.prefix.is_none() {
+        retail_proto::programs::unlink(&dir, Path::new(retail_proto::programs::MACOS_LINKS));
+        let _ = std::fs::remove_dir(&dir);
+        let _ = dir.parent().map(std::fs::remove_dir);
     }
     // Run from the folder it removes (Settings → Installed apps), or a
     // program in it still ending: Windows keeps a running program's file, so
@@ -629,7 +651,11 @@ fn daemon_service(daemon: &Path, action: &str) -> Result<(), String> {
 /// boot registration is put in place again (the current one) and started.
 /// For a daemon that did not come back after an update, or was stopped.
 pub fn start_daemon() -> Result<(), String> {
-    let dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().map(Path::to_path_buf).ok_or("no program folder")?;
+    let mut dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().map(Path::to_path_buf).ok_or("no program folder")?;
+    // Run as root: the root-only folder's, not one through a link the user can change
+    if cfg!(target_os = "macos") && Path::new(retail_proto::programs::MACOS_DIR).join("retaild").is_file() {
+        dir = PathBuf::from(retail_proto::programs::MACOS_DIR);
+    }
     let daemon = dir.join(if cfg!(windows) { "retaild.exe" } else { "retaild" });
     if !daemon.is_file() {
         return Err(format!("{} is missing", daemon.display()));

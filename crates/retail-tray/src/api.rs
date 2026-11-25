@@ -226,7 +226,7 @@ fn download(addr: SocketAddr, path: &str, dir: &Path, timeout: Duration) -> Resu
     if !(200..300).contains(&code) {
         let mut body = Vec::new();
         s.take(1 << 16).read_to_end(&mut body).ok();
-        return Err(friendly(serde_json::from_slice::<ApiError>(&body).map(|e| e.error).unwrap_or_else(|_| format!("HTTP {code}"))));
+        return Err(api_error(&body, code));
     }
     let name = head
         .lines()
@@ -336,7 +336,7 @@ fn call<T: serde::de::DeserializeOwned>(
     if (200..300).contains(&code) {
         serde_json::from_slice(body).map_err(|e| format!("bad status JSON: {e}"))
     } else {
-        Err(friendly(serde_json::from_slice::<ApiError>(body).map(|e| e.error).unwrap_or_else(|_| format!("HTTP {code}"))))
+        Err(api_error(body, code))
     }
 }
 
@@ -360,6 +360,20 @@ fn open_browser(url: &str) {
 
 /// The daemon words its errors in English for logs and the CLI; the common
 /// ones are reworded and translated here, the rest shown as they are
+/// The daemon's error in the user's language: a known message, else why
+/// the server could not be reached (two lines), else as it came
+fn api_error(body: &[u8], code: u16) -> String {
+    let Ok(e) = serde_json::from_slice::<ApiError>(body) else { return format!("HTTP {code}") };
+    match e.reason.filter(|_| !known(&e.error)).and_then(crate::ui::reason_text) {
+        Some((what, hint)) => format!("{what}\n{hint}"),
+        None => friendly(e.error),
+    }
+}
+
+fn known(msg: &str) -> bool {
+    friendly(msg.to_string()) != msg
+}
+
 fn friendly(msg: String) -> String {
     let known: [(&str, &'static str); 9] = [
         ("invalid, used or expired auth key", "The invite code or auth key is wrong, already used, or expired."),

@@ -240,10 +240,33 @@ jobs:
           # retail.app in Applications, which opens the menu bar app's popup
           plutil -lint /Applications/retail.app/Contents/Info.plist
           test -x /Applications/retail.app/Contents/MacOS/retail
-          grep -q 'retail-tray.*--show' /Applications/retail.app/Contents/MacOS/retail
+          grep -q "/Library/retail/bin/retail-tray' --show" /Applications/retail.app/Contents/MacOS/retail
           test -s /Applications/retail.app/Contents/Resources/retail.icns
+          # The programs in the folder only root can change, links on the PATH
+          PLIST=/Library/LaunchDaemons/dev.retail.retaild.plist
+          test "$(stat -f %Su /Library/retail/bin)" = root
+          grep -q '<string>/Library/retail/bin/retaild</string>' $PLIST
+          test -L /usr/local/bin/retail && test -L /usr/local/bin/retaild
+          # An install from before 1.0.2: the programs in /usr/local/bin, which
+          # is the runner user's here as Homebrew leaves it. retaild moves them
+          # and has launchd run the moved one.
+          sudo launchctl bootout system $PLIST
+          for f in retaild retail retail-tray; do sudo rm /usr/local/bin/$f && sudo cp /Library/retail/bin/$f /usr/local/bin/$f; done
+          sudo rm -r /Library/retail
+          sudo sed -i '' 's|/Library/retail/bin/retaild|/usr/local/bin/retaild|' $PLIST
+          sudo launchctl bootstrap system $PLIST
+          for i in $(seq 90); do
+            pgrep -f '^/Library/retail/bin/retaild' >/dev/null && /usr/local/bin/retail status >/dev/null 2>&1 && break
+            sleep 1
+          done
+          pgrep -fl retaild
+          grep -q '<string>/Library/retail/bin/retaild</string>' $PLIST
+          test -L /usr/local/bin/retaild && test "$(stat -f %Su /Library/retail/bin/retaild)" = root
+          sudo grep "moving the programs" "/Library/Application Support/retail/retaild.log"
+          /usr/local/bin/retail status
           sudo /usr/local/bin/retail-tray --uninstall --yes
           test ! -e /Applications/retail.app
+          test ! -e /Library/retail/bin/retaild && test ! -e /usr/local/bin/retaild && test ! -e /usr/local/bin/retail
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: installers-macos

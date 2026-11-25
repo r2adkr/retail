@@ -610,6 +610,8 @@ pub struct Engine {
     control_addr: Mutex<Option<SocketAddr>>,
     /// How the control connection reaches the server, while connected
     control_via: Mutex<Option<String>>,
+    /// Why the last try to reach the server failed, until one works
+    control_problem: Mutex<Option<retail_proto::api::ConnectionProblem>>,
     /// Checks handshake initiations' mac1 before the expensive part and,
     /// under load, makes senders prove their address with a cookie
     mac1: boringtun::noise::rate_limiter::RateLimiter,
@@ -710,6 +712,7 @@ impl Engine {
             stun_now: tokio::sync::Notify::new(),
             control_addr: Mutex::default(),
             control_via: Mutex::default(),
+            control_problem: Mutex::default(),
             names: RwLock::default(),
             mac1: boringtun::noise::rate_limiter::RateLimiter::new(&public, HANDSHAKE_RATE_LIMIT),
             self_dns_name: Mutex::default(),
@@ -1908,6 +1911,14 @@ impl Engine {
                 }
             }
         }
+    }
+
+    pub fn set_control_problem(&self, problem: Option<retail_proto::api::ConnectionProblem>) {
+        *self.control_problem.lock().unwrap() = problem;
+    }
+
+    pub fn control_problem(&self) -> Option<retail_proto::api::ConnectionProblem> {
+        self.control_problem.lock().unwrap().clone()
     }
 
     pub fn set_control_via(&self, via: Option<String>) {

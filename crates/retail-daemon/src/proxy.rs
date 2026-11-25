@@ -20,6 +20,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use retail_proto::api::FailReason::{Intercepted, Other, ProxyAuth, Refused, Timeout, Unreachable};
+
+use crate::failure::tagged;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use retail_control::BoxIo;
@@ -115,7 +118,8 @@ impl Proxy {
                     }, true)
                     .await?;
                 if !(200..300).contains(&resp.status) {
-                    bail!("proxy {} refused CONNECT {target}: HTTP {}", self.label(), resp.status);
+                    // The network's policy, answering in the server's place
+                    return Err(tagged(Intercepted, format!("proxy {} refused CONNECT {target}: HTTP {}", self.label(), resp.status)));
                 }
                 Ok(io)
             }
@@ -173,20 +177,23 @@ impl Proxy {
                 basic.clone().unwrap_or_default()
             } else {
                 if !self.sign_in && crate::sspi::available() && ["Negotiate", "NTLM"].into_iter().any(|s| pick(s).is_some()) {
-                    bail!(
+                    return Err(tagged(ProxyAuth, format!(
                         "proxy {} asks for the Windows sign-in, which retail gives only to proxies in this computer's settings \
                          or set by an administrator (`retail set --proxy` in an administrator terminal)",
                         self.label()
-                    );
+                    )));
                 }
-                bail!("proxy {} needs a sign-in retail cannot give (set one with `retail set --proxy http://user:password@host:port`)", self.label());
+                return Err(tagged(
+                    ProxyAuth,
+                    format!("proxy {} needs a sign-in retail cannot give (set one with `retail set --proxy http://user:password@host:port`)", self.label()),
+                ));
             };
             auth = Some(next);
             if resp.close {
                 io = Box::new(self.dial().await?);
             }
         }
-        bail!("proxy {} kept asking for a sign-in", self.label())
+        Err(tagged(ProxyAuth, format!("proxy {} kept asking for a sign-in", self.label())))
     }
 }
 
@@ -206,10 +213,10 @@ async fn socks5(mut tcp: tokio::net::TcpStream, p: &Proxy, host: &str, port: u16
             tcp.write_all(&m).await?;
             tcp.read_exact(&mut r).await?;
             if r[1] != 0 {
-                bail!("SOCKS5 proxy {} rejected the user name or password", p.label());
+                return Err(tagged(ProxyAuth, format!("SOCKS5 proxy {} rejected the user name or password", p.label())));
             }
         }
-        _ => bail!("SOCKS5 proxy {} offers no usable sign-in", p.label()),
+        _ => return Err(tagged(ProxyAuth, format!("SOCKS5 proxy {} offers no usable sign-in", p.label()))),
     }
     let mut req = vec![5, 1, 0];
     match host.parse::<std::net::IpAddr>() {
@@ -232,7 +239,15 @@ async fn socks5(mut tcp: tokio::net::TcpStream, p: &Proxy, host: &str, port: u16
     let mut head = [0u8; 4];
     tcp.read_exact(&mut head).await?;
     if head[1] != 0 {
-        bail!("SOCKS5 proxy {} could not reach {host}:{port} (code {})", p.label(), head[1]);
+        // 2: not allowed by the proxy's rules, 5: refused by the server
+        let reason = match head[1] {
+            2 => Intercepted,
+            3 | 4 => Unreachable,
+            5 => Refused,
+            6 => Timeout,
+            _ => Other,
+        };
+        return Err(tagged(reason, format!("SOCKS5 proxy {} could not reach {host}:{port} (code {})", p.label(), head[1])));
     }
     let skip = match head[3] {
         1 => 4,

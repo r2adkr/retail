@@ -14,6 +14,8 @@ pub const WIDTH: f32 = 440.0;
 const PAD: f32 = 24.0;
 const FIELD_H: f32 = 36.0;
 const BUTTON_H: f32 = 34.0;
+/// The line under the first field
+const HINT_H: f32 = 18.0;
 
 pub const SERVER: usize = 0;
 pub const AUTH_KEY: usize = 1;
@@ -80,6 +82,8 @@ pub struct Settings {
     pub server_scroll: usize,
     /// A login or logout is in flight
     pub busy: Option<Instant>,
+    /// "Check now" is waiting for the release list
+    pub checking: Option<Instant>,
     /// Result line under the server card: (text, is_error)
     pub message: Option<(String, bool)>,
     /// First click on "Log out" arms it, and a second click within 4 s confirms
@@ -99,7 +103,7 @@ impl Settings {
             lang_open: false,
             cursor: None,
             inputs: [
-                TextInput::new("retail1.… or https://vpn.example.com", false),
+                TextInput::new("retail1.…", false),
                 TextInput::new("rtl-auth-…", true),
                 TextInput::new("This computer's name", false),
             ],
@@ -109,6 +113,7 @@ impl Settings {
             server_menu: None,
             server_scroll: 0,
             busy: None,
+            checking: None,
             message: None,
             confirm_logout: None,
             daemon: Default::default(),
@@ -164,6 +169,21 @@ impl Settings {
         self.busy.is_some_and(|t| t.elapsed() < Duration::from_secs(45))
     }
 
+    pub fn is_checking(&self) -> bool {
+        self.checking.is_some_and(|t| t.elapsed() < Duration::from_secs(45))
+    }
+
+    /// A server address instead of an invite code also needs its auth key
+    fn with_auth_key(&self) -> bool {
+        let first = self.inputs[SERVER].trimmed();
+        first.starts_with("https://") || first.starts_with("http://")
+    }
+
+    /// The form's fields in order, the auth key only when it is needed
+    pub fn form_fields(&self) -> &'static [usize] {
+        if self.with_auth_key() { &[SERVER, AUTH_KEY, DEVICE] } else { &[SERVER, DEVICE] }
+    }
+
     pub fn logout_armed(&self) -> bool {
         self.confirm_logout.is_some_and(|t| t.elapsed() < Duration::from_secs(4))
     }
@@ -184,7 +204,7 @@ impl Settings {
 
     fn card_h(&self) -> f32 {
         match &self.view {
-            View::Status(_) if self.show_form() => 16.0 + 3.0 * (20.0 + FIELD_H + 14.0) + BUTTON_H + 18.0,
+            View::Status(_) if self.show_form() => 16.0 + self.form_fields().len() as f32 * (20.0 + FIELD_H + 14.0) + HINT_H + BUTTON_H + 18.0,
             View::Status(_) if self.show_list() => 8.0 + self.servers().len().min(MAX_ROWS) as f32 * ROW_H + 14.0 + BUTTON_H + 18.0,
             View::Status(_) => 16.0 + 2.0 * 50.0 + BUTTON_H + 26.0,
             // Room for the start button, or for the progress bar
@@ -202,7 +222,7 @@ impl Settings {
     pub fn height(&self) -> f32 {
         // Mirrors `render`: title, then the sections (label 14 + content),
         // 40 between sections, 24 bottom padding
-        let message = if self.message.is_some() { 30.0 } else { 0.0 };
+        let message = self.message.as_ref().map_or(0.0, |(m, _)| 30.0 + 18.0 * m.matches('\n').count() as f32);
         let network = if self.show_network() { 40.0 + 14.0 + NETWORK_H } else { 0.0 };
         76.0 + (14.0 + self.card_h() + message) + network + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + self.about_h()) + 24.0
     }
@@ -257,8 +277,12 @@ impl Settings {
         y += card_h;
         if let Some((msg, error)) = &self.message {
             let color = if *error { t.red } else { t.accent };
-            c.text(msg, PAD + 4.0, y + 22.0, 12.5, Weight::Regular, color, Some(WIDTH - 2.0 * PAD - 8.0));
-            y += 30.0;
+            // A second line is the hint under an error
+            for (i, line) in msg.lines().enumerate() {
+                let color = if i == 0 { color } else { t.dim };
+                c.text(line, PAD + 4.0, y + 22.0, 12.5, Weight::Regular, color, Some(WIDTH - 2.0 * PAD - 8.0));
+                y += if i == 0 { 30.0 } else { 18.0 };
+            }
         }
 
         if self.show_network()
@@ -471,9 +495,11 @@ impl Settings {
         } else {
             (tr("Not checked yet").to_string(), tr("retail looks for new versions every few hours.").to_string(), t.text)
         };
-        let busy = self.is_busy() || u.installing;
+        let busy = self.is_checking() || u.installing;
         let (label, style, action) = if u.available {
             (tr("Update now"), Style::Primary, SettingsAction::InstallUpdate)
+        } else if self.is_checking() {
+            (tr("Checking…"), Style::Secondary, SettingsAction::CheckUpdate)
         } else {
             (tr("Check now"), Style::Secondary, SettingsAction::CheckUpdate)
         };
@@ -558,12 +584,27 @@ impl Settings {
     }
 
     fn form(&mut self, c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32) {
-        let labels = [tr("Invite code or server address"), tr("Auth key (not needed with an invite code)"), tr("Device name (optional)")];
+        let auth = self.with_auth_key();
         let mut fy = y;
-        for (i, label) in labels.iter().enumerate() {
+        for &i in self.form_fields() {
+            let label = match i {
+                SERVER if auth => tr("Server address"),
+                SERVER => tr("Invite code"),
+                AUTH_KEY => tr("Auth key"),
+                _ => tr("Device name (optional)"),
+            };
             c.text(label, x, fy + 13.0, 12.0, Weight::Regular, t.dim, None);
             self.field(c, t, i, x, fy + 20.0, w);
             fy += 20.0 + FIELD_H + 14.0;
+            if i == SERVER {
+                let hint = if auth {
+                    tr("Joining with the server's auth key instead of an invite code.")
+                } else {
+                    tr("From the network's administrator. It starts with retail1.")
+                };
+                c.text(hint, x, fy + 2.0, 11.5, Weight::Regular, t.dim, Some(w));
+                fy += HINT_H;
+            }
         }
         let busy = self.is_busy();
         let label = if busy { tr("Connecting…") } else { tr("Connect") };

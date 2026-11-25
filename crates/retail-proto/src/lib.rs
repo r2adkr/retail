@@ -6,6 +6,7 @@ pub mod acl;
 pub mod api;
 pub mod invite;
 pub mod package;
+pub mod programs;
 pub mod key;
 pub mod listener;
 pub mod local;

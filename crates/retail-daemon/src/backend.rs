@@ -744,6 +744,7 @@ impl Backend {
             update: self.updater.status(),
             key_expires_at: engine.and_then(|e| e.key_state().0),
             key_expired: engine.is_some_and(|e| e.key_state().1),
+            problem: engine.filter(|e| !e.control_connected.load(Ordering::Relaxed)).and_then(|e| e.control_problem()),
         }
     }
 }

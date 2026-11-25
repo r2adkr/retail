@@ -110,6 +110,62 @@ pub struct Node {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
+    /// Why the server could not be reached, when that is what failed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<FailReason>,
+}
+
+/// Why a connection to the server failed, as far as this device can tell
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailReason {
+    /// No answer at all: something drops the traffic, or the server's computer is off
+    Timeout,
+    /// Nothing listens there (or a firewall says so)
+    Refused,
+    /// Cut once made, which networks that block VPNs do
+    Reset,
+    /// The server's name could not be looked up
+    Dns,
+    /// This device has no route there
+    Unreachable,
+    /// Something else answered in the server's place (TLS failed)
+    Intercepted,
+    /// The server turned this device away (HTTP 401/403)
+    Rejected,
+    /// A proxy wants a sign-in retail cannot give
+    ProxyAuth,
+    /// The server answered with an error
+    ServerError,
+    /// Anything else, a newer daemon's reasons included
+    #[serde(other)]
+    Other,
+}
+
+impl FailReason {
+    /// In a line, for the command line
+    pub fn summary(self) -> &'static str {
+        match self {
+            FailReason::Timeout => "no answer: the network may block it, or the server is off",
+            FailReason::Refused => "refused: is retail running on the server's computer?",
+            FailReason::Reset => "cut on the way: the network may block VPN connections",
+            FailReason::Dns => "the server's name could not be looked up",
+            FailReason::Unreachable => "no route to the server: is this device online?",
+            FailReason::Intercepted => "something answered in the server's place (a filtering proxy or a sign-in page)",
+            FailReason::Rejected => "the server turned this device away: ask for a new invite",
+            FailReason::ProxyAuth => "the network's proxy wants a sign-in (retail set --proxy)",
+            FailReason::ServerError => "the server answered with an error",
+            FailReason::Other => "could not reach the server",
+        }
+    }
+}
+
+/// The control connection is down, and why
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionProblem {
+    pub reason: FailReason,
+    /// The error itself, in English
+    pub detail: String,
 }
 
 /// `POST /up`
@@ -363,6 +419,9 @@ pub struct StatusResponse {
     /// The key expired: the administrator must renew it
     #[serde(default)]
     pub key_expired: bool,
+    /// Why the server cannot be reached, while it cannot
+    #[serde(default)]
+    pub problem: Option<ConnectionProblem>,
 }
 
 /// New official releases, as the daemon sees them
@@ -626,6 +685,17 @@ mod tests {
         let s = serde_json::to_string(&new).unwrap();
         assert!(s.contains(r#""stage":"downloading""#), "{s}");
         assert_eq!(serde_json::from_str::<UpdateStatus>(&s).unwrap(), new);
+    }
+
+    #[test]
+    fn fail_reasons_are_optional_and_open() {
+        let old: ApiError = serde_json::from_str(r#"{"error":"x"}"#).unwrap();
+        assert_eq!(old.reason, None);
+        // A reason this version does not know
+        let new: ApiError = serde_json::from_str(r#"{"error":"x","reason":"solar_flare"}"#).unwrap();
+        assert_eq!(new.reason, Some(FailReason::Other));
+        let s = serde_json::to_string(&ApiError { error: "x".into(), reason: Some(FailReason::ProxyAuth) }).unwrap();
+        assert!(s.contains(r#""reason":"proxy_auth""#), "{s}");
     }
 
     #[test]
