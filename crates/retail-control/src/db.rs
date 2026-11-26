@@ -530,9 +530,11 @@ impl Db {
     }
 
     /// Exempts a device from key expiry, changing nothing else
-    pub fn keep_forever(&self, id: i64) -> Result<()> {
+    /// Only while id still names the device with key: an id kept from an
+    /// earlier database may belong to someone else now
+    pub fn keep_forever(&self, id: i64, key: &Key) -> Result<()> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id)
+        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id && n.node_key == *key)
             && !n.no_expiry
         {
             n.no_expiry = true;
@@ -867,6 +869,20 @@ mod tests {
         assert!(matches!(db.register(&req(&new, 6)).await, Err(RegisterError::InvalidAuthKey)), "revoked");
         let rows = db.list_preauth().await.unwrap();
         assert!(rows.iter().any(|r| r.name.as_deref() == Some("work") && r.uses == 1 && r.expires_at == NEVER));
+    }
+
+    #[tokio::test]
+    async fn keeping_forever_needs_the_same_device() {
+        let (db, _path) = temp_db().await;
+        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        db.set_expiry_settings(Some(30), None).unwrap();
+        let a = db.register(&req(&key, 2)).await.unwrap();
+        let exp = |id| db.inner.lock().unwrap().data.nodes.iter().find(|n| n.id == id).unwrap().expires_at;
+        let theirs = db.inner.lock().unwrap().data.nodes[0].node_key;
+        db.keep_forever(a.node_id, &Key([0xee; 32])).unwrap();
+        assert!(exp(a.node_id).is_some(), "an id from another database names someone else");
+        db.keep_forever(a.node_id, &theirs).unwrap();
+        assert_eq!(exp(a.node_id), None);
     }
 
     #[tokio::test]

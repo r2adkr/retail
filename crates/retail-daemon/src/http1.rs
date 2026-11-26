@@ -7,6 +7,8 @@ use tokio::io::AsyncReadExt;
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 1 << 20;
+/// A chunk-size or trailer line
+const MAX_LINE: usize = 4096;
 
 #[derive(Debug, Default)]
 pub struct Response {
@@ -105,31 +107,42 @@ async fn read_chunked(io: &mut BoxIo, mut data: Vec<u8>) -> Result<(Vec<u8>, Vec
         data.extend_from_slice(&chunk[..n]);
         Ok(())
     };
-    loop {
-        let eol = loop {
-            if let Some(i) = data.windows(2).position(|w| w == b"\r\n") {
-                break i;
+    // Finds the end of a line, scanning only new bytes and refusing an endless one
+    let line = async |data: &mut Vec<u8>, io: &mut BoxIo| -> Result<usize> {
+        let mut from = 0;
+        loop {
+            if let Some(i) = data[from..].windows(2).position(|w| w == b"\r\n") {
+                return Ok(from + i);
             }
-            fill(&mut data, io).await?;
-        };
+            if data.len() > MAX_LINE {
+                bail!("HTTP chunk line too long");
+            }
+            from = data.len().saturating_sub(1);
+            fill(data, io).await?;
+        }
+    };
+    let mut trailers = 0;
+    loop {
+        let eol = line(&mut data, io).await?;
         let size_str = std::str::from_utf8(&data[..eol])?.split(';').next().unwrap_or("").trim().to_string();
         let size = usize::from_str_radix(&size_str, 16).context("malformed chunk size")?;
         data.drain(..eol + 2);
         if size == 0 {
             // Trailers end with an empty line
             loop {
-                if let Some(i) = data.windows(2).position(|w| w == b"\r\n") {
-                    let line_empty = i == 0;
-                    data.drain(..i + 2);
-                    if line_empty {
-                        return Ok((body, data));
-                    }
-                    continue;
+                let i = line(&mut data, io).await?;
+                data.drain(..i + 2);
+                if i == 0 {
+                    return Ok((body, data));
                 }
-                fill(&mut data, io).await?;
+                trailers += i + 2;
+                if trailers > MAX_HEAD {
+                    bail!("HTTP trailers too long");
+                }
             }
         }
-        if body.len() + size > MAX_BODY {
+        // Checked one at a time: a size near usize::MAX must not wrap the sum
+        if size > MAX_BODY - body.len() {
             bail!("HTTP response too large");
         }
         while data.len() < size + 2 {
@@ -169,5 +182,20 @@ mod tests {
         let mut rest = Vec::new();
         io.read_to_end(&mut rest).await.unwrap();
         assert_eq!(rest, b"TLS");
+    }
+
+    #[tokio::test]
+    async fn hostile_chunks_fail_cleanly() {
+        let huge = feed(b"HTTP/1.1 407 X\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nA\r\nffffffffffffffff\r\nxxxx").await;
+        assert!(read_response(huge, true).await.is_err());
+
+        // A size line that never ends
+        let (a, mut b) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let _ = b.write_all(b"HTTP/1.1 407 X\r\nTransfer-Encoding: chunked\r\n\r\n").await;
+            let _ = b.write_all(&[b'1'; 64 * 1024]).await;
+        });
+        let err = read_response(Box::new(a), true).await.err().unwrap();
+        assert!(err.to_string().contains("too long"), "{err}");
     }
 }

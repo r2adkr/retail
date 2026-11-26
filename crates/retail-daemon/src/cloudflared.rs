@@ -162,7 +162,7 @@ async fn supervise(dir: PathBuf, origin: u16, status: Arc<Mutex<TunnelStatus>>, 
         let mut missed = 0;
         while missed < 3 {
             tokio::time::sleep(CHECK_EVERY).await;
-            missed = if quick_host(metrics).await.is_some() { 0 } else { missed + 1 };
+            missed = if owned_host(metrics).await.is_some() { 0 } else { missed + 1 };
         }
         tracing::warn!("internet tunnel: cloudflared stopped answering; starting it again");
         end_recorded(&dir).await;
@@ -176,8 +176,26 @@ async fn adopt(dir: &Path, origin: u16) -> Option<(u16, String)> {
     if run.origin != origin {
         return None;
     }
-    let host = quick_host(run.metrics).await?;
+    // The recorded process, not whatever now listens on its old port
+    let exe = std::env::var_os("RETAIL_CLOUDFLARED").map_or_else(|| program(dir), PathBuf::from);
+    let alive = tokio::task::spawn_blocking(move || is(run.pid, &exe)).await.unwrap_or(false);
+    if !alive {
+        return None;
+    }
+    let host = owned_host(run.metrics).await?;
     Some((run.metrics, format!("https://{host}")))
+}
+
+/// `quick_host` from a listener of retaild's own kind (root or SYSTEM): once
+/// cloudflared is gone, another user's program can take its port
+async fn owned_host(metrics: u16) -> Option<String> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], metrics));
+    let owned = tokio::task::spawn_blocking(move || retail_proto::listener::check(addr)).await.ok()?;
+    if let Err(e) = owned {
+        tracing::warn!("internet tunnel: the program on cloudflared's port is not ours: {e}");
+        return None;
+    }
+    quick_host(metrics).await
 }
 
 async fn launch(dir: &Path, origin: u16) -> Result<(u16, String)> {
@@ -215,7 +233,7 @@ async fn launch(dir: &Path, origin: u16) -> Result<(u16, String)> {
             let _ = std::fs::remove_file(dir.join("run.json"));
             bail!("cloudflared ended ({code}): {}", last_lines(&log));
         }
-        if let Some(host) = quick_host(metrics).await {
+        if let Some(host) = owned_host(metrics).await {
             // Reaped by whoever is its parent once this retaild is gone;
             // while it runs, a thread waits so it does not linger as a zombie
             std::thread::spawn(move || child.wait());
@@ -255,7 +273,6 @@ fn valid_host(host: &str) -> bool {
         && host
             .strip_suffix(".trycloudflare.com")
             .is_some_and(|sub| !sub.is_empty() && sub.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-        && host.len() < 254
         && host.contains('.')
         && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
@@ -524,5 +541,27 @@ mod tests {
         assert_eq!(quick_host(port).await, None, "not up yet");
         assert_eq!(quick_host(port).await.as_deref(), Some("sunny-river-1234.trycloudflare.com"));
         assert_eq!(quick_host(port).await, None, "nothing listening");
+    }
+
+    /// A recorded cloudflared that is gone: whoever answers on its port is not taken over
+    #[tokio::test]
+    async fn does_not_adopt_a_stranger_on_the_port() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metrics = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else { return };
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf).await;
+                let body = r#"{"hostname":"someone-else-1234.trycloudflare.com"}"#;
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("retail-cf-adopt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = Run { pid: std::process::id(), metrics, origin: 8443 };
+        std::fs::write(dir.join("run.json"), serde_json::to_vec(&run).unwrap()).unwrap();
+        assert_eq!(adopt(&dir, 8443).await, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

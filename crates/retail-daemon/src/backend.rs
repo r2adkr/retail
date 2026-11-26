@@ -165,6 +165,10 @@ impl Backend {
             Some(code) => {
                 let invite = retail_proto::invite::Invite::decode(code).map_err(|e| anyhow!(e))?;
                 req.auth_key = Some(invite.key.clone());
+                // The address ends up in terminals and status: host:port, nothing else
+                if invite.addrs.iter().any(|a| a.chars().any(|c| c.is_control() || c.is_whitespace() || c == '/')) {
+                    anyhow::bail!("the invite code is damaged");
+                }
                 let pin = match &invite.pin {
                     Some(p) => Some(retail_proto::invite::decode_pin(p).context("the invite code is damaged")?),
                     None => None,
@@ -223,10 +227,10 @@ impl Backend {
 
         let registered_here = p.token.is_some() && p.server.as_deref() == Some(server.as_str());
         if registered_here
-            && req.auth_key.is_none()
+            && req.invite.as_deref().is_none_or(|s| s.trim().is_empty())
             && let Some(t) = p.target()
         {
-            // Keep the pin and addresses from the original invite
+            // Keep the pin and addresses from the original invite, also with a new key
             target = t;
         }
         if !registered_here || req.auth_key.is_some() {
@@ -243,9 +247,11 @@ impl Backend {
             if token.is_some() {
                 // A stored token goes only to the server it belongs to: one that
                 // proves the stored pin, or holds the REALITY key saved with the
-                // registration. REALITY does not check the pin, so a REALITY key
-                // named by this invite (anyone can copy a pin into an invite)
-                // must not carry it.
+                // registration. An invite can name any pin and any REALITY key
+                // next to this server's address, so neither may come from it.
+                if target.pin.as_ref().map(retail_proto::invite::encode_pin) != p.server_pin {
+                    anyhow::bail!("this invite names a different server key than the one {server} had when this device joined");
+                }
                 invite_reality = p.server_reality.clone();
                 target.reality = invite_reality.as_ref().and_then(crate::reality::Params::from_invite);
             }
@@ -311,6 +317,7 @@ impl Backend {
         if let Some(server) = p.server.clone() {
             p.saved.retain(|s| s.server != server);
         }
+        let _ = std::fs::remove_dir_all(helper_dir(&self.opts.state_dir, &p));
         p.clear_current();
         p.save(&self.state_path)?;
         self.set_error(None);
@@ -478,10 +485,10 @@ impl Backend {
             if p.server.as_deref() != Some(own.as_str()) {
                 return;
             }
-            p.node_id
+            p.node_id.zip(p.public_key())
         };
-        if let Some(id) = id
-            && let Err(e) = self.host.keep_forever(id).await
+        if let Some((id, key)) = id
+            && let Err(e) = self.host.keep_forever(id, &key).await
         {
             tracing::debug!("exempting this device from key expiry: {e:#}");
         }
@@ -568,7 +575,7 @@ impl Backend {
         self.spawn(&mut tasks, "timers", engine.clone().timer_loop());
         self.spawn(&mut tasks, "magicdns", engine.clone().dns_loop());
         let mut graceful = JoinSet::new();
-        self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), self.opts.state_dir.join("helper-device"), stop.subscribe()));
+        self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), helper_dir(&self.opts.state_dir, p), stop.subscribe()));
         self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun));
         self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token));
         // While hosting, the router's mapping is this device's public endpoint
@@ -827,4 +834,60 @@ fn apply_exit_prefs(s: &mut Session, prefs: &Prefs) -> Result<()> {
     drop(gateway);
     s.engine.set_advertise_routes(prefs.advertise_routes.clone());
     result
+}
+
+/// The helper role's key and link secret, one set per registration: a network
+/// this device helped before must not be able to link to it for the next one
+fn helper_dir(state_dir: &std::path::Path, p: &Persisted) -> PathBuf {
+    let base = state_dir.join("helper-device");
+    // Shared by every network before 1.0.4
+    let _ = std::fs::remove_dir_all(base.join("tls"));
+    let _ = std::fs::remove_file(base.join("helper-secret"));
+    let id: String = p.public_key().map(|k| k.0[..8].iter().map(|b| format!("{b:02x}")).collect()).unwrap_or_default();
+    base.join(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_registration_has_its_own_helper_identity() {
+        let dir = std::path::Path::new("state");
+        let (mut a, mut b) = (Persisted::default(), Persisted::default());
+        a.ensure_private_key();
+        b.ensure_private_key();
+        assert_ne!(helper_dir(dir, &a), helper_dir(dir, &b));
+        assert_eq!(helper_dir(dir, &a), helper_dir(dir, &a.clone()));
+    }
+
+    /// An invite naming this server's address with another pin must not get the stored token
+    #[tokio::test]
+    async fn stored_token_needs_the_stored_pin() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir = std::env::temp_dir().join(format!("retail-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = serde_json::json!({
+            "server": format!("https://{addr}"),
+            "token": "stored-token",
+            "node_id": 5,
+            "server_pin": retail_proto::invite::encode_pin(&[7u8; 32]),
+        });
+        std::fs::write(dir.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        let b = Backend::new(Options { state_dir: dir.clone(), listen_port: 0, tun_name: None, memory_limit_mb: None }).unwrap();
+        let invite = retail_proto::invite::Invite {
+            addrs: vec![addr.to_string()],
+            pin: Some(retail_proto::invite::encode_pin(&[8u8; 32])),
+            key: "other".into(),
+            reality: None,
+            fronts: vec![],
+        }
+        .encode();
+        let err = b.up(UpRequest { invite: Some(invite), ..Default::default() }).await.unwrap_err();
+        assert!(format!("{err:#}").contains("different server key"), "{err:#}");
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "nothing may be sent to a server proving another pin");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

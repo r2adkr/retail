@@ -65,18 +65,48 @@ fn real_peer(peer: PeerAddr, headers: &HeaderMap) -> PeerAddr {
     }
 }
 
-/// An address, or for IPv6 its /64: one subscriber has a whole /64 to pick
-/// addresses from
-fn same_network(ip: std::net::IpAddr) -> std::net::IpAddr {
-    match ip.to_canonical() {
-        std::net::IpAddr::V6(v6) => {
-            let s = v6.segments();
-            std::net::IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+use crate::net::same_network;
+
+/// WebSocket tunnels open at once, in all and per client address: each
+/// holds buffers and a connection on the listener
+const MAX_WEBSOCKETS: usize = 1024;
+const MAX_WEBSOCKETS_PER_IP: usize = 32;
+static WEBSOCKETS: Mutex<Option<std::collections::HashMap<std::net::IpAddr, usize>>> = Mutex::new(None);
+
+/// One open WebSocket tunnel, counted until dropped
+struct WebsocketSlot(std::net::IpAddr);
+
+impl WebsocketSlot {
+    fn take(ip: std::net::IpAddr) -> Option<Self> {
+        let ip = same_network(ip);
+        let mut guard = WEBSOCKETS.lock().unwrap();
+        let map = guard.get_or_insert_with(Default::default);
+        let total: usize = map.values().sum();
+        let mine = map.entry(ip).or_insert(0);
+        if *mine >= MAX_WEBSOCKETS_PER_IP || total >= MAX_WEBSOCKETS {
+            if *mine == 0 {
+                map.remove(&ip);
+            }
+            return None;
         }
-        v4 => v4,
+        *mine += 1;
+        Some(WebsocketSlot(ip))
     }
 }
 
+impl Drop for WebsocketSlot {
+    fn drop(&mut self) {
+        let mut guard = WEBSOCKETS.lock().unwrap();
+        if let Some(map) = guard.as_mut()
+            && let Some(n) = map.get_mut(&self.0)
+        {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.0);
+            }
+        }
+    }
+}
 fn no_store(status: StatusCode, body: impl IntoResponse) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], body).into_response()
 }
@@ -88,8 +118,12 @@ pub async fn websocket(
     ws: WebSocketUpgrade,
 ) -> Response {
     let peer = real_peer(peer, &headers);
+    let Some(slot) = WebsocketSlot::take(peer.0.ip()) else {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
+    };
     let ws = ws.max_message_size(MAX_MESSAGE).max_frame_size(MAX_MESSAGE).read_buffer_size(PIPE);
     ws.on_upgrade(move |socket| async move {
+        let _slot = slot;
         if let Some(pipe) = open(&state, peer).await {
             pump(socket, pipe).await;
         }
@@ -136,13 +170,13 @@ async fn pump(socket: WebSocket, pipe: DuplexStream) {
 
 pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): ConnectInfo<PeerAddr>, headers: HeaderMap) -> Response {
     let peer = real_peer(peer, &headers);
-    {
-        let mut polls = state.polls().lock().unwrap();
+    let mine = same_network(peer.0.ip());
+    let full = |polls: &mut std::collections::HashMap<String, Arc<PollSession>>| {
         polls.retain(|_, s| s.touched.lock().unwrap().elapsed() < POLL_IDLE);
-        let mine = same_network(peer.0.ip());
-        if polls.len() >= MAX_POLL_SESSIONS || polls.values().filter(|s| same_network(s.ip) == mine).count() >= MAX_POLL_SESSIONS_PER_IP {
-            return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
-        }
+        polls.len() >= MAX_POLL_SESSIONS || polls.values().filter(|s| same_network(s.ip) == mine).count() >= MAX_POLL_SESSIONS_PER_IP
+    };
+    if full(&mut state.polls().lock().unwrap()) {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
     }
     let Some(pipe) = open(&state, peer).await else {
         return no_store(StatusCode::SERVICE_UNAVAILABLE, "not ready");
@@ -157,7 +191,12 @@ pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): Connect
         writer: tokio::sync::Mutex::new(writer),
         touched: Mutex::new(Instant::now()),
     };
-    state.polls().lock().unwrap().insert(id.clone(), Arc::new(session));
+    // Checked again: other opens may have filled it while this one waited
+    let mut polls = state.polls().lock().unwrap();
+    if full(&mut polls) {
+        return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
+    }
+    polls.insert(id.clone(), Arc::new(session));
     no_store(StatusCode::OK, id)
 }
 
@@ -218,6 +257,17 @@ pub async fn poll_up(State(state): State<AppState>, Path(id): Path<String>, body
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_tunnels_are_capped_per_network() {
+        let ip = |i: u16| std::net::IpAddr::from([0x2001, 0xdb8, 0, 7, 0, 0, 0, i]);
+        let held: Vec<_> = (0..MAX_WEBSOCKETS_PER_IP).map(|i| WebsocketSlot::take(ip(i as u16)).unwrap()).collect();
+        assert!(WebsocketSlot::take(ip(999)).is_none(), "the rest of the /64 is the same source");
+        let other = WebsocketSlot::take("198.51.100.1".parse().unwrap());
+        assert!(other.is_some());
+        drop(held);
+        assert!(WebsocketSlot::take(ip(1)).is_some(), "slots come back");
+    }
 
     #[test]
     fn the_device_behind_cloudflared_is_trusted_from_loopback_only() {

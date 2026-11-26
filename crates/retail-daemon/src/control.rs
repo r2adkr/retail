@@ -72,13 +72,19 @@ fn poll_url(server: &str) -> Result<String> {
     Ok(format!("{ws}/api/v1/poll"))
 }
 
+/// The server's words, as shown in a terminal or the tray: no control
+/// characters (escape sequences) and not too long
+fn printable(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(300).collect()
+}
+
 pub async fn register(target: &Target, req: &RegisterRequest) -> Result<RegisterResponse> {
     let body = serde_json::to_vec(req)?;
     let resp = crate::http::post_json(target, "/api/v1/register", &body)
         .await
         .with_context(|| format!("contacting {}", target.url))?;
     if !(200..300).contains(&resp.status) {
-        let msg = serde_json::from_slice::<ApiError>(&resp.body).map(|e| e.error).unwrap_or_default();
+        let msg = serde_json::from_slice::<ApiError>(&resp.body).map(|e| printable(&e.error)).unwrap_or_default();
         bail!("registration rejected (HTTP {}): {msg}", resp.status);
     }
     serde_json::from_slice(&resp.body).context("parsing registration response")
@@ -305,6 +311,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_words_lose_escape_sequences() {
+        assert_eq!(printable("bad\u{1b}[2J\r\ninvite"), "bad[2Jinvite");
+        assert_eq!(printable(&"x".repeat(1000)).len(), 300);
+    }
 
     #[test]
     fn url_helpers() {

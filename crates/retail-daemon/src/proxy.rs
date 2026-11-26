@@ -44,6 +44,9 @@ pub struct Proxy {
     pub auth: Option<(String, String)>,
     /// May be given the Windows sign-in (see the module notes)
     pub sign_in: bool,
+    /// Windows: SID of the console user whose own settings named it; the
+    /// sign-in is then given only while that user is at the console
+    pub owner: Option<Vec<u8>>,
 }
 
 impl Proxy {
@@ -84,7 +87,7 @@ impl Proxy {
             Kind::Http => 8080,
             Kind::Socks5 => 1080,
         });
-        Some(Proxy { kind, host: host.to_string(), port, auth, sign_in: false })
+        Some(Proxy { kind, host: host.to_string(), port, auth, sign_in: false, owner: None })
     }
 
     /// For logs and status, without the password
@@ -170,7 +173,7 @@ impl Proxy {
                 && crate::sspi::available()
                 && self.sign_in
             {
-                let mut n = crate::sspi::Negotiator::new(scheme, &self.host)?;
+                let mut n = crate::sspi::Negotiator::new(scheme, &self.host, self.owner.clone())?;
                 let token = n.step(None)?;
                 negotiator = Some(n);
                 format!("{scheme} {}", B64.encode(token))
@@ -329,7 +332,13 @@ fn dedup(list: Vec<Proxy>) -> Vec<Proxy> {
     let mut out: Vec<Proxy> = Vec::new();
     for p in list {
         match out.iter_mut().find(|q| key(q) == key(&p)) {
-            Some(q) => q.sign_in |= p.sign_in,
+            Some(q) => {
+                // A source bound to no user (machine, administrator) wins over one user's settings
+                if p.sign_in && (!q.sign_in || p.owner.is_none()) {
+                    q.owner = p.owner.clone();
+                }
+                q.sign_in |= p.sign_in;
+            }
             None => out.push(p),
         }
     }
@@ -389,11 +398,12 @@ fn read_os_proxies() -> Vec<Proxy> {
     let list = take(info.lpszProxy);
     let _ = take(info.lpszProxyBypass);
     let mut out = if info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY { parse_proxy_list(&list) } else { Vec::new() };
-    if let Some(user) = crate::sspi::console_user_proxy() {
-        out.extend(parse_proxy_list(&user));
-    }
     // The machine's settings are an administrator's, the console user's their own
-    out.into_iter().map(|p| Proxy { sign_in: true, ..p }).collect()
+    out.iter_mut().for_each(|p| p.sign_in = true);
+    if let Some((user, sid)) = crate::sspi::console_user_proxy() {
+        out.extend(parse_proxy_list(&user).into_iter().map(|p| Proxy { sign_in: true, owner: sid.clone(), ..p }));
+    }
+    out
 }
 
 /// # Safety
@@ -470,7 +480,7 @@ mod tests {
             assert!(req.contains("Proxy-Authorization: Basic YTpi"), "{req}");
             s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\nhello").await.unwrap();
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: Some(("a".into(), "b".into())), sign_in: false };
+        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: Some(("a".into(), "b".into())), sign_in: false, owner: None };
         let mut io = p.connect("example.net", 443).await.unwrap();
         let mut got = [0u8; 5];
         io.read_exact(&mut got).await.unwrap();
@@ -487,7 +497,7 @@ mod tests {
             let _ = s.read(&mut buf).await.unwrap();
             s.write_all(b"HTTP/1.1 407 Auth\r\nProxy-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\n\r\n").await.unwrap();
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false };
+        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false, owner: None };
         let err = p.connect("example.net", 443).await.err().unwrap().to_string();
         assert!(err.contains("sign-in"), "{err}");
     }
@@ -510,7 +520,7 @@ mod tests {
             }
             requests
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false };
+        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false, owner: None };
         let err = p.connect("example.net", 443).await.err().unwrap().to_string();
         assert!(err.contains("sign-in"), "{err}");
         let requests = seen.await.unwrap();
@@ -519,5 +529,10 @@ mod tests {
         let trusted = dedup(vec![p.clone(), Proxy { sign_in: true, ..p.clone() }]);
         assert_eq!(trusted.len(), 1);
         assert!(trusted[0].sign_in);
+        // A user's own setting stays bound to that user unless an unbound source names it too
+        let user = Proxy { sign_in: true, owner: Some(vec![1, 2, 3]), ..p.clone() };
+        assert_eq!(dedup(vec![p.clone(), user.clone()])[0].owner, Some(vec![1, 2, 3]));
+        let machine = Proxy { sign_in: true, ..p.clone() };
+        assert_eq!(dedup(vec![user.clone(), machine])[0].owner, None);
     }
 }

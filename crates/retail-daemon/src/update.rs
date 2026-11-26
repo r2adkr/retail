@@ -213,14 +213,21 @@ pub fn spawn(backend: std::sync::Arc<crate::backend::Backend>) {
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_CHECK).await;
         loop {
-            let u = &backend.updater;
-            if u.status().supported
-                && u.check().await.is_ok()
-                && u.status().available
-                && backend.auto_update().await
-                && let Err(e) = u.install().await
-            {
-                tracing::warn!("automatic update failed: {e:#}");
+            // Each round in its own task: a panic in one ends that round, not updating for good
+            let backend = backend.clone();
+            let round = tokio::spawn(async move {
+                let u = &backend.updater;
+                if u.status().supported
+                    && u.check().await.is_ok()
+                    && u.status().available
+                    && backend.auto_update().await
+                    && let Err(e) = u.install().await
+                {
+                    tracing::warn!("automatic update failed: {e:#}");
+                }
+            });
+            if let Err(e) = round.await {
+                tracing::error!("automatic update check stopped: {e}");
             }
             tokio::time::sleep(CHECK_EVERY).await;
         }

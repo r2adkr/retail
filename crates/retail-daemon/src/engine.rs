@@ -128,6 +128,10 @@ const MAX_PACKET: usize = 65536;
 /// Handshake initiations per second that get a Diffie-Hellman without proof
 /// of their source address; past it senders must first echo a cookie
 const HANDSHAKE_RATE_LIMIT: u64 = 100;
+/// Initiations per second, with a burst, one address may have answered once
+/// it holds a cookie (as kernel WireGuard): a replayed one costs a Diffie-Hellman
+const HANDSHAKES_PER_SOURCE: f32 = 20.0;
+const HANDSHAKE_BURST: f32 = 5.0;
 /// boringtun derives session indices as `peer_index << 8 | n`, so peer indices are 24-bit
 const INDEX_MASK: u32 = 0x00FF_FFFF;
 const SOCKET_BUFFER: usize = 8 << 20;
@@ -665,6 +669,8 @@ pub struct Engine {
     /// Checks handshake initiations' mac1 before the expensive part and,
     /// under load, makes senders prove their address with a cookie
     mac1: boringtun::noise::rate_limiter::RateLimiter,
+    /// Per address: tokens left and when they were counted
+    handshake_sources: Mutex<HashMap<std::net::IpAddr, (f32, Instant)>>,
     /// MagicDNS names of this device and its peers
     names: RwLock<crate::magicdns::Names>,
     self_dns_name: Mutex<String>,
@@ -776,6 +782,7 @@ impl Engine {
             control_problem: Mutex::default(),
             names: RwLock::default(),
             mac1: boringtun::noise::rate_limiter::RateLimiter::new(&public, HANDSHAKE_RATE_LIMIT),
+            handshake_sources: Mutex::default(),
             self_dns_name: Mutex::default(),
             dns_queries,
             dns_queries_rx: Mutex::new(Some(dns_queries_rx)),
@@ -1283,7 +1290,7 @@ impl Engine {
         };
         let mut cookie = [0u8; 64];
         match self.mac1.verify_packet(addr.map(|a| a.ip()), dgram, &mut cookie) {
-            Ok(_) => true,
+            Ok(_) => addr.is_none_or(|a| self.source_allowed(a.ip())),
             Err(TunnResult::WriteToNetwork(reply)) => {
                 if let Some(addr) = addr {
                     self.send_now(reply, addr);
@@ -1292,6 +1299,15 @@ impl Engine {
             }
             Err(_) => false,
         }
+    }
+
+    fn source_allowed(&self, ip: std::net::IpAddr) -> bool {
+        let now = Instant::now();
+        let mut sources = self.handshake_sources.lock().unwrap();
+        if sources.len() > 4096 {
+            sources.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(1));
+        }
+        take_token(sources.entry(ip).or_insert((HANDSHAKE_BURST, now)), now)
     }
 
     fn lookup_incoming(&self, pkt: &[u8]) -> Option<Arc<Peer>> {
@@ -1886,11 +1902,17 @@ impl Engine {
         let forward = self.forward.read().unwrap().clone();
         let own_routes = forward.as_ref().map(|_| self.own_routes.read().unwrap().clone()).unwrap_or_else(|| Arc::from(Vec::new()));
         let here = self.here(&own_routes);
+        // Our sockets would reach networks other peers route back through the
+        // tunnel, as this device: one peer's grant is not another's
+        let routed: Vec<Ipv4Net> = match forward {
+            Some(_) => self.peers.read().unwrap().routes.iter().map(|(r, _)| *r).collect(),
+            None => Vec::new(),
+        };
         // Forwarding without the system's NAT: our stack takes what is not for this device
         let keep = |b: &mut [u8]| match &forward {
             Some(f) if b.len() >= 20 && b[16..20] != self.self_ip.octets() => {
                 let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
-                f.inbound(b, here.forwarded(dst))
+                f.inbound(b, here.forwarded(dst) && !routed.iter().any(|r| r.contains(dst)))
             }
             Some(f) => f.inbound(b, false),
             None => true,
@@ -2470,9 +2492,29 @@ fn local_endpoints(port: u16, ipv6: bool) -> Vec<SocketAddr> {
     eps
 }
 
+/// A token bucket of `HANDSHAKES_PER_SOURCE` with room for `HANDSHAKE_BURST`
+fn take_token((tokens, at): &mut (f32, Instant), now: Instant) -> bool {
+    *tokens = (*tokens + now.duration_since(*at).as_secs_f32() * HANDSHAKES_PER_SOURCE).min(HANDSHAKE_BURST);
+    *at = now;
+    if *tokens < 1.0 {
+        return false;
+    }
+    *tokens -= 1.0;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_source_gets_a_few_handshakes_at_once() {
+        let t0 = Instant::now();
+        let mut bucket = (HANDSHAKE_BURST, t0);
+        assert_eq!((0..100).filter(|_| take_token(&mut bucket, t0)).count(), HANDSHAKE_BURST as usize);
+        assert!(take_token(&mut bucket, t0 + Duration::from_millis(60)));
+        assert!(!take_token(&mut bucket, t0 + Duration::from_millis(60)));
+    }
 
     #[test]
     fn address_helpers() {

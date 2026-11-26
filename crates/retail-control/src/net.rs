@@ -26,3 +26,12 @@ pub fn bind_tcp(addr: SocketAddr) -> io::Result<std::net::TcpListener> {
     sock.listen(1024)?;
     Ok(sock.into())
 }
+
+/// An address, or for IPv6 its /64: one subscriber has a whole /64 to pick
+/// addresses from, so per-source limits count it once
+pub(crate) fn same_network(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip.to_canonical() {
+        std::net::IpAddr::V6(v6) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1))),
+        v4 => v4,
+    }
+}

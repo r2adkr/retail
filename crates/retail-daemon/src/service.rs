@@ -55,6 +55,14 @@ pub enum Cmd {
 /// tunnel's cloudflared, which outlives the daemon on purpose.
 fn remove_system_changes(state_dir: Option<&Path>) {
     let state = state_dir.map_or_else(crate::state::default_state_dir, Path::to_path_buf);
+    // Router mappings a killed daemon left open: no next start would close them
+    let dir = state.clone();
+    let _ = std::thread::spawn(move || {
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            rt.block_on(crate::portmap::init(&dir));
+        }
+    })
+    .join();
     crate::cloudflared::end_recorded_now(&state.join("tunnel"));
     // The downloaded program, not data
     let _ = std::fs::remove_dir_all(state.join("tunnel"));

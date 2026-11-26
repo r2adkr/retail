@@ -223,7 +223,12 @@ impl Setup {
         let mut x = if self.os == Os::Macos { 84.0 } else { PAD };
         for (i, name) in names.iter().enumerate() {
             let on = i <= current;
-            let color = if on { t.accent } else { t.gray };
+            // The step that failed shows it, not progress
+            let color = match (&self.step, on, i == current) {
+                (Step::Failed(_), _, true) => t.red,
+                (_, true, _) => t.accent,
+                _ => t.gray,
+            };
             c.circle(x + 4.0, 32.0, 4.0, color);
             let weight = if i == current { Weight::Semibold } else { Weight::Regular };
             let w = c.text(name, x + 14.0, 36.5, 12.0, weight, if i == current { t.text } else { t.dim }, None);

@@ -251,6 +251,22 @@ impl Drop for ClientRoutes {
 /// Forwards and NATs traffic from the mesh until dropped: to the internet
 /// (an exit node), and to the networks this device routes. One set of rules
 /// for both, so neither undoes the other.
+/// NAT towards each routed network, and the same one-way policy as Linux:
+/// forwarding is host-wide, so only flows the mesh started may go out into
+/// the tunnel, and nobody off the tunnel may claim a mesh address
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_pf_rules(tun: &str, routes: &[(Ipv4Net, String)]) -> String {
+    let mut rules = String::new();
+    for (r, iface) in routes {
+        rules.push_str(&format!("nat on {iface} inet from 100.64.0.0/10 to {r} -> ({iface})\n"));
+    }
+    rules.push_str(&format!("block drop in quick on ! {tun} inet from 100.64.0.0/10 to any\n"));
+    rules.push_str(&format!("pass in quick on {tun} inet from 100.64.0.0/10 to any keep state\n"));
+    // Replies to the flows above match their state and never reach this
+    rules.push_str(&format!("block drop out quick on {tun} inet from ! 100.64.0.0/10 to any\n"));
+    rules
+}
+
 pub struct Gateway {
     #[allow(dead_code)]
     tun: String,
@@ -329,6 +345,8 @@ impl Gateway {
         let ipt = |args: &[&str]| run("iptables", args);
         // First in FORWARD because Docker and firewalls often set DROP
         ipt(&["-N", "RETAIL-FWD"])?;
+        // Never from one peer to another: a peer's routes are its own to grant
+        ipt(&["-A", "RETAIL-FWD", "-i", tun, "-o", tun, "-j", "DROP"])?;
         for net in &routes {
             ipt(&["-A", "RETAIL-FWD", "-i", tun, "-d", net, "-j", "ACCEPT"])?;
         }
@@ -341,6 +359,8 @@ impl Gateway {
             ipt(&["-A", "RETAIL-FWD", "-i", tun, "-j", "DROP"])?;
         }
         ipt(&["-A", "RETAIL-FWD", "-o", tun, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])?;
+        // Into the mesh only replies: hosts on this device's networks start nothing there
+        ipt(&["-A", "RETAIL-FWD", "-o", tun, "-j", "DROP"])?;
         ipt(&["-I", "FORWARD", "1", "-j", "RETAIL-FWD"])?;
         // Hosts on routed networks need no route back to the mesh
         ipt(&["-t", "nat", "-N", "RETAIL-NAT"])?;
@@ -413,12 +433,12 @@ impl Gateway {
             run("sysctl", &["-w", "net.inet.ip.forwarding=1"])?;
             self.restore_forwarding = true;
         }
-        let mut rules = String::new();
+        let mut out = Vec::new();
         for r in &self.routes {
             let iface = macos_route_interface(r.addr()).with_context(|| format!("finding the interface that reaches {r}"))?;
-            rules.push_str(&format!("nat on {iface} inet from 100.64.0.0/10 to {r} -> ({iface})\n"));
+            out.push((*r, iface));
         }
-        run_with_input("pfctl", &["-a", PF_ANCHOR, "-f", "-"], &rules)?;
+        run_with_input("pfctl", &["-a", PF_ANCHOR, "-f", "-"], &macos_pf_rules(&self.tun, &out))?;
         // Enabling pf takes a reference, released at cleanup, so pf stays as
         // it was for everything else
         let out = Command::new("pfctl").arg("-E").output().context("running pfctl")?;
@@ -738,5 +758,21 @@ mod macos {
         // SAFETY: valid NUL-terminated string
         let index = unsafe { libc::if_nametoindex(c.as_ptr()) };
         if index == 0 { Err(io::Error::last_os_error()) } else { Ok(index) }
+    }
+}
+
+#[cfg(test)]
+mod pf_tests {
+    use super::*;
+
+    #[test]
+    fn macos_router_lets_only_mesh_flows_into_the_tunnel() {
+        let rules = macos_pf_rules("utun5", &[("192.168.1.0/24".parse().unwrap(), "en0".to_string())]);
+        let lines: Vec<&str> = rules.lines().collect();
+        assert_eq!(lines[0], "nat on en0 inet from 100.64.0.0/10 to 192.168.1.0/24 -> (en0)", "translation comes first, as pf requires");
+        assert!(lines.contains(&"block drop in quick on ! utun5 inet from 100.64.0.0/10 to any"));
+        assert!(lines.contains(&"block drop out quick on utun5 inet from ! 100.64.0.0/10 to any"));
+        let pass = lines.iter().position(|l| l.starts_with("pass in quick on utun5")).unwrap();
+        assert!(pass < lines.len() - 1, "mesh flows keep state before the block that their replies skip");
     }
 }

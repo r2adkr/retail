@@ -335,7 +335,7 @@ const TABLE: &[[&str; 5]] = &[
     ["On · looks like {site}", "켜짐 · {site}처럼 보임", "オン · {site} のように見えます", "开启 · 伪装为 {site}", "Activado · parece {site}"],
     ["Helper node", "보조 노드", "補助ノード", "辅助节点", "Nodo auxiliar"],
     ["Internet tunnel", "인터넷 터널", "インターネットトンネル", "互联网隧道", "Túnel de internet"],
-    ["Off · through Cloudflare, from any network", "꺼짐 · Cloudflare를 거쳐 어느 네트워크에서나", "オフ · Cloudflare 経由でどのネットワークからも", "关闭 · 经由 Cloudflare，任何网络均可访问", "Desactivado · a través de Cloudflare, desde cualquier red"],
+    ["Off · through Cloudflare, from any network", "꺼짐 · 켜면 어디서나 Cloudflare로 접속", "オフ · オンにするとどこからでも Cloudflare 経由で接続", "关闭 · 经由 Cloudflare，任何网络均可访问", "Desactivado · a través de Cloudflare, desde cualquier red"],
     ["Through the internet tunnel", "인터넷 터널로 접속", "インターネットトンネル経由", "通过互联网隧道", "A través del túnel de internet"],
 
     ["Turn on", "켜기", "オンにする", "开启", "Activar"],

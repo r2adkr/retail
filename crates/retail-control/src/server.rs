@@ -30,6 +30,27 @@ const MAX_ENDPOINTS: usize = 16;
 /// wait, and only the newest is applied.
 const ENDPOINTS_BURST: usize = 5;
 const ENDPOINTS_WINDOW: Duration = Duration::from_secs(5);
+/// Spaces one connection's updates that cost every node a netmap (endpoints,
+/// exit node and route offers): a burst goes through, then one per window
+struct Pacer {
+    due: tokio::time::Instant,
+    applied: std::collections::VecDeque<tokio::time::Instant>,
+}
+
+impl Pacer {
+    fn new() -> Self {
+        Pacer { due: tokio::time::Instant::now(), applied: Default::default() }
+    }
+
+    fn applied(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.applied.push_back(now);
+        if self.applied.len() > ENDPOINTS_BURST {
+            self.applied.pop_front();
+        }
+        self.due = if self.applied.len() == ENDPOINTS_BURST { self.applied[0] + ENDPOINTS_WINDOW } else { now };
+    }
+}
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Per client address
 const REGISTER_PER_MINUTE: u32 = 10;
@@ -50,33 +71,66 @@ struct Relays {
 /// A relay frame and when it was queued
 type Queued = (Instant, Bytes);
 
+/// Of one lane, what one sender may hold: a flood from one node, even one the
+/// ACL keeps apart, leaves room for the others
+const RELAY_PER_SENDER: usize = RELAY_QUEUE / 2;
+
+/// Frames each sender has queued, per lane (small: true)
+type Held = Arc<Mutex<HashMap<(bool, Key), usize>>>;
+
 /// Relay frames towards one node, in two lanes so small ones go first
 #[derive(Clone)]
 struct Inbox {
     small: mpsc::Sender<Queued>,
     bulk: mpsc::Sender<Queued>,
+    held: Held,
 }
 
 struct Outbox {
     small: mpsc::Receiver<Queued>,
     bulk: mpsc::Receiver<Queued>,
+    held: Held,
 }
 
 fn relay_queue() -> (Inbox, Outbox) {
     let (small, small_rx) = mpsc::channel(RELAY_QUEUE);
     let (bulk, bulk_rx) = mpsc::channel(RELAY_QUEUE);
-    (Inbox { small, bulk }, Outbox { small: small_rx, bulk: bulk_rx })
+    let held = Held::default();
+    (Inbox { small, bulk, held: held.clone() }, Outbox { small: small_rx, bulk: bulk_rx, held })
+}
+
+/// Its lane and its sender, which the server wrote into it
+fn share_of(frame: &[u8]) -> Option<(bool, Key)> {
+    relay::parse(frame).map(|(k, _)| (frame.len() <= relay::SMALL_FRAME, k))
 }
 
 impl Inbox {
-    /// Never waits: a full lane drops the frame
+    /// Never waits: a full lane, or the sender's full share of it, drops the frame
     fn push(&self, frame: Bytes) {
-        let lane = if frame.len() <= relay::SMALL_FRAME { &self.small } else { &self.bulk };
-        let _ = lane.try_send((Instant::now(), frame));
+        let Some(share) = share_of(&frame) else { return };
+        let mut held = self.held.lock().unwrap();
+        let n = held.entry(share).or_insert(0);
+        let lane = if share.0 { &self.small } else { &self.bulk };
+        if *n < RELAY_PER_SENDER && lane.try_send((Instant::now(), frame)).is_ok() {
+            *n += 1;
+        } else if *n == 0 {
+            held.remove(&share);
+        }
     }
 }
 
 impl Outbox {
+    fn taken(&self, frame: &[u8]) {
+        let Some(share) = share_of(frame) else { return };
+        let mut held = self.held.lock().unwrap();
+        if let Some(n) = held.get_mut(&share) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&share);
+            }
+        }
+    }
+
     /// The next frame, small ones first; those that waited too long are dropped
     async fn recv(&mut self) -> Option<Bytes> {
         loop {
@@ -86,6 +140,7 @@ impl Outbox {
                 Some(f) = self.bulk.recv() => f,
                 else => return None,
             };
+            self.taken(&frame);
             if at.elapsed() <= relay::MAX_WAIT {
                 return Some(frame);
             }
@@ -95,6 +150,7 @@ impl Outbox {
     fn try_recv(&mut self) -> Option<Bytes> {
         loop {
             let (at, frame) = self.small.try_recv().or_else(|_| self.bulk.try_recv()).ok()?;
+            self.taken(&frame);
             if at.elapsed() <= relay::MAX_WAIT {
                 return Some(frame);
             }
@@ -173,7 +229,8 @@ impl AppState {
         if attempts.len() > 10_000 {
             attempts.retain(|_, (_, since)| now.duration_since(*since) < Duration::from_secs(60));
         }
-        let entry = attempts.entry(ip).or_insert((0, now));
+        // One IPv6 /64 is one source: its addresses cost nothing
+        let entry = attempts.entry(crate::net::same_network(ip)).or_insert((0, now));
         if now.duration_since(entry.1) >= Duration::from_secs(60) {
             *entry = (0, now);
         }
@@ -503,8 +560,9 @@ async fn serve_connection(
     // An expired node may not relay to anyone, cause netmap rounds or act as helper
     let mut blocked = true;
     let mut pending_endpoints: Option<Vec<std::net::SocketAddr>> = None;
-    let mut endpoints_due = tokio::time::Instant::now();
-    let mut endpoints_applied: std::collections::VecDeque<tokio::time::Instant> = Default::default();
+    let mut endpoints_pace = Pacer::new();
+    let mut pending_hostinfo: Option<(bool, Vec<Ipv4Net>)> = None;
+    let mut hostinfo_pace = Pacer::new();
     // Send the first netmap immediately
     changes.mark_changed();
 
@@ -530,20 +588,38 @@ async fn serve_connection(
                 }
             }
             // Ahead of the socket so a busy relay cannot starve it
-            _ = tokio::time::sleep_until(endpoints_due), if pending_endpoints.is_some() => {
+            _ = tokio::time::sleep_until(endpoints_pace.due), if pending_endpoints.is_some() => {
                 let endpoints = pending_endpoints.take().unwrap_or_default();
-                let now = tokio::time::Instant::now();
-                endpoints_applied.push_back(now);
-                if endpoints_applied.len() > ENDPOINTS_BURST {
-                    endpoints_applied.pop_front();
-                }
-                endpoints_due = if endpoints_applied.len() == ENDPOINTS_BURST {
-                    endpoints_applied[0] + ENDPOINTS_WINDOW
-                } else {
-                    now
-                };
+                endpoints_pace.applied();
                 if state.db.set_endpoints(node_id, &endpoints).await? && !blocked {
                     tracing::debug!(node_id, ?endpoints, "endpoints updated");
+                    state.notify();
+                }
+            }
+            _ = tokio::time::sleep_until(hostinfo_pace.due), if pending_hostinfo.is_some() => {
+                let (exit_node, mut routes) = pending_hostinfo.take().unwrap_or_default();
+                hostinfo_pace.applied();
+                let mut changed = {
+                    let mut exits = state.exit_nodes.lock().unwrap();
+                    if exit_node { exits.insert(node_id) } else { exits.remove(&node_id) }
+                };
+                if changed {
+                    tracing::info!(node_id, exit_node, "exit node offer changed");
+                }
+                routes.retain(|r| r.check_route().is_ok());
+                routes.sort();
+                routes.dedup();
+                routes.truncate(retail_proto::route::MAX_ROUTES);
+                {
+                    let mut offered = state.offered_routes.lock().unwrap();
+                    let before = offered.get(&node_id).cloned().unwrap_or_default();
+                    if before != routes {
+                        tracing::info!(node_id, ?routes, "routes offered");
+                        changed = true;
+                        if routes.is_empty() { offered.remove(&node_id) } else { offered.insert(node_id, routes) };
+                    }
+                }
+                if changed {
                     state.notify();
                 }
             }
@@ -554,30 +630,9 @@ async fn serve_connection(
                             endpoints.truncate(MAX_ENDPOINTS);
                             pending_endpoints = Some(endpoints);
                         }
-                        Ok(ClientMessage::Hostinfo { exit_node, mut routes }) => {
-                            let mut changed = {
-                                let mut exits = state.exit_nodes.lock().unwrap();
-                                if exit_node { exits.insert(node_id) } else { exits.remove(&node_id) }
-                            };
-                            if changed {
-                                tracing::info!(node_id, exit_node, "exit node offer changed");
-                            }
-                            routes.retain(|r| r.check_route().is_ok());
-                            routes.sort();
-                            routes.dedup();
-                            routes.truncate(retail_proto::route::MAX_ROUTES);
-                            {
-                                let mut offered = state.offered_routes.lock().unwrap();
-                                let before = offered.get(&node_id).cloned().unwrap_or_default();
-                                if before != routes {
-                                    tracing::info!(node_id, ?routes, "routes offered");
-                                    changed = true;
-                                    if routes.is_empty() { offered.remove(&node_id) } else { offered.insert(node_id, routes) };
-                                }
-                            }
-                            if changed {
-                                state.notify();
-                            }
+                        // An expired node offers nothing and causes no netmap rounds
+                        Ok(ClientMessage::Hostinfo { exit_node, routes }) => {
+                            pending_hostinfo = (!blocked).then_some((exit_node, routes));
                         }
                         Ok(ClientMessage::HelperCode { code }) => {
                             // A device whose key expired is no longer the helper
@@ -623,5 +678,33 @@ async fn serve_connection(
                 state.db.touch(node_id).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(from: u8) -> Bytes {
+        let mut f = Vec::new();
+        relay::begin(&Key([from; 32]), &mut f);
+        relay::push(&mut f, &[0; 100]);
+        Bytes::from(f)
+    }
+
+    #[test]
+    fn one_sender_cannot_fill_a_relay_inbox() {
+        let (inbox, mut outbox) = relay_queue();
+        for _ in 0..RELAY_QUEUE * 2 {
+            inbox.push(frame(1));
+        }
+        inbox.push(frame(2));
+        let got: Vec<Bytes> = std::iter::from_fn(|| outbox.try_recv()).collect();
+        assert_eq!(got.len(), RELAY_PER_SENDER + 1);
+        assert_eq!(share_of(got.last().unwrap()).unwrap().1, Key([2; 32]));
+        // What was taken out makes room again
+        inbox.push(frame(1));
+        assert!(outbox.try_recv().is_some());
+        assert!(outbox.held.lock().unwrap().is_empty());
     }
 }

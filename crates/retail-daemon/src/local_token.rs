@@ -17,35 +17,40 @@ fn new_token() -> String {
 /// Written after `write_new`, which makes and protects the folder
 pub fn write_admin() -> Result<String> {
     let token = new_token();
-    let path = retail_proto::local::admin_token_path();
-    let _ = std::fs::remove_file(&path);
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("writing {}", path.display()))?;
-        f.write_all(token.as_bytes())?;
+    write_private(&retail_proto::local::admin_token_path(), &token)?;
+    Ok(token)
+}
+
+/// A file someone else made, or holds open, is never reused for a secret
+fn write_private(path: &Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", path.display()));
+        }
+        _ => {}
     }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // No sharing: nobody can open it for reading while the inherited
+    // entries are still on it
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0);
+    let mut f = options.open(path).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(windows)]
     {
-        // Empty and protected first, so the token is never readable by others
-        std::fs::write(&path, b"").with_context(|| format!("writing {}", path.display()))?;
         let ok = std::process::Command::new("icacls")
-            .arg(&path)
+            .arg(path)
             .args(["/inheritance:r", "/grant:r", "*S-1-5-18:F", "/grant:r", "*S-1-5-32-544:F", "/Q"])
             .output()
             .is_ok_and(|o| o.status.success());
         anyhow::ensure!(ok, "could not restrict access to {}", path.display());
-        std::fs::write(&path, &token).with_context(|| format!("writing {}", path.display()))?;
     }
-    Ok(token)
+    f.write_all(token.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
-
 pub fn write_new() -> Result<String> {
     let token = new_token();
     // The last run's administrator token goes first: the folder's permissions
@@ -122,4 +127,30 @@ fn restrict(dir: &Path, file: &Path) -> Result<()> {
         anyhow::ensure!(ok, "could not set access to {}", file.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_file_is_new_and_unshared_until_written() {
+        let dir = std::env::temp_dir().join(format!("retail-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("admin-token");
+        std::fs::write(&path, "old").unwrap();
+        write_private(&path, "secret").unwrap();
+        #[cfg(unix)]
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret");
+        // A file held open by someone else is not reused
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let _ = std::fs::remove_file(&path);
+            let held = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(1).open(&path).unwrap();
+            assert!(write_private(&path, "secret").is_err());
+            drop(held);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

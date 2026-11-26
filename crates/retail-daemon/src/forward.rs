@@ -39,7 +39,9 @@ const ACK: u8 = 0x10;
 const MAX_TCP: usize = 4096;
 const MAX_TCP_PER_PEER: usize = 1024;
 const MAX_UDP: usize = 1024;
+const MAX_UDP_PER_PEER: usize = 256;
 const MAX_PINGS: usize = 32;
+const MAX_PINGS_PER_PEER: usize = 8;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// A dialled connection the system never took
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,6 +54,13 @@ const PING_TIMEOUT: Duration = Duration::from_secs(2);
 const SPLICE_BUF: usize = 16 * 1024;
 const MTU: usize = retail_proto::TUN_MTU as usize;
 const FIRST_PORT: u16 = 1024;
+
+/// Who a share of the tables is counted against: a peer by its mesh address.
+/// Other sources come only from peers trusted with many (an exit, a router),
+/// and share one count, so many addresses do not buy many shares.
+fn owner(src: Ipv4Addr) -> Ipv4Addr {
+    if retail_proto::in_mesh(src) { src } else { Ipv4Addr::UNSPECIFIED }
+}
 
 /// A peer's connection as it sent it
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -86,7 +95,7 @@ struct Table {
 impl Table {
     fn add(&mut self, conn: Conn, syn: Vec<u8>) -> Option<u16> {
         let ip = *conn.peer.ip();
-        if self.conns.len() >= MAX_TCP || self.per_peer.get(&ip).copied().unwrap_or(0) >= MAX_TCP_PER_PEER {
+        if self.conns.len() >= MAX_TCP || self.per_peer.get(&owner(ip)).copied().unwrap_or(0) >= MAX_TCP_PER_PEER {
             return None;
         }
         let mut port = None;
@@ -100,7 +109,7 @@ impl Table {
         let port = port?;
         self.conns.insert(conn, Entry { port, stage: Stage::Dialing(syn) });
         self.ports.insert((ip, port), conn);
-        *self.per_peer.entry(ip).or_default() += 1;
+        *self.per_peer.entry(owner(ip)).or_default() += 1;
         Some(port)
     }
 
@@ -108,13 +117,56 @@ impl Table {
         let e = self.conns.remove(conn)?;
         let ip = *conn.peer.ip();
         self.ports.remove(&(ip, e.port));
-        if let Some(n) = self.per_peer.get_mut(&ip) {
-            *n -= 1;
-            if *n == 0 {
-                self.per_peer.remove(&ip);
-            }
-        }
+        uncount(&mut self.per_peer, owner(ip));
         Some(e)
+    }
+}
+
+fn uncount(counts: &mut HashMap<Ipv4Addr, usize>, who: Ipv4Addr) {
+    if let Some(n) = counts.get_mut(&who) {
+        *n -= 1;
+        if *n == 0 {
+            counts.remove(&who);
+        }
+    }
+}
+
+/// UDP flows by the peer's address and port, counted per owner
+#[derive(Default)]
+struct Flows {
+    by_client: HashMap<SocketAddrV4, Udp>,
+    per_peer: HashMap<Ipv4Addr, usize>,
+}
+
+impl Flows {
+    fn remove(&mut self, client: &SocketAddrV4) {
+        if let Some(f) = self.by_client.remove(client) {
+            f.task.abort();
+            uncount(&mut self.per_peer, owner(*client.ip()));
+        }
+    }
+
+    /// Room for one more flow of `who`: its own oldest goes when it has its
+    /// share, and when all are taken, the oldest of whoever has the most
+    fn make_room(&mut self, who: Ipv4Addr) {
+        let mine = self.per_peer.get(&who).copied().unwrap_or(0);
+        let from = if mine >= MAX_UDP_PER_PEER {
+            who
+        } else if self.by_client.len() >= MAX_UDP {
+            let Some((&top, _)) = self.per_peer.iter().max_by_key(|(_, n)| **n) else { return };
+            top
+        } else {
+            return;
+        };
+        let oldest = self
+            .by_client
+            .iter()
+            .filter(|(c, _)| owner(*c.ip()) == from)
+            .min_by_key(|(_, f)| f.last.load(Ordering::Relaxed))
+            .map(|(c, _)| *c);
+        if let Some(c) = oldest {
+            self.remove(&c);
+        }
     }
 }
 
@@ -131,9 +183,10 @@ struct Shared {
     engine: Weak<Engine>,
     rt: tokio::runtime::Handle,
     table: Mutex<Table>,
-    udp: Mutex<HashMap<SocketAddrV4, Udp>>,
+    udp: Mutex<Flows>,
     tasks: Mutex<JoinSet<()>>,
     pings: AtomicUsize,
+    pings_per_peer: Mutex<HashMap<Ipv4Addr, usize>>,
     ip_id: AtomicU16,
     epoch: Instant,
 }
@@ -157,6 +210,7 @@ impl Forward {
             udp: Mutex::default(),
             tasks: Mutex::new(JoinSet::new()),
             pings: AtomicUsize::new(0),
+            pings_per_peer: Mutex::default(),
             ip_id: AtomicU16::new(rand::random()),
             epoch: Instant::now(),
         });
@@ -176,7 +230,7 @@ impl Forward {
         let Some(h) = Header::parse(p) else { return true };
         if !forwarded {
             // The listener takes readdressed connections only
-            return !(h.proto == TCP && h.dst == *s.me.ip() && h.dport == s.me.port());
+            return !(h.proto == TCP && h.dst == *s.me.ip() && (h.dport == s.me.port() || h.partial));
         }
         if h.fragment {
             return false;
@@ -304,24 +358,21 @@ impl Shared {
         let now = self.now();
         let sock = {
             let mut flows = self.udp.lock().unwrap();
-            match flows.get(&client) {
+            match flows.by_client.get(&client) {
                 Some(f) => {
                     f.last.store(now, Ordering::Relaxed);
                     f.sock.clone()
                 }
                 None => {
-                    if flows.len() >= MAX_UDP
-                        && let Some(oldest) = flows.iter().min_by_key(|(_, f)| f.last.load(Ordering::Relaxed)).map(|(k, _)| *k)
-                        && let Some(f) = flows.remove(&oldest)
-                    {
-                        f.task.abort();
-                    }
+                    let who = owner(h.src);
+                    flows.make_room(who);
                     let Ok(sock) = udp_socket() else { return };
                     let Ok(reader) = sock.try_clone() else { return };
                     let last = Arc::new(AtomicU64::new(now));
                     let task = self.spawn(udp_reader(self.clone(), client, reader, last.clone()));
                     let sock = Arc::new(sock);
-                    flows.insert(client, Udp { sock: sock.clone(), last, task });
+                    flows.by_client.insert(client, Udp { sock: sock.clone(), last, task });
+                    *flows.per_peer.entry(who).or_default() += 1;
                     sock
                 }
             }
@@ -331,14 +382,20 @@ impl Shared {
     }
 
     fn ping(self: &Arc<Self>, p: &[u8], h: &Header) {
-        if self.pings.fetch_add(1, Ordering::Relaxed) >= MAX_PINGS {
-            self.pings.fetch_sub(1, Ordering::Relaxed);
-            return;
+        let Some(icmp) = p.get(h.l4..).filter(|i| i.len() >= 8).map(<[u8]>::to_vec) else { return };
+        let who = owner(h.src);
+        {
+            let mut per_peer = self.pings_per_peer.lock().unwrap();
+            let mine = per_peer.entry(who).or_default();
+            if *mine >= MAX_PINGS_PER_PEER || self.pings.load(Ordering::Relaxed) >= MAX_PINGS {
+                if *mine == 0 {
+                    per_peer.remove(&who);
+                }
+                return;
+            }
+            *mine += 1;
+            self.pings.fetch_add(1, Ordering::Relaxed);
         }
-        let Some(icmp) = p.get(h.l4..).filter(|i| i.len() >= 8).map(<[u8]>::to_vec) else {
-            self.pings.fetch_sub(1, Ordering::Relaxed);
-            return;
-        };
         let (s, src, dst) = (self.clone(), h.src, h.dst);
         self.rt.spawn_blocking(move || {
             if echo(dst, &icmp[8..]) {
@@ -349,6 +406,7 @@ impl Shared {
                 reply[2..4].copy_from_slice(&sum.to_be_bytes());
                 s.send(dst, src, ICMP, &reply);
             }
+            uncount(&mut s.pings_per_peer.lock().unwrap(), who);
             s.pings.fetch_sub(1, Ordering::Relaxed);
         });
     }
@@ -486,13 +544,18 @@ async fn sweep(s: Arc<Shared>) {
             }
         }
         let now = s.now();
-        s.udp.lock().unwrap().retain(|_, f| {
-            let keep = now.saturating_sub(f.last.load(Ordering::Relaxed)) < UDP_IDLE.as_secs();
-            if !keep {
-                f.task.abort();
+        {
+            let mut flows = s.udp.lock().unwrap();
+            let idle: Vec<SocketAddrV4> = flows
+                .by_client
+                .iter()
+                .filter(|(_, f)| now.saturating_sub(f.last.load(Ordering::Relaxed)) >= UDP_IDLE.as_secs())
+                .map(|(c, _)| *c)
+                .collect();
+            for c in idle {
+                flows.remove(&c);
             }
-            keep
-        });
+        }
         let mut tasks = s.tasks.lock().unwrap();
         while tasks.try_join_next().is_some() {}
     }
@@ -548,6 +611,8 @@ struct Header {
     flags: u8,
     tcp_len: usize,
     icmp_type: u8,
+    /// A first TCP fragment too short to show its ports
+    partial: bool,
 }
 
 impl Header {
@@ -556,6 +621,9 @@ impl Header {
             return None;
         }
         let l4 = (p[0] & 0x0f) as usize * 4;
+        if l4 < 20 {
+            return None;
+        }
         let frag = u16::from_be_bytes([p[6], p[7]]);
         let mut h = Header {
             proto: p[9],
@@ -570,8 +638,13 @@ impl Header {
             flags: 0,
             tcp_len: 0,
             icmp_type: 0,
+            partial: false,
         };
         let t = p.get(l4..)?;
+        // A later fragment has no transport header
+        if frag & 0x1fff != 0 {
+            return Some(h);
+        }
         match h.proto {
             TCP if t.len() >= 20 => {
                 h.sport = u16::from_be_bytes([t[0], t[1]]);
@@ -580,7 +653,12 @@ impl Header {
                 h.ack = u32::from_be_bytes([t[8], t[9], t[10], t[11]]);
                 h.tcp_len = (t[12] >> 4) as usize * 4;
                 h.flags = t[13];
+                if !h.fragment && !(20..=t.len()).contains(&h.tcp_len) {
+                    return None;
+                }
             }
+            // The system would put the ports together from later fragments
+            TCP if h.fragment => h.partial = true,
             UDP if t.len() >= 8 => {
                 h.sport = u16::from_be_bytes([t[0], t[1]]);
                 h.dport = u16::from_be_bytes([t[2], t[3]]);
@@ -834,5 +912,57 @@ mod tests {
             t.add(Conn { peer: SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), 1 + i as u16), dst }, vec![]).unwrap();
         }
         assert!(t.add(Conn { peer: "100.64.0.2:9".parse().unwrap(), dst }, vec![]).is_none(), "per-peer cap");
+    }
+
+    /// Sources outside the mesh (an exit's, a router's) share one peer's share
+    #[test]
+    fn many_outside_sources_are_one_share() {
+        let mut t = Table::default();
+        let dst: SocketAddrV4 = "203.0.113.80:80".parse().unwrap();
+        for i in 0..MAX_TCP_PER_PEER {
+            let src = Ipv4Addr::new(10, 0, (i / 250) as u8, (i % 250) as u8 + 1);
+            t.add(Conn { peer: SocketAddrV4::new(src, 5000), dst }, vec![]).unwrap();
+        }
+        assert!(t.add(Conn { peer: "10.9.9.9:5000".parse().unwrap(), dst }, vec![]).is_none());
+        assert!(t.add(Conn { peer: "100.64.0.3:5000".parse().unwrap(), dst }, vec![]).is_some(), "others still get in");
+    }
+
+    /// One peer opening flow after flow evicts only its own
+    #[tokio::test]
+    async fn one_peer_cannot_evict_the_others_udp_flows() {
+        let mut flows = Flows::default();
+        let add = |flows: &mut Flows, client: SocketAddrV4, last: u64| {
+            let who = owner(*client.ip());
+            flows.make_room(who);
+            let task = tokio::spawn(std::future::pending::<()>()).abort_handle();
+            let sock = Arc::new(udp_socket().unwrap());
+            flows.by_client.insert(client, Udp { sock, last: Arc::new(AtomicU64::new(last)), task });
+            *flows.per_peer.entry(who).or_default() += 1;
+        };
+        let victim: SocketAddrV4 = "100.64.0.3:5000".parse().unwrap();
+        add(&mut flows, victim, 0);
+        for port in 1..=2000u16 {
+            add(&mut flows, SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), port), 1);
+        }
+        assert!(flows.by_client.contains_key(&victim));
+        assert_eq!(flows.per_peer[&Ipv4Addr::new(100, 64, 0, 2)], MAX_UDP_PER_PEER);
+        assert_eq!(flows.by_client.len(), MAX_UDP_PER_PEER + 1);
+    }
+
+    #[test]
+    fn malformed_headers_are_refused() {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x44; // IHL 4
+        p[9] = TCP;
+        assert!(Header::parse(&p).is_none());
+        p[0] = 0x45;
+        p[32] = 0x30; // TCP data offset 12 bytes
+        assert!(Header::parse(&p).is_none());
+        // A first fragment with only 8 bytes of TCP
+        let mut f = vec![0u8; 28];
+        f[0] = 0x45;
+        f[6] = 0x20; // more fragments
+        f[9] = TCP;
+        assert!(Header::parse(&f).unwrap().partial);
     }
 }

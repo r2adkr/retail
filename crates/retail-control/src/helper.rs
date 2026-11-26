@@ -31,6 +31,8 @@ pub const LINK_NAME: &str = "link.retail.invalid";
 const PICKUP: Duration = Duration::from_secs(10);
 const PING: Duration = Duration::from_secs(20);
 const MAX_PENDING: usize = 256;
+/// Clients one address may have waiting for pickup, so one source cannot fill the pool
+const MAX_PENDING_PER_IP: usize = 16;
 /// Connections claiming the link name that have not yet shown the secret,
 /// per source address and in all. Each is held at most 2 x `PICKUP`. A cap
 /// per address keeps one source from crowding out the server's own links.
@@ -48,7 +50,7 @@ pub struct HelperConfig {
 struct Shared {
     /// The server's link: new clients to announce
     link: Mutex<Option<mpsc::Sender<(u64, SocketAddr)>>>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<BoxIo>>>,
+    pending: Mutex<HashMap<u64, (oneshot::Sender<BoxIo>, std::net::IpAddr)>>,
     next: AtomicU64,
     linked: AtomicBool,
     /// Unauthenticated link connections per source address
@@ -203,7 +205,7 @@ async fn handle(
     if sni.as_deref() == Some(LINK_NAME) {
         // The link name is public, so until the secret is shown this is anyone:
         // bound how many may wait and for how long
-        let slot = LinkSlot::take(shared, peer.ip().to_canonical()).context("too many unauthenticated link connections")?;
+        let slot = LinkSlot::take(shared, crate::net::same_network(peer.ip())).context("too many unauthenticated link connections")?;
         let tls = crate::tls::small_buffer(tokio::time::timeout(PICKUP, acceptor.accept(io)).await.context("link handshake timed out")??);
         return link(tls, shared, secret, slot).await;
     }
@@ -214,11 +216,12 @@ async fn handle(
     let id = shared.next.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     {
+        let ip = crate::net::same_network(peer.ip());
         let mut pending = shared.pending.lock().unwrap();
-        if pending.len() >= MAX_PENDING {
+        if pending.len() >= MAX_PENDING || pending.values().filter(|(_, from)| *from == ip).count() >= MAX_PENDING_PER_IP {
             anyhow::bail!("too many clients waiting");
         }
-        pending.insert(id, tx);
+        pending.insert(id, (tx, ip));
     }
     let picked = async {
         announce.send((id, peer)).await.ok()?;
@@ -251,7 +254,7 @@ where
         "WORK" => {
             let id: u64 = words.next().and_then(|w| w.parse().ok()).context("malformed WORK")?;
             let waiting = shared.pending.lock().unwrap().remove(&id);
-            if let Some(tx) = waiting {
+            if let Some((tx, _)) = waiting {
                 // Bytes the server sent early stay in the reader's buffer
                 let _ = tx.send(Box::new(reader));
             }
@@ -320,5 +323,37 @@ mod tests {
         drop(held);
         assert!(LinkSlot::take(&shared, a).is_some(), "slots come back");
         assert!(shared.unauthenticated_links.lock().unwrap().is_empty());
+        // An IPv6 host owns its /64, so new addresses in it share the cap
+        let v6 = |i: u16| crate::net::same_network(std::net::IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, i]));
+        let held: Vec<_> = (0..MAX_UNAUTHENTICATED_LINKS_PER_IP).map(|i| LinkSlot::take(&shared, v6(i as u16)).unwrap()).collect();
+        assert!(LinkSlot::take(&shared, v6(999)).is_none());
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn one_address_cannot_fill_the_pickup_pool() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let shared = Arc::new(Shared::default());
+        let (tx, mut announced) = mpsc::channel(1024);
+        *shared.link.lock().unwrap() = Some(tx);
+        let acceptor = tokio_rustls::TlsAcceptor::from(crate::tls::self_signed(&std::env::temp_dir().join(format!("retail-helper-test-{}", std::process::id()))).unwrap().0);
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let mut clients = Vec::new();
+        for _ in 0..MAX_PENDING_PER_IP + 4 {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut c, b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            clients.push(c);
+            let (tcp, peer) = l.accept().await.unwrap();
+            let (shared, acceptor) = (shared.clone(), acceptor.clone());
+            tokio::spawn(async move { handle(tcp, peer, &shared, &acceptor, "s").await });
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(shared.pending.lock().unwrap().len(), MAX_PENDING_PER_IP);
+        let mut n = 0;
+        while announced.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, MAX_PENDING_PER_IP);
     }
 }

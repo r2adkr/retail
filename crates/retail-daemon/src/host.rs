@@ -458,8 +458,8 @@ impl Host {
         self.with_server(|s| s.set_helper_device(id)).await
     }
 
-    pub async fn keep_forever(&self, id: i64) -> Result<()> {
-        self.with_server(|s| s.keep_forever(id)).await
+    pub async fn keep_forever(&self, id: i64, key: &retail_proto::Key) -> Result<()> {
+        self.with_server(|s| s.keep_forever(id, key)).await
     }
 
     pub async fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {

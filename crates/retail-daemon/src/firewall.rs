@@ -30,6 +30,23 @@ pub fn release_inbound() {
     }
 }
 
+/// A user of the rule for as long as it lives, so no error or aborted task
+/// can leave the rule behind
+pub struct Inbound(());
+
+impl Inbound {
+    pub fn take() -> Self {
+        allow_inbound();
+        Inbound(())
+    }
+}
+
+impl Drop for Inbound {
+    fn drop(&mut self) {
+        release_inbound();
+    }
+}
+
 fn add_rule() -> bool {
     #[cfg(target_os = "windows")]
     {

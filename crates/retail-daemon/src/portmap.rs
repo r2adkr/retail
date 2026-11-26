@@ -264,7 +264,10 @@ async fn pcp_open(gateway: Ipv4Addr, nonce: [u8; 12], ports: &[(Proto, u16)], re
                 external_ip = Some(ip);
                 mappings.push(Mapping { proto, internal, external });
             }
-            Err(e) if i < required => return Err(e),
+            Err(e) if i < required => {
+                undo(Outcome { method: Method::Pcp { gateway, nonce }, external_ip, mappings }).await;
+                return Err(e);
+            }
             Err(e) => tracing::debug!(internal, "optional port not mapped: {e:#}"),
         }
     }
@@ -313,7 +316,10 @@ async fn natpmp_open(gateway: Ipv4Addr, ports: &[(Proto, u16)], required: usize)
     for (i, &(proto, internal)) in ports.iter().enumerate() {
         match natpmp_map(gateway, proto, internal, internal, LEASE).await {
             Ok(external) => mappings.push(Mapping { proto, internal, external }),
-            Err(e) if i < required => return Err(e),
+            Err(e) if i < required => {
+                undo(Outcome { method: Method::NatPmp { gateway }, external_ip: Some(external_ip), mappings }).await;
+                return Err(e);
+            }
             Err(e) => tracing::debug!(internal, "optional port not mapped: {e:#}"),
         }
     }
@@ -336,11 +342,22 @@ async fn upnp_open(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
     for (i, &(proto, internal)) in ports.iter().enumerate() {
         match upnp_map(&control, &service, local, proto, internal).await {
             Ok(external) => mappings.push(Mapping { proto, internal, external }),
-            Err(e) if i < required => return Err(e),
+            Err(e) if i < required => {
+                undo(Outcome { method: Method::Upnp { control, service }, external_ip, mappings }).await;
+                return Err(e);
+            }
             Err(e) => tracing::debug!(internal, "optional port not mapped: {e:#}"),
         }
     }
     Ok(Outcome { method: Method::Upnp { control, service }, external_ip, mappings })
+}
+
+/// What a failed open got before a required port failed: nothing would
+/// close it later (a router may keep UPnP mappings for good)
+async fn undo(partial: Outcome) {
+    if !partial.mappings.is_empty() {
+        close_on_router(&partial).await;
+    }
 }
 
 async fn upnp_map(control: &str, service: &str, local: Ipv4Addr, proto: Proto, internal: u16) -> Result<u16> {

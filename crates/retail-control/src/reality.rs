@@ -14,7 +14,8 @@
 //! This defeats blocking by name or fingerprint and active probing, not
 //! blocking of the server's IP address. Clocks must agree within `MAX_SKEW`.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -197,8 +198,9 @@ pub enum Decision {
 }
 
 /// Session ids remembered at most. Anyone holding an invite can mint
-/// authenticated hellos, so the memory and the work per hello stay bounded;
-/// when full, new hellos are treated as probes until old ones age out.
+/// authenticated hellos, so the memory and the work per hello stay bounded.
+/// When full, the source holding the most ids loses its oldest: one invite
+/// holder cannot push out anyone else's, so their replays stay refused.
 const MAX_SEEN: usize = 65536;
 
 /// A replayed ClientHello is treated as a probe
@@ -209,46 +211,74 @@ pub struct ReplayGuard {
 
 #[derive(Default)]
 struct Seen {
-    ids: HashSet<[u8; 32]>,
-    /// The same ids, oldest first
+    ids: HashMap<[u8; 32], IpAddr>,
+    /// Ids oldest first; ones already pushed out are skipped
     order: VecDeque<(Instant, [u8; 32])>,
+    /// Each source's live ids, oldest first
+    by_source: HashMap<IpAddr, VecDeque<[u8; 32]>>,
 }
 
-impl ReplayGuard {
-    fn fresh(&self, sid: &[u8; 32]) -> bool {
-        let mut seen = self.seen.lock().unwrap();
-        let Seen { ids, order } = &mut *seen;
-        // A sealed timestamp stays acceptable for at most 2 * MAX_SKEW
-        let window = Duration::from_secs(2 * MAX_SKEW);
-        while let Some((at, old)) = order.front() {
-            if at.elapsed() < window {
-                break;
+impl Seen {
+    fn forget_oldest_of(&mut self, who: IpAddr) {
+        if let Some(q) = self.by_source.get_mut(&who) {
+            if let Some(sid) = q.pop_front() {
+                self.ids.remove(&sid);
             }
-            ids.remove(old);
-            order.pop_front();
+            if q.is_empty() {
+                self.by_source.remove(&who);
+            }
         }
-        if ids.contains(sid) || ids.len() >= MAX_SEEN {
-            return false;
-        }
-        ids.insert(*sid);
-        order.push_back((Instant::now(), *sid));
-        true
     }
 }
 
-pub fn decide(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8]) -> Decision {
+impl ReplayGuard {
+    fn fresh(&self, sid: &[u8; 32], from: IpAddr) -> bool {
+        let from = crate::net::same_network(from);
+        let mut seen = self.seen.lock().unwrap();
+        // A sealed timestamp stays acceptable for at most 2 * MAX_SKEW
+        let window = Duration::from_secs(2 * MAX_SKEW);
+        while let Some((at, old)) = seen.order.front().copied() {
+            if at.elapsed() < window {
+                break;
+            }
+            seen.order.pop_front();
+            // The oldest live id overall is the oldest of its source
+            if let Some(who) = seen.ids.get(&old).copied() {
+                seen.forget_oldest_of(who);
+            }
+        }
+        if seen.ids.contains_key(sid) {
+            return false;
+        }
+        if seen.ids.len() >= MAX_SEEN {
+            let heaviest = seen.by_source.iter().max_by_key(|(_, q)| q.len()).map(|(w, _)| *w);
+            if let Some(w) = heaviest {
+                seen.forget_oldest_of(w);
+            }
+        }
+        if seen.order.len() >= 2 * MAX_SEEN {
+            let Seen { ids, order, .. } = &mut *seen;
+            order.retain(|(_, s)| ids.contains_key(s));
+        }
+        seen.ids.insert(*sid, from);
+        seen.order.push_back((Instant::now(), *sid));
+        seen.by_source.entry(from).or_default().push_back(*sid);
+        true
+    }
+}
+pub fn decide(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], from: IpAddr) -> Decision {
     let Some(hello) = parse_client_hello(msg) else { return Decision::Normal };
     let Some(name) = hello.server_name.as_deref() else { return Decision::Normal };
     if !cfg.server_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
         return Decision::Normal;
     }
-    match authenticate(cfg, replay, msg, &hello) {
+    match authenticate(cfg, replay, msg, &hello, from) {
         Some(auth) => Decision::Reality { auth },
         None => Decision::Camouflage,
     }
 }
 
-fn authenticate(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], hello: &Hello) -> Option<[u8; 32]> {
+fn authenticate(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], hello: &Hello, from: IpAddr) -> Option<[u8; 32]> {
     let client_share = hello.x25519?;
     let sid: [u8; 32] = hello.session_id.as_slice().try_into().ok()?;
     let secret = x25519_dalek::StaticSecret::from(cfg.private_key);
@@ -263,7 +293,7 @@ fn authenticate(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], hello: &He
     if plain[..3] != VERSION || now.abs_diff(time) > MAX_SKEW || !cfg.short_ids.contains(&short_id) {
         return None;
     }
-    replay.fresh(&sid).then_some(auth)
+    replay.fresh(&sid, from).then_some(auth)
 }
 
 #[cfg(test)]
@@ -278,17 +308,27 @@ mod tests {
             s[..8].copy_from_slice(&(i as u64).to_be_bytes());
             s
         };
-        assert!(g.fresh(&sid(0)));
-        assert!(!g.fresh(&sid(0)), "a replay is refused");
-        for i in 1..MAX_SEEN {
-            assert!(g.fresh(&sid(i)));
+        let ip = |i: usize| IpAddr::from([10, 0, (i >> 8) as u8, i as u8]);
+        let (me, other) = (ip(0), ip(1));
+        assert!(g.fresh(&sid(0), other));
+        assert!(!g.fresh(&sid(0), other), "a replay is refused");
+        assert!(!g.fresh(&sid(0), me), "from anywhere");
+        // One source fills the rest and keeps going
+        for i in 1..MAX_SEEN + 100 {
+            assert!(g.fresh(&sid(i), me));
         }
-        // Full: new hellos count as probes rather than growing the set
-        assert!(!g.fresh(&sid(MAX_SEEN)));
-        let s = g.seen.lock().unwrap();
-        assert_eq!((s.ids.len(), s.order.len()), (MAX_SEEN, MAX_SEEN));
+        {
+            let s = g.seen.lock().unwrap();
+            assert_eq!(s.ids.len(), MAX_SEEN, "the set stays bounded");
+            assert!(s.order.len() < 2 * MAX_SEEN);
+        }
+        assert!(!g.fresh(&sid(0), me), "someone else's id was not pushed out, so its replay is still refused");
+        assert!(g.fresh(&sid(1), me), "the heavy source lost its own oldest ids");
+        let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
+        let source = crate::net::same_network;
+        assert_eq!(source(v6("2001:db8::1")), source(v6("2001:db8::ffff:1")), "an IPv6 source is its /64");
+        assert_eq!(source(v6("::ffff:192.0.2.1")), v6("192.0.2.1"));
     }
-
     pub(crate) fn hello(sni: &str, share: [u8; 32], sid: [u8; 32], random: [u8; 32]) -> Vec<u8> {
         let mut ext = Vec::new();
         let name = sni.as_bytes();
@@ -327,6 +367,7 @@ mod tests {
             dest: "www.example.com:443".into(),
         };
         let replay = ReplayGuard::default();
+        let me = IpAddr::from([192, 0, 2, 1]);
         let client = x25519_dalek::StaticSecret::from([5u8; 32]);
         let share = x25519_dalek::PublicKey::from(&client).to_bytes();
         let random = [7u8; 32];
@@ -338,12 +379,12 @@ mod tests {
         let sid = seal_session_id(&auth, &random, &msg, &session_plaintext(now_secs(), [9u8; 8]));
         msg[parsed.session_id_at..parsed.session_id_at + 32].copy_from_slice(&sid);
 
-        assert!(matches!(decide(&cfg, &replay, &msg), Decision::Reality { auth: a } if a == auth));
-        assert!(matches!(decide(&cfg, &replay, &msg), Decision::Camouflage), "a replay is a probe");
+        assert!(matches!(decide(&cfg, &replay, &msg, me), Decision::Reality { auth: a } if a == auth));
+        assert!(matches!(decide(&cfg, &replay, &msg, me), Decision::Camouflage), "a replay is a probe");
         let probe = hello("www.example.com", share, [1; 32], [8; 32]);
-        assert!(matches!(decide(&cfg, &replay, &probe), Decision::Camouflage));
+        assert!(matches!(decide(&cfg, &replay, &probe, me), Decision::Camouflage));
         let other = hello("retail.example.net", share, [1; 32], [8; 32]);
-        assert!(matches!(decide(&cfg, &replay, &other), Decision::Normal));
+        assert!(matches!(decide(&cfg, &replay, &other, me), Decision::Normal));
 
         // Wrong short id or a stale clock is a probe too
         for (time, id) in [(now_secs(), [1u8; 8]), (now_secs() - 3 * MAX_SKEW, [9u8; 8])] {
@@ -353,7 +394,7 @@ mod tests {
             let a = auth_key(shared.as_bytes(), &random);
             let sid = seal_session_id(&a, &random, &m, &session_plaintext(time, id));
             m[parsed.session_id_at..parsed.session_id_at + 32].copy_from_slice(&sid);
-            assert!(matches!(decide(&cfg, &replay, &m), Decision::Camouflage));
+            assert!(matches!(decide(&cfg, &replay, &m, me), Decision::Camouflage));
         }
     }
 }

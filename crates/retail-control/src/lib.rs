@@ -294,8 +294,8 @@ impl Server {
     }
 
     /// The hosting device's own membership never expires
-    pub fn keep_forever(&self, id: i64) -> Result<()> {
-        self.state.db.keep_forever(id)?;
+    pub fn keep_forever(&self, id: i64, key: &retail_proto::Key) -> Result<()> {
+        self.state.db.keep_forever(id, key)?;
         self.state.notify();
         Ok(())
     }

@@ -21,7 +21,7 @@ mod other {
     pub struct Negotiator;
 
     impl Negotiator {
-        pub fn new(_scheme: &str, _host: &str) -> Result<Self> {
+        pub fn new(_scheme: &str, _host: &str, _owner: Option<Vec<u8>>) -> Result<Self> {
             bail!("integrated sign-in is only available on Windows")
         }
 
@@ -45,7 +45,7 @@ mod imp {
         SECPKG_CRED_OUTBOUND, SECURITY_NATIVE_DREP, SecBuffer, SecBufferDesc,
     };
     use windows_sys::Win32::Security::Credentials::SecHandle;
-    use windows_sys::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
+    use windows_sys::Win32::Security::{GetLengthSid, GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TOKEN_USER, TokenUser};
     use windows_sys::Win32::System::Registry::{HKEY, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegOpenCurrentUser};
     use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 
@@ -62,14 +62,37 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// The SID a token belongs to
+    fn token_user(token: HANDLE) -> Option<Vec<u8>> {
+        let mut buf = vec![0u64; 64];
+        let mut len = 0u32;
+        // SAFETY: the buffer is u64-aligned and its real size is passed
+        unsafe {
+            if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut len) == 0 {
+                return None;
+            }
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            let sid = user.User.Sid;
+            let n = GetLengthSid(sid) as usize;
+            Some(std::slice::from_raw_parts(sid as *const u8, n).to_vec())
+        }
+    }
+
     /// Runs `f` as the console user when this process may borrow their token
-    /// (a service running as SYSTEM)
-    fn as_console_user<T>(f: impl FnOnce() -> T) -> T {
+    /// (a service running as SYSTEM), and gives their SID. With `owner`, only
+    /// as that user: `None` when someone else, or nobody, is at the console,
+    /// rather than this process's own identity.
+    fn as_console_user<T>(owner: Option<&[u8]>, f: impl FnOnce() -> T) -> Option<(T, Option<Vec<u8>>)> {
         let mut token: HANDLE = std::ptr::null_mut();
         let session = unsafe { WTSGetActiveConsoleSessionId() };
         let borrowed = session != u32::MAX && unsafe { WTSQueryUserToken(session, &mut token) } != 0;
         if !borrowed {
-            return f();
+            return owner.is_none().then(|| (f(), None));
+        }
+        let sid = token_user(token);
+        if owner.is_some_and(|o| sid.as_deref() != Some(o)) {
+            unsafe { CloseHandle(token) };
+            return None;
         }
         let impersonating = unsafe { ImpersonateLoggedOnUser(token) } != 0;
         let out = f();
@@ -77,14 +100,14 @@ mod imp {
             unsafe { RevertToSelf() };
         }
         unsafe { CloseHandle(token) };
-        out
+        Some((out, sid))
     }
-
     /// The console user's own proxy (`ProxyServer` in their Internet
     /// settings), read from their part of the registry while borrowing their
-    /// identity; this process's own settings when nobody is signed in
-    pub fn console_user_proxy() -> Option<String> {
-        as_console_user(|| unsafe {
+    /// identity; this process's own settings when nobody is signed in. With
+    /// the SID of the user whose settings they are.
+    pub fn console_user_proxy() -> Option<(String, Option<Vec<u8>>)> {
+        let (proxy, sid) = as_console_user(None, || unsafe {
             let mut root: HKEY = std::ptr::null_mut();
             if RegOpenCurrentUser(KEY_READ, &mut root) != 0 {
                 return None;
@@ -105,7 +128,8 @@ mod imp {
             }
             RegCloseKey(root);
             out
-        })
+        })?;
+        Some((proxy?, sid))
     }
 
     pub struct Negotiator {
@@ -113,6 +137,8 @@ mod imp {
         cred: SecHandle,
         ctx: Option<SecHandle>,
         target: Vec<u16>,
+        /// Signs in only as this user, when the proxy is theirs to choose
+        owner: Option<Vec<u8>>,
     }
 
     // The handles are plain values SSPI lets any thread use
@@ -120,13 +146,14 @@ mod imp {
 
     impl Negotiator {
         /// `scheme` is `Negotiate` or `NTLM`; `host` the proxy's name, which
-        /// Kerberos needs as `HTTP/host`
-        pub fn new(scheme: &str, host: &str) -> Result<Self> {
+        /// Kerberos needs as `HTTP/host`. `owner`: the SID of the user who
+        /// chose the proxy, who alone may sign in to it.
+        pub fn new(scheme: &str, host: &str, owner: Option<Vec<u8>>) -> Result<Self> {
             let scheme: &'static str = if scheme.eq_ignore_ascii_case("ntlm") { "NTLM" } else { "Negotiate" };
             let package = wide(scheme);
             let mut cred = SecHandle::default();
             let mut expiry = 0i64;
-            let status = as_console_user(|| unsafe {
+            let status = as_console_user(owner.as_deref(), || unsafe {
                 AcquireCredentialsHandleW(
                     std::ptr::null(),
                     package.as_ptr(),
@@ -138,11 +165,13 @@ mod imp {
                     &mut cred,
                     &mut expiry,
                 )
-            });
+            })
+            .map(|(s, _)| s);
+            let Some(status) = status else { bail!("the user who chose this proxy is not at the console") };
             if status != SEC_E_OK {
                 bail!("Windows sign-in unavailable ({scheme}, 0x{status:08x})");
             }
-            Ok(Negotiator { scheme, cred, ctx: None, target: wide(&format!("HTTP/{host}")) })
+            Ok(Negotiator { scheme, cred, ctx: None, target: wide(&format!("HTTP/{host}")), owner })
         }
 
         pub fn scheme(&self) -> &'static str {
@@ -162,7 +191,7 @@ mod imp {
             let mut new_ctx = self.ctx.unwrap_or_default();
             let mut attrs = 0u32;
             let mut expiry = 0i64;
-            let status = as_console_user(|| unsafe {
+            let status = as_console_user(self.owner.as_deref(), || unsafe {
                 InitializeSecurityContextW(
                     &self.cred,
                     self.ctx.as_ref().map_or(std::ptr::null(), |c| c as *const _),
@@ -177,7 +206,9 @@ mod imp {
                     &mut attrs,
                     &mut expiry,
                 )
-            });
+            })
+            .map(|(s, _)| s);
+            let Some(status) = status else { bail!("the user who chose this proxy is not at the console") };
             if !matches!(status, SEC_E_OK | SEC_I_CONTINUE_NEEDED | SEC_I_COMPLETE_NEEDED | SEC_I_COMPLETE_AND_CONTINUE) {
                 bail!("Windows sign-in failed ({}, 0x{status:08x})", self.scheme);
             }
@@ -218,7 +249,7 @@ mod imp {
         /// proxy would check it
         #[test]
         fn ntlm_round_trip() {
-            let mut client = Negotiator::new("NTLM", "localhost").expect("client credentials");
+            let mut client = Negotiator::new("NTLM", "localhost", None).expect("client credentials");
             let package = wide("NTLM");
             let mut server_cred = SecHandle::default();
             let mut expiry = 0i64;

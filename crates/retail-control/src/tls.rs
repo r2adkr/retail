@@ -202,7 +202,7 @@ impl TlsListener {
                             return Ok(looks_like_http(&io.prefix).then_some(Conn::Plain(io)));
                         };
                         let decision = match &reality {
-                            Some(cfg) => crate::reality::decide(cfg, &replay, &hello),
+                            Some(cfg) => crate::reality::decide(cfg, &replay, &hello, peer.ip()),
                             None => crate::reality::Decision::Normal,
                         };
                         match decision {
