@@ -1595,7 +1595,7 @@ mod preview {
         let fonts = Fonts::load()?;
         let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System }, crate::LangPref::System);
         st.view = sample(match state {
-            "change" | "server-menu" | "many-servers" | "language" | "no-nat" => "connected",
+            "change" | "server-menu" | "many-servers" | "language" => "connected",
             "join" => "login",
             _ => state,
         });
@@ -1630,9 +1630,6 @@ mod preview {
             st.inputs[AUTH_KEY].set("rtl-auth-3kd92mfp1qz");
             st.inputs[DEVICE].set("work-laptop");
             st.focus = Some(AUTH_KEY);
-        }
-        if let Some((what, why)) = crate::api::no_nat("has no built-in NAT").filter(|_| state == "no-nat") {
-            st.message = Some((format!("{what}\n{why}"), true));
         }
         if state == "login" {
             st.message = Some(("registration rejected (HTTP 401): invalid, used or expired auth key".into(), true));

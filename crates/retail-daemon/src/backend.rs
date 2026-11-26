@@ -79,7 +79,7 @@ impl Backend {
         let mut persisted = Persisted::load(&state_path)?;
         // 1.0.2 and earlier saved it even where it cannot work
         if persisted.prefs.advertise_exit_node
-            && let Err(e) = crate::exit::check_gateway(true)
+            && let Err(e) = crate::exit::can_offer_exit()
         {
             tracing::warn!("no longer offering this device as an exit node: {e:#}");
             persisted.prefs.advertise_exit_node = false;
@@ -409,9 +409,7 @@ impl Backend {
         }
         // Refused before it is saved, so the switch does not stay on
         if prefs.advertise_exit_node && !p.prefs.advertise_exit_node {
-            crate::exit::check_gateway(true).context("offering this device as an exit node")?;
-        } else if !prefs.advertise_routes.is_empty() && prefs.advertise_routes != p.prefs.advertise_routes {
-            crate::exit::check_gateway(false).context("routing networks for the mesh")?;
+            crate::exit::can_offer_exit().context("offering this device as an exit node")?;
         }
         let restart = prefs.memory_limit_mb != p.prefs.memory_limit_mb;
         p.prefs = prefs;
@@ -589,7 +587,13 @@ impl Backend {
         let tun = engine.tun_device().0;
         let dns = tokio::task::spawn_blocking(move || crate::magicdns::SystemDns::configure(&tun)).await.ok().flatten();
         let (tun, tun_index) = engine.tun_device();
-        let gateway = Arc::new(std::sync::Mutex::new(Gateway::new(&tun, tun_index)));
+        // Weak: the session's end must free the engine and its TUN device
+        let weak = Arc::downgrade(&engine);
+        let userspace: crate::exit::Userspace = Box::new(move |on| match weak.upgrade() {
+            Some(engine) => engine.set_userspace_forwarding(on),
+            None => Ok(()),
+        });
+        let gateway = Arc::new(std::sync::Mutex::new(Gateway::new(&tun, tun_index, userspace)));
         // Routes and forwarding follow the netmap: what peers route, and what
         // the server approved for this device
         let mut routes = engine.subscribe_routes();

@@ -626,6 +626,9 @@ pub struct Engine {
     helper_role: watch::Sender<bool>,
     /// Our helper code while we are one, for the control connection to send
     helper_code: watch::Sender<Option<String>>,
+    /// Forwarding for the mesh through our own network stack, where the
+    /// system has no NAT (`forward`)
+    forward: RwLock<Option<Arc<crate::forward::Forward>>>,
 }
 
 impl Engine {
@@ -721,7 +724,51 @@ impl Engine {
             dns_queries_rx: Mutex::new(Some(dns_queries_rx)),
             helper_role: watch::channel(false).0,
             helper_code: watch::channel(None).0,
+            forward: RwLock::default(),
         })
+    }
+
+    /// Forwards for the mesh through our own network stack, or stops
+    pub fn set_userspace_forwarding(self: &Arc<Self>, on: bool) -> Result<()> {
+        let mut forward = self.forward.write().unwrap();
+        if on == forward.is_some() {
+            return Ok(());
+        }
+        *forward = if on {
+            Some(Arc::new(crate::forward::Forward::start(self, self.self_ip).context("forwarding through this device's network stack")?))
+        } else {
+            None
+        };
+        Ok(())
+    }
+
+    /// Sends one IP packet to the peer it is addressed to
+    pub fn send_ip(&self, packet: &[u8]) {
+        let Some(dst) = packet.get(16..20).and_then(|d| <[u8; 4]>::try_from(d).ok()).map(Ipv4Addr::from) else { return };
+        let Some(peer) = self.peers.read().unwrap().by_ip.get(&dst).cloned() else { return };
+        let mut out = vec![0u8; (packet.len() + 32).max(148)];
+        let n = {
+            let mut tunn = peer.tunn.lock().unwrap();
+            let n = tunn.encapsulate(packet, &mut out).len_if_network();
+            if n.is_some() {
+                tunn.note_sent(packet.len(), true);
+            }
+            n
+        };
+        if let Some(n) = n {
+            self.send_to_peer(&peer, &out[..n]);
+        }
+    }
+
+    /// Hands one IP packet to the system, as if it came from the mesh
+    pub async fn write_ip(&self, packet: &[u8]) {
+        if self.vnet_hdr {
+            let mut buf = vec![0u8; TUN_OFFSET];
+            buf.extend_from_slice(packet);
+            self.tun_send(&buf).await;
+        } else {
+            self.tun_send(packet).await;
+        }
     }
 
     /// Name and interface index of the TUN device (index 0 where unknown)
@@ -1311,6 +1358,11 @@ impl Engine {
                 1
             };
             job.n = n;
+            if let Some(f) = self.forward.read().unwrap().as_ref() {
+                for j in 0..n {
+                    f.outbound(&mut job.bufs[j][..job.sizes[j]]);
+                }
+            }
             Stats::add(&self.stats.tun_reads, 1);
             Stats::add(&self.stats.tun_read_pkts, n);
             let t0 = Instant::now();
@@ -1772,13 +1824,30 @@ impl Engine {
     /// With a virtio-net header (Linux offload) runs of TCP segments are merged
     /// first, so a burst costs one write.
     async fn write_tun(&self, bufs: &mut [Vec<u8>], gro: &mut crate::gro::Coalescer) {
+        let forward = self.forward.read().unwrap().clone();
+        let own_routes = forward.as_ref().map(|_| self.own_routes.read().unwrap().clone()).unwrap_or_else(|| Arc::from(Vec::new()));
+        let here = self.here(&own_routes);
+        // Forwarding without the system's NAT: our stack takes what is not for this device
+        let keep = |b: &mut [u8]| match &forward {
+            Some(f) if b.len() >= 20 && b[16..20] != self.self_ip.octets() => {
+                let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
+                f.inbound(b, here.forwarded(dst))
+            }
+            Some(f) => f.inbound(b, false),
+            None => true,
+        };
         if !self.vnet_hdr {
-            for b in bufs.iter() {
-                self.tun_send(&b[TUN_OFFSET..]).await;
+            for b in bufs.iter_mut() {
+                if keep(&mut b[TUN_OFFSET..]) {
+                    self.tun_send(&b[TUN_OFFSET..]).await;
+                }
             }
             return;
         }
         for b in bufs.iter_mut() {
+            if !keep(&mut b[TUN_OFFSET..]) {
+                continue;
+            }
             if gro.try_append(&b[TUN_OFFSET..]) {
                 continue;
             }

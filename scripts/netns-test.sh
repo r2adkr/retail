@@ -29,6 +29,9 @@
 #   exit          A uses B as exit node to reach a web server A's router blocks,
 #                 and the web server must see B's public address
 #   exit-relay    the same with UDP blocked, so exit traffic goes through the relay
+#   exit-userspace  exit, with B forwarding through its own network stack as on
+#                 Windows Home (RETAIL_USERSPACE_NAT=1): no IP forwarding, no NAT rules;
+#                 also UDP (with fragments), ping and a refused port
 #   exit-offline  B (the exit) stops: A's internet is blocked (fail closed) while
 #                 its control connection stays up, and `--exit-node none` restores it
 #   host-nat      B hosts the network behind its router, which runs miniupnpd:
@@ -210,6 +213,89 @@ start_web() {
     for _ in $(seq 50); do curl -s -o /dev/null "http://203.0.113.80:8080/" && break; sleep 0.1; done
 }
 
+# B forwards through its own stack: the kernel neither forwards nor NATs
+userspace_checks() {
+    local ok=1
+    grep -q "through this device's own network stack" "$WORK/nodeB.log" || { echo "  B did not forward through its own stack"; ok=0; }
+    [ "$(nsx hB sysctl -n net.ipv4.ip_forward)" = 0 ] || { echo "  B turned IP forwarding on"; ok=0; }
+    nsx hB iptables -t nat -L RETAIL-NAT >/dev/null 2>&1 && { echo "  B has NAT rules"; ok=0; }
+    # A closed port answers at once, as it would without B in between
+    local rc=0
+    nsx hA curl -s -m 5 -o /dev/null "http://203.0.113.80:9/" || rc=$?
+    [ "$rc" = 7 ] && echo "  closed port refused through the exit" || { echo "  closed port: curl exit $rc, expected 7 (refused)"; ok=0; }
+    # UDP both ways, a reply bigger than the tunnel's MTU too
+    python3 - >"$WORK/udp-echo.log" 2>&1 <<'PY' &
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("203.0.113.80", 5353))
+while True:
+    data, addr = s.recvfrom(65535)
+    s.sendto(data * (3000 // len(data) + 1) if data.startswith(b"big") else data, addr)
+PY
+    local echo_pid=$!
+    sleep 0.3
+    local udp
+    udp=$(nsx hA python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+out = []
+for msg in (b"small", b"big!"):
+    try:
+        s.sendto(msg, ("203.0.113.80", 5353))
+        out.append(str(len(s.recvfrom(65535)[0])))
+    except OSError as e:
+        out.append("none")
+print(" ".join(out))
+PY
+)
+    kill "$echo_pid" 2>/dev/null
+    echo "  UDP through the exit: reply sizes $udp"
+    set -- $udp
+    [ "$1" = 5 ] && [ "${2:-none}" != none ] && [ "${2:-0}" -gt 1280 ] || { echo "  UDP through the exit failed"; ok=0; }
+    if nsx hA ping -c1 -W3 203.0.113.80 >/dev/null; then echo "  ping through the exit answered"; else echo "  ping through the exit unanswered"; ok=0; fi
+    # Each open connection costs B its splice buffers
+    python3 - >"$WORK/hold.log" 2>&1 <<'PY' &
+import socket, threading
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("203.0.113.80", 7070))
+s.listen(512)
+held = []
+while True:
+    c, _ = s.accept()
+    c.sendall(b"x")
+    held.append(c)
+PY
+    local hold_pid=$!
+    sleep 0.3
+    nsx hA python3 - >"$WORK/held" <<'PY' &
+import socket, time
+cs = []
+for _ in range(200):
+    try:
+        c = socket.create_connection(("203.0.113.80", 7070), timeout=5)
+        if c.recv(1) == b"x":
+            cs.append(c)
+    except OSError:
+        pass
+print(len(cs), flush=True)
+time.sleep(4)
+PY
+    local client=$!
+    sleep 2.5
+    local held rss
+    held=$(cat "$WORK/held")
+    rss=$(awk '/^VmRSS/ {print $2}' "/proc/${pid[B]}/status")
+    wait "$client"
+    kill "$hold_pid" 2>/dev/null
+    printf "  %s connections open through the exit, B RSS %.1f MiB
+" "${held:-0}" "$(awk -v k="${rss:-0}" 'BEGIN{print k/1024}')"
+    [ "${held:-0}" = 200 ] || { echo "  not every connection opened"; ok=0; }
+    [ "${rss:-0}" -le "$PEAK_LIMIT_KB" ] || { echo "  B above 20 MiB with them open"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
 exit_checks() {  # scenario ip_b
     local sc=$1 ip_b=$2 ok=1
     start_web
@@ -241,6 +327,9 @@ exit_checks() {  # scenario ip_b
     pkill -x iperf3 || true
     [ -n "$bw" ] && [ "$bw" != null ] || ok=0
 
+    if [ "$sc" = exit-userspace ]; then
+        userspace_checks || ok=0
+    fi
     if [ "$sc" = exit-offline ]; then
         # 198.51.101.1 is reachable from A now, and with the exit gone it must not be
         nsx hA ping -c1 -W1 198.51.101.1 >/dev/null || { echo "  harness: 198.51.101.1 unreachable via exit"; }
@@ -938,6 +1027,8 @@ run_scenario() {
             envs[A]="HTTPS_PROXY=http://192.168.1.1:3128"
             envs[B]="HTTPS_PROXY=http://192.168.2.1:3128" ;;
         nat64) start_nat64 ;;
+        # A new namespace may inherit forwarding: B must not need it
+        exit-userspace) envs[B]="RETAIL_USERSPACE_NAT=1"; nsx hB sysctl -qw net.ipv4.ip_forward=0 ;;
     esac
     if [ "$sc" = helper ]; then
         local code
@@ -1305,7 +1396,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device mesh-fallback magicdns acl subnet expire restore server-cli switch install update
+    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-userspace exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device mesh-fallback magicdns acl subnet expire restore server-cli switch install update
 else
     set -- "$WHICH"
 fi

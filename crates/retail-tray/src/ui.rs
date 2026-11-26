@@ -624,11 +624,7 @@ fn error_text(s: &StatusResponse) -> Option<(String, Option<String>)> {
             None => (tr("Can't reach the server").to_string(), Some(p.detail.clone())),
         });
     }
-    let e = s.last_error.as_deref()?;
-    Some(match crate::api::no_nat(e) {
-        Some((what, why)) => (what.to_string(), Some(why.to_string())),
-        None => (e.to_string(), None),
-    })
+    s.last_error.clone().map(|e| (e, None))
 }
 
 /// Why the server cannot be reached, and what to do: a line each

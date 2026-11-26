@@ -59,6 +59,14 @@ impl Here<'_> {
         }
         own.then_some(Dest::Own)
     }
+
+    /// For the internet or a network this device routes: what forwarding is for
+    pub fn forwarded(&self, dst: Ipv4Addr) -> bool {
+        matches!(self.classify(dst), Some(Dest::Subnet | Dest::Internet))
+            // Whatever a route says: never what only a machine or its link
+            // answers, which our own sockets would reach
+            && Ipv4Net::new(dst, 32).is_some_and(|n| n.check_route().is_ok())
+    }
 }
 
 /// A flow is forgotten after this long without packets either way
@@ -293,6 +301,23 @@ mod tests {
         let router = Here { ip: ME, exit: false, routes: &routes };
         assert!(f.inbound(&lan, &router));
         assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::new(10, 98, 0, 7), 1000, 22), &router));
+    }
+
+    #[test]
+    fn only_the_internet_and_routed_networks_are_forwarded() {
+        assert!(EXIT.forwarded(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!PLAIN.forwarded(Ipv4Addr::new(8, 8, 8, 8)));
+        // Even under a route that should never have been approved
+        let routes: [Ipv4Net; 2] = ["10.99.0.0/24".parse().unwrap(), "128.0.0.0/1".parse().unwrap()];
+        let router = Here { ip: ME, exit: true, routes: &routes };
+        assert!(router.forwarded(Ipv4Addr::new(10, 99, 0, 7)));
+        for dst in [[127, 0, 0, 1], [0, 0, 0, 0], [169, 254, 169, 254], [224, 0, 0, 1], [255, 255, 255, 255], [100, 64, 0, 9], [240, 0, 0, 1]] {
+            assert!(!router.forwarded(Ipv4Addr::from(dst)), "{dst:?}");
+        }
+        // An exit node keeps its private networks to itself
+        for dst in [[192, 168, 1, 1], [10, 0, 0, 1], [172, 16, 0, 1]] {
+            assert!(!EXIT.forwarded(Ipv4Addr::from(dst)), "{dst:?}");
+        }
     }
 
     #[test]

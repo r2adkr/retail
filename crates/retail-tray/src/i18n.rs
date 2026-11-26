@@ -382,8 +382,6 @@ const TABLE: &[[&str; 5]] = &[
     ["The invite code is damaged. Copy and paste it again.", "초대 코드가 손상됐습니다. 다시 복사해 붙여 넣으세요.", "招待コードが壊れています。もう一度コピーして貼り付けてください。", "邀请码已损坏。请重新复制并粘贴。", "El código de invitación está dañado. Cópialo y pégalo de nuevo."],
     ["Only part of the invite code came through. Copy and paste it again.", "초대 코드가 일부만 들어왔습니다. 다시 복사해 붙여 넣으세요.", "招待コードの一部しか入力されていません。もう一度コピーして貼り付けてください。", "邀请码不完整。请重新复制并粘贴。", "Solo llegó parte del código. Cópialo y pégalo de nuevo."],
     ["Could not reach the server. Check the server address and your network.", "서버에 연결하지 못했습니다. 서버 주소와 네트워크를 확인하세요.", "サーバーに接続できませんでした。サーバーのアドレスとネットワークを確認してください。", "无法连接到服务器。请检查服务器地址和网络。", "No se pudo conectar con el servidor. Comprueba la dirección y tu red."],
-    ["This device can't be an exit node or route networks", "이 기기는 Exit node나 네트워크 라우터가 될 수 없습니다", "このデバイスは出口ノードやルーターになれません", "此设备无法作为出口节点或路由网络", "Este dispositivo no puede ser nodo de salida ni enrutar redes"],
-    ["This edition of Windows has no built-in NAT (WinNAT)", "이 Windows 에디션에는 내장 NAT(WinNAT)가 없습니다", "この Windows エディションには NAT (WinNAT) がありません", "此 Windows 版本没有内置 NAT (WinNAT)", "Esta edición de Windows no incluye NAT (WinNAT)"],
     ["Permission denied. Run as administrator (on Linux, join the retail group).", "권한이 없습니다. 관리자 권한으로 실행하세요(Linux는 retail 그룹).", "権限がありません。管理者として実行してください（Linux では retail グループ）。", "没有权限。请以管理员身份运行（Linux 上需加入 retail 组）。", "Permiso denegado. Ejecuta como administrador (en Linux, únete al grupo retail)."],
     // The installer window
     ["Network", "네트워크", "ネットワーク", "网络", "Red"],

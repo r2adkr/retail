@@ -371,17 +371,7 @@ fn api_error(body: &[u8], code: u16) -> String {
     }
 }
 
-/// The daemon's words when this device cannot forward for the mesh: a line,
-/// and why
-pub fn no_nat(msg: &str) -> Option<(&'static str, &'static str)> {
-    msg.contains("has no built-in NAT")
-        .then(|| (tr("This device can't be an exit node or route networks"), tr("This edition of Windows has no built-in NAT (WinNAT)")))
-}
-
 fn friendly(msg: String) -> String {
-    if let Some((what, why)) = no_nat(&msg) {
-        return format!("{what}\n{why}");
-    }
     let known: [(&str, &'static str); 9] = [
         ("invalid, used or expired auth key", "The invite code or auth key is wrong, already used, or expired."),
         ("too many attempts", "Too many attempts. Try again in a minute."),
@@ -409,10 +399,5 @@ mod tests {
         let key = br#"{"error":"registration rejected (HTTP 401): invalid, used or expired auth key"}"#;
         assert_eq!(api_error(key, 400), "The invite code or auth key is wrong, already used, or expired.");
         assert_eq!(api_error(b"not json", 502), "HTTP 502");
-        let nat = br#"{"error":"offering this device as an exit node: this edition of Windows has no built-in NAT (WinNAT), so this device cannot forward traffic for the mesh"}"#;
-        // Other tests change the language meanwhile
-        let (what, why) = no_nat("has no built-in NAT").unwrap();
-        assert_eq!(api_error(nat, 400), format!("{what}\n{why}"));
-        assert_eq!(no_nat("connecting to 203.0.113.5:443 timed out"), None);
     }
 }

@@ -8,6 +8,7 @@ mod exit;
 mod filter;
 mod cloudflared;
 mod firewall;
+mod forward;
 mod gro;
 mod happy;
 mod helper_host;

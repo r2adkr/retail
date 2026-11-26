@@ -92,39 +92,30 @@ fn decode(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Forwarding for the mesh needs a NAT the system lacks
-#[cfg(target_os = "windows")]
-#[derive(Debug)]
-pub struct NoNat;
-
-#[cfg(target_os = "windows")]
-impl std::fmt::Display for NoNat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("this edition of Windows has no built-in NAT (WinNAT), so this device cannot forward traffic for the mesh")
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl std::error::Error for NoNat {}
-
-/// Whether this device can be an exit node (`exit`) or route networks for
-/// the mesh, checked before anything changes
-pub fn check_gateway(exit: bool) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = exit;
-        if !windows::has_nat() {
-            return Err(NoNat.into());
-        }
-    }
+/// Whether this device can be an exit node, checked before anything changes
+pub fn can_offer_exit() -> Result<()> {
     #[cfg(target_os = "macos")]
-    if exit {
-        bail!("offering an exit node is supported on Linux and Windows only");
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let _ = exit;
+    bail!("offering an exit node is supported on Linux and Windows only");
+    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
+
+/// Forwarding through our own network stack (`forward`) instead of the
+/// system's NAT: where there is none (Windows Home has no WinNAT), or when
+/// `RETAIL_USERSPACE_NAT=1` asks for it (tests)
+fn userspace() -> bool {
+    if std::env::var("RETAIL_USERSPACE_NAT").is_ok_and(|v| v == "1") {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    if !windows::has_nat() {
+        return true;
+    }
+    false
+}
+
+/// Turns forwarding through our own network stack on or off
+pub type Userspace = Box<dyn Fn(bool) -> Result<()> + Send>;
 
 fn run_quiet(program: &str, args: &[&str]) -> bool {
     Command::new(program)
@@ -277,6 +268,7 @@ pub struct Gateway {
     /// macOS: the reference that keeps pf enabled for us
     #[allow(dead_code)]
     pf_token: Option<String>,
+    userspace: Userspace,
 }
 
 /// The exit's own private networks stay unreachable unless it routes them
@@ -284,8 +276,8 @@ pub struct Gateway {
 const PRIVATE: [&str; 6] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8"];
 
 impl Gateway {
-    pub fn new(tun: &str, tun_index: u32) -> Self {
-        Gateway { tun: tun.to_string(), tun_index, restore_forwarding: false, exit: false, routes: Vec::new(), pf_token: None }
+    pub fn new(tun: &str, tun_index: u32, userspace: Userspace) -> Self {
+        Gateway { tun: tun.to_string(), tun_index, restore_forwarding: false, exit: false, routes: Vec::new(), pf_token: None, userspace }
     }
 
     pub fn exit(&self) -> bool {
@@ -298,13 +290,20 @@ impl Gateway {
             return Ok(());
         }
         // Before anything changes; nothing was set up where it cannot work
-        if exit || !routes.is_empty() {
-            check_gateway(exit)?;
+        if exit {
+            can_offer_exit()?;
         }
         self.cleanup();
         self.exit = exit;
         self.routes = routes.to_vec();
-        if !exit && routes.is_empty() {
+        let wanted = exit || !routes.is_empty();
+        let userspace = wanted && userspace();
+        if let Err(e) = (self.userspace)(userspace) {
+            self.exit = false;
+            self.routes.clear();
+            return Err(e);
+        }
+        if !wanted || userspace {
             return Ok(());
         }
         if let Err(e) = self.install() {
