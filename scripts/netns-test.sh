@@ -22,6 +22,8 @@
 #   ipv6          IPv4 symmetric NAT, IPv6 routed (no NAT)   -> direct over IPv6
 #   recover       udp-blocked, then the block is lifted      -> relay, then direct
 #   idle-relay    udp-blocked, then 40 s idle                -> still relay, no loss
+#   relay-load    udp-blocked on a 10 Mbit/s link, a download -> relay, pings
+#                 through it stay under 400 ms (no seconds of queue)
 #   failover      direct, then UDP blocked mid-ping          -> relay, outage < 6 s
 #   failover-a/-b as failover, but only router A (B) drops UDP, so one direction
 #                 dies, then the cut is lifted               -> relay, then direct
@@ -145,7 +147,7 @@ cleanup() {
 block() {  # scenario
     for s in A B; do
         case $1 in
-            udp-blocked | recover | idle-relay | control-drop | exit-relay | reality)
+            udp-blocked | recover | idle-relay | relay-load | control-drop | exit-relay | reality)
                 nsx "r$s" iptables -I FORWARD 1 -i "lan$s" -p udp -j DROP
                 nsx "r$s" ip6tables -I FORWARD 1 -i "lan$s" -p udp -j DROP ;;
             tcp443-only)
@@ -214,6 +216,31 @@ start_web() {
 }
 
 # B forwards through its own stack: the kernel neither forwards nor NATs
+# A's link to the internet at 10 Mbit/s both ways, as a slow mobile network;
+# B sends to A through the relay as fast as it can while A pings B
+relay_load_checks() {  # ip_b
+    local ip_b=$1 ok=1
+    tc qdisc add dev inetA root tbf rate 10mbit burst 32kbit latency 50ms
+    nsx rA tc qdisc add dev wanA root tbf rate 10mbit burst 32kbit latency 50ms
+    nsx hB iperf3 -s -D -B "$ip_b" >/dev/null; sleep 0.3
+    nsx hA timeout 30 iperf3 -c "$ip_b" -R -t 12 -J >"$WORK/load.json" 2>/dev/null &
+    local load=$!
+    sleep 3
+    nsx hA ping -c 40 -i 0.2 -W 5 "$ip_b" >"$WORK/load-ping" 2>&1
+    wait "$load"
+    pkill -x iperf3 || true
+    tc qdisc del dev inetA root 2>/dev/null
+    nsx rA tc qdisc del dev wanA root 2>/dev/null
+    local bw stats max avg
+    bw=$(jq -r '.end.sum_received.bits_per_second / 1e6 | floor' "$WORK/load.json" 2>/dev/null)
+    stats=$(awk -F'[/ ]' '/^rtt/ {print $8, $9}' "$WORK/load-ping")
+    read -r avg max <<<"$stats"
+    echo "  B->A through the relay at 10 Mbit/s: ${bw:-failed} Mbit/s; pings meanwhile avg ${avg:-?} ms, max ${max:-?} ms, $(grep -o '[0-9]*% packet loss' "$WORK/load-ping")"
+    [ "${bw:-0}" -ge 4 ] || { echo "  the download was too slow"; ok=0; }
+    awk -v m="${max:-99999}" 'BEGIN{exit !(m < 400)}' || { echo "  pings waited behind the download"; ok=0; }
+    [ "$ok" = 1 ]
+}
+
 userspace_checks() {
     local ok=1
     grep -q "through this device's own network stack" "$WORK/nodeB.log" || { echo "  B did not forward through its own stack"; ok=0; }
@@ -1002,7 +1029,7 @@ run_scenario() {
         symmetric | ipv6) masq="--random-fully" ;;
     esac
     case $sc in
-        udp-blocked | symmetric | tcp443-only | udp443-only | recover | idle-relay | control-drop | exit-relay | reality) expect="relay" ;;
+        udp-blocked | symmetric | tcp443-only | udp443-only | recover | idle-relay | relay-load | control-drop | exit-relay | reality) expect="relay" ;;
         proxy | inspect | cdn) expect="relay" ;;
         ipv6) expect="direct6" ;;
         nat64 | helper | helper-device) expect="any" ;;
@@ -1200,6 +1227,7 @@ run_scenario() {
         bw=$(nsx hA timeout 20 iperf3 -c "$ip_b" -t 4 -J 2>/dev/null | jq -r '.end.sum_received.bits_per_second / 1e6 | floor' 2>/dev/null)
         echo "  iperf3 A->B: ${bw:-failed} Mbit/s"
         pkill -x iperf3 || true
+        [ "$sc" = relay-load ] && { relay_load_checks "$ip_b" || ok=0; }
     fi
     if [ "$sc" = direct ] && [ "$ok" = 1 ]; then
         # Changes from users other than root and the retail group, without
@@ -1396,7 +1424,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-userspace exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device mesh-fallback magicdns acl subnet expire restore server-cli switch install update
+    set -- direct udp-blocked relay-load symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-userspace exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device mesh-fallback magicdns acl subnet expire restore server-cli switch install update
 else
     set -- "$WHICH"
 fi

@@ -164,7 +164,7 @@ async fn run_once(
     engine: &Engine,
     target: &Target,
     token: &str,
-    relay_out: &mut mpsc::Receiver<Vec<u8>>,
+    relay_out: &mut mpsc::Receiver<crate::engine::Queued>,
 ) -> Result<()> {
     let server = target.url.as_str();
     let mut req = poll_url(server)?.into_client_request()?;
@@ -193,7 +193,7 @@ async fn run_once(
 async fn session<S>(
     engine: &Engine,
     ws: tokio_tungstenite::WebSocketStream<S>,
-    relay_out: &mut mpsc::Receiver<Vec<u8>>,
+    relay_out: &mut mpsc::Receiver<crate::engine::Queued>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -284,15 +284,22 @@ where
                 }
                 send(&mut tx, Message::Ping(Vec::new().into())).await?;
             }
-            Some(frame) = relay_out.recv() => {
+            Some(first) = relay_out.recv() => {
                 // Frames already queued go out with it, flushed (and encrypted) together
                 let batch = async {
-                    let mut bytes = frame.len();
-                    tx.feed(Message::binary(frame)).await?;
-                    while bytes < RELAY_BATCH_BYTES {
-                        let Ok(next) = relay_out.try_recv() else { break };
-                        bytes += next.len();
-                        tx.feed(Message::binary(next)).await?;
+                    let (mut next, mut bytes) = (Some(first), 0);
+                    while let Some((at, frame)) = next.take() {
+                        if at.elapsed() <= retail_proto::relay::MAX_WAIT {
+                            bytes += frame.len();
+                            tx.feed(Message::binary(frame)).await?;
+                        }
+                        if bytes >= RELAY_BATCH_BYTES {
+                            break;
+                        }
+                        next = relay_out.try_recv().ok();
+                    }
+                    if bytes == 0 {
+                        return Ok(());
                     }
                     tx.flush().await
                 };

@@ -66,6 +66,8 @@ const ACTIVE_KEEPALIVE: Duration = Duration::from_secs(1);
 const RELAY_DATA_GRACE: Duration = Duration::from_secs(2);
 /// Relay frames waiting for the control connection, at most about 1 MB
 const RELAY_OUT_QUEUE: usize = 16;
+/// A relay frame and when it was queued
+pub type Queued = (Instant, Vec<u8>);
 /// Large frames mean fewer messages, flushes and wakeups per byte: measured
 /// against 16 KB, relayed throughput rose about 60% and CPU per byte fell a
 /// third. Kept under the protocol's 64 KiB frame limit.
@@ -579,8 +581,8 @@ pub struct Engine {
     /// The UDP socket is IPv6 with IPv4 mapped in (both families usable)
     dual_stack: bool,
     endpoints: watch::Sender<Vec<SocketAddr>>,
-    relay_out: mpsc::Sender<Vec<u8>>,
-    relay_out_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+    relay_out: mpsc::Sender<Queued>,
+    relay_out_rx: Mutex<Option<mpsc::Receiver<Queued>>>,
     /// User's choice, kept even while the peer is absent from the netmap
     exit_pref: Mutex<Option<Key>>,
     advertise_exit: watch::Sender<bool>,
@@ -1119,7 +1121,7 @@ impl Engine {
         Self::relay_frame(permit, key, datagrams);
     }
 
-    fn relay_frame<'a>(permit: mpsc::Permit<'_, Vec<u8>>, key: &Key, mut datagrams: impl Iterator<Item = &'a [u8]>) {
+    fn relay_frame<'a>(permit: mpsc::Permit<'_, Queued>, key: &Key, mut datagrams: impl Iterator<Item = &'a [u8]>) {
         let Some(first) = datagrams.next() else { return };
         // All but the last datagram of a group have the first one's length
         let n = 1 + datagrams.size_hint().0;
@@ -1130,11 +1132,11 @@ impl Engine {
                 break; // Unreachable since callers send at most MAX_GSO_BYTES
             }
         }
-        permit.send(frame);
+        permit.send((Instant::now(), frame));
     }
 
     /// Taken once by the control loop
-    pub fn take_relay_out(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+    pub fn take_relay_out(&self) -> Option<mpsc::Receiver<Queued>> {
         self.relay_out_rx.lock().unwrap().take()
     }
 

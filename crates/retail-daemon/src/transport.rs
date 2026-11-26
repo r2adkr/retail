@@ -208,6 +208,7 @@ async fn carry(carrier: &Carrier, host: &str, port: u16, alts: &[String]) -> Res
         Carrier::Direct => {
             let tcp = crate::happy::connect_many(host, port, alts).await?;
             tcp.set_nodelay(true)?;
+            retail_proto::relay::limit_unsent(&tcp);
             let peer = tcp.peer_addr().ok();
             Ok((Box::new(tcp), peer))
         }

@@ -13,6 +13,36 @@ use crate::Key;
 
 /// Also the WebSocket message cap
 pub const MAX_FRAME: usize = 64 * 1024;
+/// A frame that waited longer for the connection is dropped. TCP inside backs
+/// off on the loss, and what comes after it (a game's packets) does not wait
+/// seconds behind a download on a slow relay.
+pub const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Lets a connection that carries the relay keep only a little unsent in the
+/// kernel (32 KiB, about 25 ms at 10 Mbit/s). Left alone, Linux lets it grow
+/// to half a second and more of queue in front of everything written after
+/// it. Windows sizes its send buffer to the connection by itself.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+pub fn limit_unsent(socket: &impl std::os::fd::AsRawFd) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const TCP_NOTSENT_LOWAT: libc::c_int = 25;
+    #[cfg(target_os = "macos")]
+    const TCP_NOTSENT_LOWAT: libc::c_int = 0x201;
+    let bytes: libc::c_int = 32 * 1024;
+    // SAFETY: a valid descriptor and an int option of the stated size
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_NOTSENT_LOWAT,
+            (&raw const bytes).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+pub fn limit_unsent<T>(_socket: &T) {}
 const HEADER: usize = 32;
 
 pub fn begin(key: &Key, out: &mut Vec<u8>) {

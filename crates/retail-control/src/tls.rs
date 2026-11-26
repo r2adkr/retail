@@ -176,6 +176,7 @@ impl TlsListener {
                     match tcp.accept().await {
                         Ok((stream, peer)) => {
                             let _ = stream.set_nodelay(true);
+                            retail_proto::relay::limit_unsent(&stream);
                             if raw_tx.send((Box::new(stream), peer)).await.is_err() {
                                 return;
                             }

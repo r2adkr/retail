@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -44,7 +44,7 @@ const RELAY_BATCH_BYTES: usize = 128 * 1024;
 /// Inbox of the newest poll connection per node key, tagged with its connection id
 #[derive(Default)]
 struct Relays {
-    by_key: HashMap<Key, (u64, mpsc::Sender<Bytes>)>,
+    by_key: HashMap<Key, (u64, mpsc::Sender<(Instant, Bytes)>)>,
 }
 
 #[derive(Clone)]
@@ -246,7 +246,7 @@ impl AppState {
         };
         let mut frame = Vec::from(frame);
         relay::set_key(&mut frame, from);
-        let _ = inbox.try_send(Bytes::from(frame));
+        let _ = inbox.try_send((Instant::now(), Bytes::from(frame)));
     }
 
     /// `None` if the node no longer exists
@@ -438,7 +438,7 @@ async fn serve_connection(
     node_id: i64,
     key: Key,
     mut socket: WebSocket,
-    mut inbox: mpsc::Receiver<Bytes>,
+    mut inbox: mpsc::Receiver<(Instant, Bytes)>,
 ) -> Result<()> {
     let mut changes = state.changes.subscribe();
     let mut shutdown = state.shutdown.subscribe();
@@ -544,16 +544,22 @@ async fn serve_connection(
                     Some(Err(e)) => return Err(e.into()),
                 }
             }
-            Some(frame) = inbox.recv() => {
+            Some(first) = inbox.recv() => {
                 // Frames already queued go out with it, flushed together
-                let mut bytes = frame.len();
-                socket.feed(Message::Binary(frame)).await?;
-                while bytes < RELAY_BATCH_BYTES {
-                    let Ok(next) = inbox.try_recv() else { break };
-                    bytes += next.len();
-                    socket.feed(Message::Binary(next)).await?;
+                let (mut next, mut bytes) = (Some(first), 0);
+                while let Some((at, frame)) = next.take() {
+                    if at.elapsed() <= relay::MAX_WAIT {
+                        bytes += frame.len();
+                        socket.feed(Message::Binary(frame)).await?;
+                    }
+                    if bytes >= RELAY_BATCH_BYTES {
+                        break;
+                    }
+                    next = inbox.try_recv().ok();
                 }
-                socket.flush().await?;
+                if bytes > 0 {
+                    socket.flush().await?;
+                }
             }
             Ok(()) = shutdown.changed() => {
                 let stopping = *shutdown.borrow_and_update();

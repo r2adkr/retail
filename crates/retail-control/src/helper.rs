@@ -122,6 +122,7 @@ impl Helper {
                         continue;
                     };
                     let _ = tcp.set_nodelay(true);
+                    retail_proto::relay::limit_unsent(&tcp);
                     let (shared, acceptor, secret) = (shared.clone(), acceptor.clone(), secret.clone());
                     tokio::spawn(async move {
                         if let Err(e) = handle(tcp, peer, &shared, &acceptor, &secret).await {
