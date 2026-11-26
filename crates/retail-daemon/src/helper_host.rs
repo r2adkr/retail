@@ -86,6 +86,9 @@ impl HelperHost {
         c.enabled = false;
         self.save(&c)?;
         self.halt().await;
+        // A server given the old code must not link again once this helps another
+        let _ = std::fs::remove_dir_all(self.dir.join("tls"));
+        let _ = std::fs::remove_file(self.dir.join("helper-secret"));
         Ok(())
     }
 

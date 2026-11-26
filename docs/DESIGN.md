@@ -136,7 +136,7 @@ Using the internet through another device.
 - No routing loops: the daemon's own sockets (WireGuard and STUN UDP, the control connection) bypass the tunnel: fwmark and policy routing on Linux (as wg-quick does, with connmark restore for strict rp_filter), `IP_UNICAST_IF` on Windows, `IP_BOUND_IF` on macOS. The Windows and macOS paths have not been checked on real hardware yet.
 - The tunnel carries IPv4 only, so the IPv6 internet is blocked while an exit node is in use (no leaks).
 - If the chosen exit node goes offline, the internet is blocked (fail closed). The tray and `retail status` say so, and clearing the choice restores it. The control connection stays up.
-- While an exit node is in use DNS goes through the tunnel, so if resolving the server name fails, the last address that worked is used.
+- While an exit node is in use, DNS to a public resolver goes through the tunnel; a resolver on the local network (a private address) is still asked directly, so that network sees the names looked up. If resolving the server name fails, the last address that worked is used.
 
 ### 6.5 Memory limit
 

@@ -436,8 +436,8 @@ impl Peer {
         self.routes.read().unwrap().clone()
     }
 
-    fn allowed_src<'a>(&self, routes: &'a [Ipv4Net]) -> crate::crypto::AllowedSrc<'a> {
-        crate::crypto::AllowedSrc { ip: self.ip(), internet: self.is_exit.load(Ordering::Relaxed), routes }
+    fn allowed_src<'a>(&self, routes: &'a [Ipv4Net], foreign: &'a [Ipv4Net]) -> crate::crypto::AllowedSrc<'a> {
+        crate::crypto::AllowedSrc { ip: self.ip(), internet: self.is_exit.load(Ordering::Relaxed), routes, foreign }
     }
 }
 
@@ -451,6 +451,8 @@ struct PeerTable {
     exit: Option<Arc<Peer>>,
     /// Routed networks and their routers, longest prefix first
     routes: Vec<(Ipv4Net, Arc<Peer>)>,
+    /// The same networks, which the exit node may not send from
+    routed: Option<Arc<[Ipv4Net]>>,
 }
 
 impl PeerTable {
@@ -670,7 +672,7 @@ pub struct Engine {
     /// under load, makes senders prove their address with a cookie
     mac1: boringtun::noise::rate_limiter::RateLimiter,
     /// Per address: tokens left and when they were counted
-    handshake_sources: Mutex<HashMap<std::net::IpAddr, (f32, Instant)>>,
+    handshake_sources: Mutex<HandshakeSources>,
     /// MagicDNS names of this device and its peers
     names: RwLock<crate::magicdns::Names>,
     self_dns_name: Mutex<String>,
@@ -1058,6 +1060,7 @@ impl Engine {
             table.select_exit(*self.exit_pref.lock().unwrap());
             table.routes = accepted.iter().filter_map(|(r, k)| Some((*r, table.by_key.get(k)?.clone()))).collect();
             table.routes.sort_by_key(|(r, _)| std::cmp::Reverse(r.prefix_len()));
+            table.routed = Some(table.routes.iter().map(|(r, _)| *r).collect());
             table
         };
         *self.peers.write().unwrap() = table;
@@ -1290,7 +1293,8 @@ impl Engine {
         };
         let mut cookie = [0u8; 64];
         match self.mac1.verify_packet(addr.map(|a| a.ip()), dgram, &mut cookie) {
-            Ok(_) => addr.is_none_or(|a| self.source_allowed(a.ip())),
+            // Only a cookie proves the address, so only then is it worth a bucket
+            Ok(_) => addr.is_none_or(|a| !self.mac1.is_loaded() || self.source_allowed(a.ip())),
             Err(TunnResult::WriteToNetwork(reply)) => {
                 if let Some(addr) = addr {
                     self.send_now(reply, addr);
@@ -1301,13 +1305,16 @@ impl Engine {
         }
     }
 
-    fn source_allowed(&self, ip: std::net::IpAddr) -> bool {
-        let now = Instant::now();
-        let mut sources = self.handshake_sources.lock().unwrap();
-        if sources.len() > 4096 {
-            sources.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(1));
+    /// Networks other peers route, for the exit node only
+    fn foreign_to(&self, peer: &Peer) -> Option<Arc<[Ipv4Net]>> {
+        if !peer.is_exit.load(Ordering::Relaxed) {
+            return None;
         }
-        take_token(sources.entry(ip).or_insert((HANDSHAKE_BURST, now)), now)
+        self.peers.read().unwrap().routed.clone()
+    }
+
+    fn source_allowed(&self, ip: std::net::IpAddr) -> bool {
+        charge_source(&mut self.handshake_sources.lock().unwrap(), ip, Instant::now())
     }
 
     fn lookup_incoming(&self, pkt: &[u8]) -> Option<Arc<Peer>> {
@@ -1790,8 +1797,9 @@ impl Engine {
                 b.bufs.push(vec![0u8; PKT_BUF]);
             }
 
-            let peer_routes = peer.routes();
-            crate::crypto::decrypt_batch(&session, &run, &mut b.bufs[b.len..], TUN_OFFSET, peer.allowed_src(&peer_routes), &mut results);
+            let (peer_routes, foreign) = (peer.routes(), self.foreign_to(&peer));
+            let allowed = peer.allowed_src(&peer_routes, foreign.as_deref().unwrap_or_default());
+            crate::crypto::decrypt_batch(&session, &run, &mut b.bufs[b.len..], TUN_OFFSET, allowed, &mut results);
 
             // Keep delivered packets contiguous and in order
             let first = b.len;
@@ -1865,7 +1873,8 @@ impl Engine {
             TunnResult::WriteToTunnelV4(b, inner_src) => {
                 let (start, len) = (b.as_ptr() as usize - base, b.len());
                 drop(tunn);
-                if !peer.allowed_src(&peer.routes()).permits(inner_src) {
+                let foreign = self.foreign_to(&peer);
+                if !peer.allowed_src(&peer.routes(), foreign.as_deref().unwrap_or_default()).permits(inner_src) {
                     tracing::debug!(%inner_src, "dropping packet with spoofed source");
                     return false;
                 }
@@ -2492,6 +2501,37 @@ fn local_endpoints(port: u16, ipv6: bool) -> Vec<SocketAddr> {
     eps
 }
 
+const MAX_HANDSHAKE_SOURCES: usize = 4096;
+/// Token buckets by source, and when idle ones were last dropped
+type HandshakeSources = (HashMap<std::net::IpAddr, (f32, Instant)>, Option<Instant>);
+
+/// Per IPv4 address or IPv6 /64. Idle buckets are full again within a second,
+/// so dropping them loses nothing; with the table still full, new sources
+/// pass on the cookie alone.
+fn charge_source(
+    (sources, swept): &mut HandshakeSources,
+    ip: std::net::IpAddr,
+    now: Instant,
+) -> bool {
+    let key = match ip {
+        std::net::IpAddr::V6(v6) => {
+            std::net::IpAddr::V6((u128::from(v6) & !((1u128 << 64) - 1)).into())
+        }
+        v4 => v4,
+    };
+    if let Some(bucket) = sources.get_mut(&key) {
+        return take_token(bucket, now);
+    }
+    if sources.len() >= MAX_HANDSHAKE_SOURCES && swept.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+        sources.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(1));
+        *swept = Some(now);
+    }
+    if sources.len() >= MAX_HANDSHAKE_SOURCES {
+        return true;
+    }
+    take_token(sources.entry(key).or_insert((HANDSHAKE_BURST, now)), now)
+}
+
 /// A token bucket of `HANDSHAKES_PER_SOURCE` with room for `HANDSHAKE_BURST`
 fn take_token((tokens, at): &mut (f32, Instant), now: Instant) -> bool {
     *tokens = (*tokens + now.duration_since(*at).as_secs_f32() * HANDSHAKES_PER_SOURCE).min(HANDSHAKE_BURST);
@@ -2514,6 +2554,26 @@ mod tests {
         assert_eq!((0..100).filter(|_| take_token(&mut bucket, t0)).count(), HANDSHAKE_BURST as usize);
         assert!(take_token(&mut bucket, t0 + Duration::from_millis(60)));
         assert!(!take_token(&mut bucket, t0 + Duration::from_millis(60)));
+    }
+
+    #[test]
+    fn handshake_sources_are_per_v6_prefix_and_bounded() {
+        let t0 = Instant::now();
+        let mut table = Default::default();
+        let burst = HANDSHAKE_BURST as usize;
+        let a: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: std::net::IpAddr = "2001:db8:1:2:ffff::9".parse().unwrap();
+        assert_eq!((0..burst).filter(|_| charge_source(&mut table, a, t0)).count(), burst);
+        assert!(!charge_source(&mut table, b, t0));
+        assert!(charge_source(&mut table, "2001:db8:1:3::1".parse().unwrap(), t0));
+        for i in 0..MAX_HANDSHAKE_SOURCES as u32 {
+            charge_source(&mut table, std::net::Ipv4Addr::from(0x0a00_0000 + i).into(), t0);
+        }
+        assert_eq!(table.0.len(), MAX_HANDSHAKE_SOURCES);
+        assert!(!charge_source(&mut table, b, t0));
+        let later = t0 + Duration::from_secs(2);
+        assert!(charge_source(&mut table, "198.51.100.7".parse().unwrap(), later));
+        assert!(table.0.len() < 10);
     }
 
     #[test]

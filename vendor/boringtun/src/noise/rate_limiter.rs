@@ -112,6 +112,12 @@ impl RateLimiter {
         self.count.fetch_add(1, Ordering::SeqCst) >= self.limit
     }
 
+    /// Past the limit this second: initiations accepted now carried a cookie
+    /// (mac2), so their source address is proven
+    pub fn is_loaded(&self) -> bool {
+        self.count.load(Ordering::SeqCst) > self.limit
+    }
+
     pub(crate) fn format_cookie_reply<'a>(
         &self,
         idx: u32,

@@ -30,8 +30,9 @@ const MAX_ENDPOINTS: usize = 16;
 /// wait, and only the newest is applied.
 const ENDPOINTS_BURST: usize = 5;
 const ENDPOINTS_WINDOW: Duration = Duration::from_secs(5);
-/// Spaces one connection's updates that cost every node a netmap (endpoints,
-/// exit node and route offers): a burst goes through, then one per window
+/// Spaces one node's updates that cost every node a netmap (endpoints, exit
+/// node and route offers), across all its connections and reconnects: a
+/// burst goes through, then one per window
 struct Pacer {
     due: tokio::time::Instant,
     applied: std::collections::VecDeque<tokio::time::Instant>,
@@ -188,6 +189,8 @@ pub struct AppState {
     /// Where tunnels hand over the connections they carry
     pub(crate) inject: Arc<std::sync::OnceLock<crate::tls::Injector>>,
     polls: Arc<Mutex<HashMap<String, Arc<crate::tunnel::PollSession>>>>,
+    /// Endpoints and Hostinfo pacing per node id
+    pacers: Arc<Mutex<HashMap<i64, [Pacer; 2]>>>,
 }
 
 impl AppState {
@@ -197,6 +200,7 @@ impl AppState {
             db,
             changes: Arc::new(tx),
             online: Arc::default(),
+            pacers: Arc::default(),
             stun_servers: Arc::new(Mutex::new(stun_servers)),
             register_attempts: Arc::default(),
             relays: Arc::default(),
@@ -339,13 +343,36 @@ impl AppState {
         self.online.lock().unwrap().contains_key(&id)
     }
 
-    fn set_online(&self, id: i64, delta: isize) {
+    /// Whether the node came online or went offline with this
+    fn set_online(&self, id: i64, delta: isize) -> bool {
         let mut online = self.online.lock().unwrap();
         let count = online.entry(id).or_insert(0);
+        let was = *count;
         *count = count.saturating_add_signed(delta);
-        if *count == 0 {
+        let now = *count;
+        if now == 0 {
             online.remove(&id);
         }
+        (was == 0) != (now == 0)
+    }
+
+    /// Notifies when a node's coming or going is visible to others
+    async fn online_changed(&self, id: i64, delta: isize) {
+        if self.set_online(id, delta) {
+            let now = crate::db::now_unix();
+            let live = self.db.all_nodes().await.is_ok_and(|n| n.iter().any(|n| n.id == id && !n.expired(now)));
+            if live {
+                self.notify();
+            }
+        }
+    }
+
+    fn pace_due(&self, id: i64, which: usize) -> tokio::time::Instant {
+        self.pacers.lock().unwrap().entry(id).or_insert_with(|| [Pacer::new(), Pacer::new()])[which].due
+    }
+
+    fn paced(&self, id: i64, which: usize) {
+        self.pacers.lock().unwrap().entry(id).or_insert_with(|| [Pacer::new(), Pacer::new()])[which].applied();
     }
 
     /// Never waits. A full or missing inbox drops the frame.
@@ -513,14 +540,12 @@ async fn poll(
         .write_buffer_size(0)
         .max_write_buffer_size(512 * 1024);
     ws.on_upgrade(move |socket| async move {
-        state.set_online(node_id, 1);
-        state.notify();
+        state.online_changed(node_id, 1).await;
         tracing::info!(node_id, "node connected");
         if let Err(e) = serve_node(&state, node_id, socket).await {
             tracing::debug!(node_id, "poll connection ended: {e:#}");
         }
-        state.set_online(node_id, -1);
-        state.notify();
+        state.online_changed(node_id, -1).await;
         tracing::info!(node_id, "node disconnected");
     })
 }
@@ -560,13 +585,14 @@ async fn serve_connection(
     // An expired node may not relay to anyone, cause netmap rounds or act as helper
     let mut blocked = true;
     let mut pending_endpoints: Option<Vec<std::net::SocketAddr>> = None;
-    let mut endpoints_pace = Pacer::new();
     let mut pending_hostinfo: Option<(bool, Vec<Ipv4Net>)> = None;
-    let mut hostinfo_pace = Pacer::new();
+    const ENDPOINTS: usize = 0;
+    const HOSTINFO: usize = 1;
     // Send the first netmap immediately
     changes.mark_changed();
 
     loop {
+        let (endpoints_due, hostinfo_due) = (state.pace_due(node_id, ENDPOINTS), state.pace_due(node_id, HOSTINFO));
         tokio::select! {
             biased;
             changed = changes.changed() => {
@@ -588,17 +614,24 @@ async fn serve_connection(
                 }
             }
             // Ahead of the socket so a busy relay cannot starve it
-            _ = tokio::time::sleep_until(endpoints_pace.due), if pending_endpoints.is_some() => {
+            _ = tokio::time::sleep_until(endpoints_due), if pending_endpoints.is_some() => {
+                // Another connection of this node may have used the slot meanwhile
+                if state.pace_due(node_id, ENDPOINTS) > tokio::time::Instant::now() {
+                    continue;
+                }
                 let endpoints = pending_endpoints.take().unwrap_or_default();
-                endpoints_pace.applied();
+                state.paced(node_id, ENDPOINTS);
                 if state.db.set_endpoints(node_id, &endpoints).await? && !blocked {
                     tracing::debug!(node_id, ?endpoints, "endpoints updated");
                     state.notify();
                 }
             }
-            _ = tokio::time::sleep_until(hostinfo_pace.due), if pending_hostinfo.is_some() => {
+            _ = tokio::time::sleep_until(hostinfo_due), if pending_hostinfo.is_some() => {
+                if state.pace_due(node_id, HOSTINFO) > tokio::time::Instant::now() {
+                    continue;
+                }
                 let (exit_node, mut routes) = pending_hostinfo.take().unwrap_or_default();
-                hostinfo_pace.applied();
+                state.paced(node_id, HOSTINFO);
                 let mut changed = {
                     let mut exits = state.exit_nodes.lock().unwrap();
                     if exit_node { exits.insert(node_id) } else { exits.remove(&node_id) }
@@ -706,5 +739,22 @@ mod tests {
         inbox.push(frame(1));
         assert!(outbox.try_recv().is_some());
         assert!(outbox.held.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_second_connection_shares_the_node_pace() {
+        let path = std::env::temp_dir().join(format!("retail-pace-{}.json", rand::RngCore::next_u64(&mut rand::rngs::OsRng)));
+        let state = AppState::new(crate::db::Db::open(&path).await.unwrap(), Vec::new());
+        assert!(state.set_online(7, 1));
+        assert!(!state.set_online(7, 1), "a second connection is no news");
+        assert!(!state.set_online(7, -1));
+        assert!(state.set_online(7, -1));
+        for _ in 0..ENDPOINTS_BURST {
+            assert!(state.pace_due(7, 1) <= tokio::time::Instant::now());
+            state.paced(7, 1);
+        }
+        assert!(state.pace_due(7, 1) > tokio::time::Instant::now(), "every connection of node 7 waits now");
+        assert!(state.pace_due(7, 0) <= tokio::time::Instant::now());
+        let _ = std::fs::remove_file(path);
     }
 }

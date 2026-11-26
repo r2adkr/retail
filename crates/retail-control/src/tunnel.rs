@@ -71,39 +71,64 @@ use crate::net::same_network;
 /// holds buffers and a connection on the listener
 const MAX_WEBSOCKETS: usize = 1024;
 const MAX_WEBSOCKETS_PER_IP: usize = 32;
-static WEBSOCKETS: Mutex<Option<std::collections::HashMap<std::net::IpAddr, usize>>> = Mutex::new(None);
+/// A tunnel that carries nothing either way for this long is closed (the
+/// node poll inside pings every 30 s)
+const WEBSOCKET_IDLE: Duration = Duration::from_secs(120);
+static WEBSOCKETS: Mutex<Option<Websockets>> = Mutex::new(None);
 
-/// One open WebSocket tunnel, counted until dropped
-struct WebsocketSlot(std::net::IpAddr);
+/// Open tunnels by source network, oldest first, each with what closes it
+#[derive(Default)]
+struct Websockets {
+    by_ip: std::collections::HashMap<std::net::IpAddr, Vec<(u64, Arc<tokio::sync::Notify>)>>,
+    next: u64,
+}
 
-impl WebsocketSlot {
-    fn take(ip: std::net::IpAddr) -> Option<Self> {
-        let ip = same_network(ip);
-        let mut guard = WEBSOCKETS.lock().unwrap();
-        let map = guard.get_or_insert_with(Default::default);
-        let total: usize = map.values().sum();
-        let mine = map.entry(ip).or_insert(0);
-        if *mine >= MAX_WEBSOCKETS_PER_IP || total >= MAX_WEBSOCKETS {
-            if *mine == 0 {
-                map.remove(&ip);
-            }
+impl Websockets {
+    /// When full, a source holding fewer than the largest holder takes the
+    /// oldest tunnel of that holder, so a few networks cannot keep the rest out
+    fn admit(&mut self, ip: std::net::IpAddr) -> Option<(u64, Arc<tokio::sync::Notify>)> {
+        let mine = self.by_ip.get(&ip).map_or(0, Vec::len);
+        if mine >= MAX_WEBSOCKETS_PER_IP {
             return None;
         }
-        *mine += 1;
-        Some(WebsocketSlot(ip))
+        if self.by_ip.values().map(Vec::len).sum::<usize>() >= MAX_WEBSOCKETS {
+            let (_, largest) = self.by_ip.iter_mut().max_by_key(|(_, v)| v.len())?;
+            if largest.len() <= mine + 1 {
+                return None;
+            }
+            largest.remove(0).1.notify_one();
+        }
+        self.next += 1;
+        let close = Arc::new(tokio::sync::Notify::new());
+        self.by_ip.entry(ip).or_default().push((self.next, close.clone()));
+        Some((self.next, close))
+    }
+
+    fn release(&mut self, ip: std::net::IpAddr, id: u64) {
+        if let Some(v) = self.by_ip.get_mut(&ip) {
+            v.retain(|(i, _)| *i != id);
+            if v.is_empty() {
+                self.by_ip.remove(&ip);
+            }
+        }
+    }
+}
+
+/// One open WebSocket tunnel, counted until dropped
+struct WebsocketSlot(std::net::IpAddr, u64);
+
+impl WebsocketSlot {
+    fn take(ip: std::net::IpAddr) -> Option<(Self, Arc<tokio::sync::Notify>)> {
+        let ip = same_network(ip);
+        let (id, close) = WEBSOCKETS.lock().unwrap().get_or_insert_with(Default::default).admit(ip)?;
+        Some((WebsocketSlot(ip, id), close))
     }
 }
 
 impl Drop for WebsocketSlot {
     fn drop(&mut self) {
-        let mut guard = WEBSOCKETS.lock().unwrap();
-        if let Some(map) = guard.as_mut()
-            && let Some(n) = map.get_mut(&self.0)
-        {
-            *n -= 1;
-            if *n == 0 {
-                map.remove(&self.0);
-            }
+        if let Some(w) = WEBSOCKETS.lock().unwrap().as_mut() {
+            w.release(self.0, self.1);
         }
     }
 }
@@ -118,14 +143,17 @@ pub async fn websocket(
     ws: WebSocketUpgrade,
 ) -> Response {
     let peer = real_peer(peer, &headers);
-    let Some(slot) = WebsocketSlot::take(peer.0.ip()) else {
+    let Some((slot, close)) = WebsocketSlot::take(peer.0.ip()) else {
         return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
     };
     let ws = ws.max_message_size(MAX_MESSAGE).max_frame_size(MAX_MESSAGE).read_buffer_size(PIPE);
     ws.on_upgrade(move |socket| async move {
         let _slot = slot;
         if let Some(pipe) = open(&state, peer).await {
-            pump(socket, pipe).await;
+            tokio::select! {
+                _ = pump(socket, pipe) => {}
+                _ = close.notified() => {}
+            }
         }
     })
 }
@@ -134,9 +162,11 @@ async fn pump(socket: WebSocket, pipe: DuplexStream) {
     let (mut tx, mut rx) = socket.split();
     let (mut pipe_rx, mut pipe_tx) = tokio::io::split(pipe);
     let up = async {
-        while let Some(Ok(msg)) = rx.next().await {
+        let mut idle = tokio::time::Instant::now() + WEBSOCKET_IDLE;
+        while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(idle, rx.next()).await {
             match msg {
                 Message::Binary(data) => {
+                    idle = tokio::time::Instant::now() + WEBSOCKET_IDLE;
                     if pipe_tx.write_all(&data).await.is_err() {
                         break;
                     }
@@ -150,9 +180,9 @@ async fn pump(socket: WebSocket, pipe: DuplexStream) {
     let down = async {
         let mut buf = vec![0u8; PIPE];
         loop {
-            match pipe_rx.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
+            match tokio::time::timeout(WEBSOCKET_IDLE, pipe_rx.read(&mut buf)).await {
+                Ok(Ok(0) | Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
                     if tx.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
                         break;
                     }
@@ -262,11 +292,35 @@ mod tests {
     fn websocket_tunnels_are_capped_per_network() {
         let ip = |i: u16| std::net::IpAddr::from([0x2001, 0xdb8, 0, 7, 0, 0, 0, i]);
         let held: Vec<_> = (0..MAX_WEBSOCKETS_PER_IP).map(|i| WebsocketSlot::take(ip(i as u16)).unwrap()).collect();
+        assert_eq!(held.len(), MAX_WEBSOCKETS_PER_IP);
         assert!(WebsocketSlot::take(ip(999)).is_none(), "the rest of the /64 is the same source");
         let other = WebsocketSlot::take("198.51.100.1".parse().unwrap());
         assert!(other.is_some());
         drop(held);
         assert!(WebsocketSlot::take(ip(1)).is_some(), "slots come back");
+    }
+
+    #[test]
+    fn a_full_table_makes_room_for_a_new_network() {
+        let mut w = Websockets::default();
+        let net = |n: u16| std::net::IpAddr::from([0x2001, 0xdb8, n, 0, 0, 0, 0, 0]);
+        let mut handles = std::collections::HashMap::new();
+        for n in 0..(MAX_WEBSOCKETS / MAX_WEBSOCKETS_PER_IP) as u16 {
+            for _ in 0..MAX_WEBSOCKETS_PER_IP {
+                let got = w.admit(net(n)).unwrap();
+                handles.entry(net(n)).or_insert(got);
+            }
+        }
+        assert!(w.admit(net(0)).is_none());
+        let honest = "198.51.100.1".parse().unwrap();
+        assert!(w.admit(honest).is_some(), "takes the oldest tunnel of a large holder");
+        let (&holder, _) = w.by_ip.iter().find(|(_, v)| v.len() == MAX_WEBSOCKETS_PER_IP - 1).unwrap();
+        let evicted = handles[&holder].1.clone();
+        assert!(tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_millis(10), evicted.notified()).await.is_ok()
+        }));
+        assert!(w.admit(holder).is_none(), "the holder cannot take it back");
+        assert_eq!(w.by_ip.values().map(Vec::len).sum::<usize>(), MAX_WEBSOCKETS);
     }
 
     #[test]

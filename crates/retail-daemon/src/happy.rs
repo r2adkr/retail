@@ -17,8 +17,9 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Last addresses that resolved for each `host:port`, used when a lookup fails.
-/// With an exit node DNS goes through the tunnel, and if that path is down the
-/// control connection (which carries the relay) must still reach the server.
+/// With an exit node DNS to a public resolver goes through the tunnel, and if
+/// that path is down the control connection (which carries the relay) must
+/// still reach the server.
 type Resolved = HashMap<(String, u16), Vec<SocketAddr>>;
 
 static RESOLVED: Mutex<Option<Resolved>> = Mutex::new(None);

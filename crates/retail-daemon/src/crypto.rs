@@ -37,19 +37,20 @@ pub enum Decrypted {
 }
 
 /// Inner source addresses a peer may use: its mesh address, any address in
-/// the networks it routes, plus any address outside the mesh if it is our
-/// exit node.
+/// the networks it routes, plus any internet address no other peer routes if
+/// it is our exit node.
 #[derive(Clone, Copy)]
 pub struct AllowedSrc<'a> {
     pub ip: Ipv4Addr,
     pub internet: bool,
     pub routes: &'a [retail_proto::route::Ipv4Net],
+    pub foreign: &'a [retail_proto::route::Ipv4Net],
 }
 
 impl AllowedSrc<'_> {
     pub fn permits(self, src: Ipv4Addr) -> bool {
         src == self.ip
-            || (self.internet && !retail_proto::in_mesh(src))
+            || (self.internet && crate::filter::is_internet(src) && !self.foreign.iter().any(|r| r.contains(src)))
             || self.routes.iter().any(|r| r.contains(src))
     }
 }
@@ -218,20 +219,23 @@ mod tests {
     }
 
     fn only(ip: Ipv4Addr) -> AllowedSrc<'static> {
-        AllowedSrc { ip, internet: false, routes: &[] }
+        AllowedSrc { ip, internet: false, routes: &[], foreign: &[] }
     }
 
     #[test]
     fn exit_node_may_send_from_internet_but_not_other_mesh_addresses() {
         let me = Ipv4Addr::new(100, 64, 0, 2);
-        let exit = AllowedSrc { ip: me, internet: true, routes: &[] };
+        let foreign = ["203.0.113.0/24".parse().unwrap()];
+        let exit = AllowedSrc { ip: me, internet: true, routes: &[], foreign: &foreign };
         assert!(exit.permits(me));
         let routes = ["192.168.7.0/24".parse().unwrap()];
-        let router = AllowedSrc { ip: me, internet: false, routes: &routes };
+        let router = AllowedSrc { ip: me, internet: false, routes: &routes, foreign: &[] };
         assert!(router.permits(Ipv4Addr::new(192, 168, 7, 9)));
         assert!(!router.permits(Ipv4Addr::new(192, 168, 8, 9)));
         assert!(exit.permits(Ipv4Addr::new(93, 184, 216, 34)));
         assert!(!exit.permits(Ipv4Addr::new(100, 64, 0, 9)), "mesh addresses stay bound to their node");
+        assert!(!exit.permits(Ipv4Addr::new(203, 0, 113, 5)), "another peer routes it");
+        assert!(!exit.permits(Ipv4Addr::new(192, 168, 1, 1)), "not from the internet");
         assert!(!only(me).permits(Ipv4Addr::new(93, 184, 216, 34)));
     }
 
