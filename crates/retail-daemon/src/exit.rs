@@ -190,25 +190,20 @@ impl ClientRoutes {
     fn install(&self) -> Result<()> {
         let physical = windows::default_interface().context("finding the default network interface")?;
         BYPASS_IFINDEX.store(physical, Ordering::Relaxed);
-        let idx = self.tun_index.to_string();
-        for prefix in ["0.0.0.0/1", "128.0.0.0/1"] {
-            run("netsh", &["interface", "ipv4", "add", "route", prefix, &idx, "metric=0", "store=active"])?;
+        for (addr, len) in windows::HALVES_V4 {
+            windows::route(true, addr, len, self.tun_index).with_context(|| format!("adding the route to {addr}/{len}"))?;
         }
         // The TUN device drops IPv6, so routing it there blocks it
-        for prefix in ["::/1", "8000::/1"] {
-            let _ = run("netsh", &["interface", "ipv6", "add", "route", prefix, &idx, "metric=0", "store=active"]);
+        for (addr, len) in windows::HALVES_V6 {
+            let _ = windows::route(true, addr, len, self.tun_index);
         }
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     fn cleanup(&self) {
-        let idx = self.tun_index.to_string();
-        for prefix in ["0.0.0.0/1", "128.0.0.0/1"] {
-            run_quiet("netsh", &["interface", "ipv4", "delete", "route", prefix, &idx]);
-        }
-        for prefix in ["::/1", "8000::/1"] {
-            run_quiet("netsh", &["interface", "ipv6", "delete", "route", prefix, &idx]);
+        for (addr, len) in windows::HALVES_V4.into_iter().chain(windows::HALVES_V6) {
+            let _ = windows::route(false, addr, len, self.tun_index);
         }
         BYPASS_IFINDEX.store(0, Ordering::Relaxed);
     }
@@ -542,14 +537,12 @@ impl SubnetRoutes {
 
     #[cfg(target_os = "windows")]
     fn add(&self, r: Ipv4Net) -> Result<()> {
-        let idx = self.tun_index.to_string();
-        run("netsh", &["interface", "ipv4", "add", "route", &r.to_string(), &idx, "metric=0", "store=active"])
+        Ok(windows::route(true, r.addr().into(), r.prefix_len(), self.tun_index)?)
     }
 
     #[cfg(target_os = "windows")]
     fn remove(&self, r: Ipv4Net) {
-        let idx = self.tun_index.to_string();
-        run_quiet("netsh", &["interface", "ipv4", "delete", "route", &r.to_string(), &idx]);
+        let _ = windows::route(false, r.addr().into(), r.prefix_len(), self.tun_index);
     }
 
     #[cfg(target_os = "macos")]
@@ -589,6 +582,76 @@ mod windows {
         AF_INET, IN_ADDR, IN_ADDR_0, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SOCKADDR, SOCKADDR_IN,
         SOCKET, setsockopt,
     };
+
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    /// The internet in two halves, more specific than any default route
+    pub const HALVES_V4: [(IpAddr, u8); 2] = [(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1), (IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1)];
+    pub const HALVES_V6: [(IpAddr, u8); 2] =
+        [(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 1), (IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1)];
+
+    /// An on-link route into the interface, in the active store only. Through
+    /// IP Helper, not netsh: a process each costs about 0.2 s.
+    pub fn route(add: bool, addr: IpAddr, len: u8, index: u32) -> io::Result<()> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            CreateIpForwardEntry2, DeleteIpForwardEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
+        };
+        use windows_sys::Win32::Networking::WinSock::{AF_INET6, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN6};
+        const ERROR_NOT_FOUND: u32 = 1168;
+        const ERROR_OBJECT_ALREADY_EXISTS: u32 = 5010;
+        let mut row = MIB_IPFORWARD_ROW2::default();
+        // SAFETY: a valid row to fill with defaults
+        unsafe { InitializeIpForwardEntry(&mut row) };
+        row.InterfaceIndex = index;
+        row.Metric = 0;
+        row.DestinationPrefix.PrefixLength = len;
+        match addr {
+            IpAddr::V4(a) => {
+                row.DestinationPrefix.Prefix.Ipv4 = SOCKADDR_IN {
+                    sin_family: AF_INET,
+                    sin_port: 0,
+                    sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes(a.octets()) } },
+                    sin_zero: [0; 8],
+                };
+                row.NextHop.si_family = AF_INET;
+            }
+            IpAddr::V6(a) => {
+                row.DestinationPrefix.Prefix.Ipv6 = SOCKADDR_IN6 {
+                    sin6_family: AF_INET6,
+                    sin6_addr: IN6_ADDR { u: IN6_ADDR_0 { Byte: a.octets() } },
+                    ..Default::default()
+                };
+                row.NextHop.si_family = AF_INET6;
+            }
+        }
+        // SAFETY: a fully initialised row, read for the call's duration
+        let r = unsafe { if add { CreateIpForwardEntry2(&row) } else { DeleteIpForwardEntry2(&row) } };
+        match r {
+            0 => Ok(()),
+            ERROR_OBJECT_ALREADY_EXISTS if add => Ok(()),
+            ERROR_NOT_FOUND if !add => Ok(()),
+            e => Err(io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+
+    /// Run by CI as an administrator: the route lands where netsh put it
+    #[test]
+    #[ignore]
+    fn system_routes_add_and_remove() {
+        let shown = || {
+            let script = "@(Get-NetRoute -DestinationPrefix 192.0.2.128/25 -ErrorAction SilentlyContinue).Count";
+            let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let index = default_interface().unwrap();
+        let addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 128));
+        route(true, addr, 25, index).unwrap();
+        route(true, addr, 25, index).unwrap();
+        assert_eq!(shown(), "1");
+        route(false, addr, 25, index).unwrap();
+        route(false, addr, 25, index).unwrap();
+        assert_eq!(shown(), "0");
+    }
 
     pub fn default_interface() -> io::Result<u32> {
         let dst = SOCKADDR_IN {

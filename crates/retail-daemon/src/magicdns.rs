@@ -205,8 +205,8 @@ impl Drop for SystemDns {
     }
 }
 
-/// macOS needs no programs, only a file
-#[cfg(not(target_os = "macos"))]
+/// Only Linux uses programs here
+#[cfg(target_os = "linux")]
 fn run(program: &str, args: &[&str]) -> bool {
     std::process::Command::new(program)
         .args(args)
@@ -219,16 +219,168 @@ fn run(program: &str, args: &[&str]) -> bool {
 /// Windows: a name resolution policy rule for the domain
 #[cfg(windows)]
 fn setup(_tun: &str) -> bool {
-    let script = format!(
-        "Get-DnsClientNrptRule | Where-Object Comment -eq 'retail' | Remove-DnsClientNrptRule -Force; \
-         Add-DnsClientNrptRule -Namespace '.{MAGIC_DNS_DOMAIN}' -NameServers '{MAGIC_DNS_IP}' -Comment 'retail'"
-    );
-    run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])
+    nrpt::remove();
+    nrpt::add(&format!(".{MAGIC_DNS_DOMAIN}"), &MAGIC_DNS_IP.to_string())
 }
 
 #[cfg(windows)]
 fn teardown(_tun: &str) {
-    run("powershell", &["-NoProfile", "-NonInteractive", "-Command", "Get-DnsClientNrptRule | Where-Object Comment -eq 'retail' | Remove-DnsClientNrptRule -Force"]);
+    nrpt::remove();
+}
+
+/// The rule written where Add-DnsClientNrptRule writes it: a PowerShell each
+/// way cost about a second of every connect and disconnect
+#[cfg(windows)]
+mod nrpt {
+    use std::ptr::{null, null_mut};
+
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_OPTION_VOLATILE, REG_SZ,
+        REG_VALUE_TYPE, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegEnumKeyExW, RegGetValueW,
+        RegOpenKeyExW, RegSetValueExW,
+    };
+
+    const RULES: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+    /// Ours. Rules from older versions have random names and this comment.
+    const RULE: &str = "{9b4f3c1e-5d2a-4e8b-a6f0-72657461696c}";
+    const COMMENT: &str = "retail";
+    /// NRPT_CONFIG_OPTION: the rule names DNS servers
+    const GENERIC_DNS_SERVERS: u32 = 8;
+
+    struct Key(HKEY);
+
+    impl Drop for Key {
+        fn drop(&mut self) {
+            // SAFETY: a key this module opened
+            unsafe { RegCloseKey(self.0) };
+        }
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+
+    fn bytes(w: &[u16]) -> Vec<u8> {
+        w.iter().flat_map(|c| c.to_le_bytes()).collect()
+    }
+
+    fn set(key: &Key, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> bool {
+        // SAFETY: an open key, a terminated name and a buffer of the stated length
+        unsafe { RegSetValueExW(key.0, wide(name).as_ptr(), 0, kind, data.as_ptr(), data.len() as u32) == ERROR_SUCCESS }
+    }
+
+    fn create(parent: HKEY, path: &str, options: u32) -> Result<Key, u32> {
+        let mut h = null_mut();
+        // SAFETY: a terminated string and an out pointer valid for the call
+        let r = unsafe { RegCreateKeyExW(parent, wide(path).as_ptr(), 0, null(), options, KEY_ALL_ACCESS, null(), &mut h, null_mut()) };
+        if r == ERROR_SUCCESS { Ok(Key(h)) } else { Err(r) }
+    }
+
+    pub fn add(namespace: &str, server: &str) -> bool {
+        // The list stays an ordinary key, as other programs' rules need; only
+        // ours is volatile, gone after a restart even if never undone
+        let key = match create(HKEY_LOCAL_MACHINE, RULES, REG_OPTION_NON_VOLATILE).and_then(|rules| create(rules.0, RULE, REG_OPTION_VOLATILE)) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::debug!("NRPT rule: error {e}");
+                return false;
+            }
+        };
+        let mut names = wide(namespace);
+        names.push(0);
+        let ok = set(&key, "Version", REG_DWORD, &2u32.to_le_bytes())
+            && set(&key, "Name", REG_MULTI_SZ, &bytes(&names))
+            && set(&key, "GenericDNSServers", REG_SZ, &bytes(&wide(server)))
+            && set(&key, "ConfigOptions", REG_DWORD, &GENERIC_DNS_SERVERS.to_le_bytes())
+            && set(&key, "IPSECCARestriction", REG_SZ, &bytes(&wide("")))
+            && set(&key, "Comment", REG_SZ, &bytes(&wide(COMMENT)))
+            && set(&key, "DisplayName", REG_SZ, &bytes(&wide(COMMENT)));
+        drop(key);
+        if ok {
+            flush_cache();
+        } else {
+            remove();
+        }
+        ok
+    }
+
+    pub fn remove() {
+        let mut h = null_mut();
+        // SAFETY: a terminated string and an out pointer valid for the call
+        if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, wide(RULES).as_ptr(), 0, KEY_ALL_ACCESS, &mut h) } != ERROR_SUCCESS {
+            return;
+        }
+        let rules = Key(h);
+        let mut ours = Vec::new();
+        for i in 0.. {
+            let mut name = [0u16; 256];
+            let mut len = name.len() as u32;
+            // SAFETY: a buffer of `len` characters
+            let r = unsafe { RegEnumKeyExW(rules.0, i, name.as_mut_ptr(), &mut len, null(), null_mut(), null_mut(), null_mut()) };
+            if r != ERROR_SUCCESS {
+                break;
+            }
+            let name = name[..len as usize].to_vec();
+            if String::from_utf16_lossy(&name).eq_ignore_ascii_case(RULE) || comment(&rules, &name).as_deref() == Some(COMMENT) {
+                ours.push(name);
+            }
+        }
+        if ours.is_empty() {
+            return;
+        }
+        for mut name in ours {
+            name.push(0);
+            // SAFETY: an open key and a terminated name
+            unsafe { RegDeleteKeyW(rules.0, name.as_ptr()) };
+        }
+        flush_cache();
+    }
+
+    fn comment(rules: &Key, name: &[u16]) -> Option<String> {
+        let mut sub = name.to_vec();
+        sub.push(0);
+        let mut buf = [0u16; 64];
+        let mut size = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: terminated strings and a buffer of `size` bytes
+        let r = unsafe {
+            RegGetValueW(rules.0, sub.as_ptr(), wide("Comment").as_ptr(), RRF_RT_REG_SZ, null_mut(), buf.as_mut_ptr().cast(), &mut size)
+        };
+        (r == ERROR_SUCCESS).then(|| String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]))
+    }
+
+    /// So names in the domain are not answered from before the change
+    fn flush_cache() {
+        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+        // SAFETY: dnsapi.dll from System32; DnsFlushResolverCache takes no
+        // arguments and returns a BOOL
+        unsafe {
+            let lib = LoadLibraryExW(wide("dnsapi.dll").as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if lib.is_null() {
+                return;
+            }
+            if let Some(f) = GetProcAddress(lib, c"DnsFlushResolverCache".as_ptr().cast()) {
+                let flush: unsafe extern "system" fn() -> i32 = std::mem::transmute(f);
+                flush();
+            }
+        }
+    }
+
+    /// Run by CI as an administrator: the DNS client applies the rule
+    #[test]
+    #[ignore]
+    fn system_dns_client_applies_the_rule() {
+        let policy = |ns: &str| {
+            let script = format!("(Get-DnsClientNrptPolicy -Namespace '{ns}' | Select-Object -ExpandProperty NameServers) -join ','");
+            let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let ns = ".retail-nrpt-test.invalid";
+        assert!(add(ns, "100.100.100.100"));
+        assert_eq!(policy(ns), "100.100.100.100");
+        remove();
+        assert_eq!(policy(ns), "");
+    }
 }
 
 /// macOS: a resolver file for the domain
