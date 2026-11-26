@@ -44,7 +44,62 @@ const RELAY_BATCH_BYTES: usize = 128 * 1024;
 /// Inbox of the newest poll connection per node key, tagged with its connection id
 #[derive(Default)]
 struct Relays {
-    by_key: HashMap<Key, (u64, mpsc::Sender<(Instant, Bytes)>)>,
+    by_key: HashMap<Key, (u64, Inbox)>,
+}
+
+/// A relay frame and when it was queued
+type Queued = (Instant, Bytes);
+
+/// Relay frames towards one node, in two lanes so small ones go first
+#[derive(Clone)]
+struct Inbox {
+    small: mpsc::Sender<Queued>,
+    bulk: mpsc::Sender<Queued>,
+}
+
+struct Outbox {
+    small: mpsc::Receiver<Queued>,
+    bulk: mpsc::Receiver<Queued>,
+}
+
+fn relay_queue() -> (Inbox, Outbox) {
+    let (small, small_rx) = mpsc::channel(RELAY_QUEUE);
+    let (bulk, bulk_rx) = mpsc::channel(RELAY_QUEUE);
+    (Inbox { small, bulk }, Outbox { small: small_rx, bulk: bulk_rx })
+}
+
+impl Inbox {
+    /// Never waits: a full lane drops the frame
+    fn push(&self, frame: Bytes) {
+        let lane = if frame.len() <= relay::SMALL_FRAME { &self.small } else { &self.bulk };
+        let _ = lane.try_send((Instant::now(), frame));
+    }
+}
+
+impl Outbox {
+    /// The next frame, small ones first; those that waited too long are dropped
+    async fn recv(&mut self) -> Option<Bytes> {
+        loop {
+            let (at, frame) = tokio::select! {
+                biased;
+                Some(f) = self.small.recv() => f,
+                Some(f) = self.bulk.recv() => f,
+                else => return None,
+            };
+            if at.elapsed() <= relay::MAX_WAIT {
+                return Some(frame);
+            }
+        }
+    }
+
+    fn try_recv(&mut self) -> Option<Bytes> {
+        loop {
+            let (at, frame) = self.small.try_recv().or_else(|_| self.bulk.try_recv()).ok()?;
+            if at.elapsed() <= relay::MAX_WAIT {
+                return Some(frame);
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -241,12 +296,12 @@ impl AppState {
         let Some((to, _)) = relay::parse(&frame) else {
             return;
         };
-        let Some(inbox) = self.relays.lock().unwrap().by_key.get(&to).map(|(_, tx)| tx.clone()) else {
+        let Some(inbox) = self.relays.lock().unwrap().by_key.get(&to).map(|(_, inbox)| inbox.clone()) else {
             return;
         };
         let mut frame = Vec::from(frame);
         relay::set_key(&mut frame, from);
-        let _ = inbox.try_send((Instant::now(), Bytes::from(frame)));
+        inbox.push(Bytes::from(frame));
     }
 
     /// `None` if the node no longer exists
@@ -397,7 +452,8 @@ async fn poll(
         .max_message_size(MAX_CLIENT_MESSAGE)
         .max_frame_size(MAX_CLIENT_MESSAGE)
         .read_buffer_size(16 * 1024)
-        .write_buffer_size(64 * 1024)
+        // Straight to TLS: what waits here waits in front of small frames
+        .write_buffer_size(0)
         .max_write_buffer_size(512 * 1024);
     ws.on_upgrade(move |socket| async move {
         state.set_online(node_id, 1);
@@ -416,9 +472,9 @@ async fn serve_node(state: &AppState, node_id: i64, socket: WebSocket) -> Result
     let key = state.db.all_nodes().await?.into_iter().find(|n| n.id == node_id).map(|n| n.node_key);
     let Some(key) = key else { return Ok(()) };
     let conn = state.next_conn.fetch_add(1, Ordering::Relaxed);
-    let (inbox_tx, inbox) = mpsc::channel(RELAY_QUEUE);
-    state.relays.lock().unwrap().by_key.insert(key, (conn, inbox_tx));
-    let result = serve_connection(state, node_id, key, socket, inbox).await;
+    let (inbox, outbox) = relay_queue();
+    state.relays.lock().unwrap().by_key.insert(key, (conn, inbox));
+    let result = serve_connection(state, node_id, key, socket, outbox).await;
     let mut relays = state.relays.lock().unwrap();
     if relays.by_key.get(&key).is_some_and(|(c, _)| *c == conn) {
         relays.by_key.remove(&key);
@@ -438,7 +494,7 @@ async fn serve_connection(
     node_id: i64,
     key: Key,
     mut socket: WebSocket,
-    mut inbox: mpsc::Receiver<(Instant, Bytes)>,
+    mut outbox: Outbox,
 ) -> Result<()> {
     let mut changes = state.changes.subscribe();
     let mut shutdown = state.shutdown.subscribe();
@@ -544,22 +600,16 @@ async fn serve_connection(
                     Some(Err(e)) => return Err(e.into()),
                 }
             }
-            Some(first) = inbox.recv() => {
+            Some(first) = outbox.recv() => {
                 // Frames already queued go out with it, flushed together
-                let (mut next, mut bytes) = (Some(first), 0);
-                while let Some((at, frame)) = next.take() {
-                    if at.elapsed() <= relay::MAX_WAIT {
-                        bytes += frame.len();
-                        socket.feed(Message::Binary(frame)).await?;
-                    }
-                    if bytes >= RELAY_BATCH_BYTES {
-                        break;
-                    }
-                    next = inbox.try_recv().ok();
+                let mut bytes = first.len();
+                socket.feed(Message::Binary(first)).await?;
+                while bytes < RELAY_BATCH_BYTES {
+                    let Some(next) = outbox.try_recv() else { break };
+                    bytes += next.len();
+                    socket.feed(Message::Binary(next)).await?;
                 }
-                if bytes > 0 {
-                    socket.flush().await?;
-                }
+                socket.flush().await?;
             }
             Ok(()) = shutdown.changed() => {
                 let stopping = *shutdown.borrow_and_update();

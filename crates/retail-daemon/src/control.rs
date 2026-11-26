@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 use futures_util::{Sink, SinkExt, StreamExt};
 use retail_proto::DEFAULT_STUN_PORT;
 use retail_proto::api::{ApiError, ClientMessage, RegisterRequest, RegisterResponse, ServerMessage};
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -154,7 +153,8 @@ where
 fn ws_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .read_buffer_size(16 * 1024)
-        .write_buffer_size(64 * 1024)
+        // Straight to TLS: what waits here waits in front of small frames
+        .write_buffer_size(0)
         .max_write_buffer_size(512 * 1024)
         .max_message_size(Some(4 << 20))
         .max_frame_size(Some(4 << 20))
@@ -164,7 +164,7 @@ async fn run_once(
     engine: &Engine,
     target: &Target,
     token: &str,
-    relay_out: &mut mpsc::Receiver<crate::engine::Queued>,
+    relay_out: &mut crate::engine::RelayOut,
 ) -> Result<()> {
     let server = target.url.as_str();
     let mut req = poll_url(server)?.into_client_request()?;
@@ -193,13 +193,13 @@ async fn run_once(
 async fn session<S>(
     engine: &Engine,
     ws: tokio_tungstenite::WebSocketStream<S>,
-    relay_out: &mut mpsc::Receiver<crate::engine::Queued>,
+    relay_out: &mut crate::engine::RelayOut,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     // Frames queued while disconnected are stale and WireGuard retries on its own
-    while relay_out.try_recv().is_ok() {}
+    while relay_out.try_recv().is_some() {}
     engine.control_connected.store(true, Ordering::Relaxed);
     engine.set_control_problem(None);
     tracing::info!("connected to control server");
@@ -287,19 +287,12 @@ where
             Some(first) = relay_out.recv() => {
                 // Frames already queued go out with it, flushed (and encrypted) together
                 let batch = async {
-                    let (mut next, mut bytes) = (Some(first), 0);
-                    while let Some((at, frame)) = next.take() {
-                        if at.elapsed() <= retail_proto::relay::MAX_WAIT {
-                            bytes += frame.len();
-                            tx.feed(Message::binary(frame)).await?;
-                        }
-                        if bytes >= RELAY_BATCH_BYTES {
-                            break;
-                        }
-                        next = relay_out.try_recv().ok();
-                    }
-                    if bytes == 0 {
-                        return Ok(());
+                    let mut bytes = first.len();
+                    tx.feed(Message::binary(first)).await?;
+                    while bytes < RELAY_BATCH_BYTES {
+                        let Some(next) = relay_out.try_recv() else { break };
+                        bytes += next.len();
+                        tx.feed(Message::binary(next)).await?;
                     }
                     tx.flush().await
                 };

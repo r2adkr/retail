@@ -176,7 +176,7 @@ impl TlsListener {
                     match tcp.accept().await {
                         Ok((stream, peer)) => {
                             let _ = stream.set_nodelay(true);
-                            retail_proto::relay::limit_unsent(&stream);
+                            retail_proto::relay::tune(&stream);
                             if raw_tx.send((Box::new(stream), peer)).await.is_err() {
                                 return;
                             }
@@ -206,10 +206,10 @@ impl TlsListener {
                             None => crate::reality::Decision::Normal,
                         };
                         match decision {
-                            crate::reality::Decision::Normal => Ok(Some(Conn::Tls(Box::new(acceptor.accept(io).await?)))),
+                            crate::reality::Decision::Normal => Ok(Some(Conn::Tls(Box::new(small_buffer(acceptor.accept(io).await?))))),
                             crate::reality::Decision::Reality { auth } => {
                                 let config = reality_tls_config(&auth)?;
-                                Ok(Some(Conn::Tls(Box::new(TlsAcceptor::from(config).accept(io).await?))))
+                                Ok(Some(Conn::Tls(Box::new(small_buffer(TlsAcceptor::from(config).accept(io).await?)))))
                             }
                             crate::reality::Decision::Camouflage => {
                                 let dest = reality.as_ref().map(|r| r.dest.clone()).unwrap_or_default();
@@ -401,4 +401,10 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpL
 /// IPv4 clients of a dual-stack listener appear as ::ffff:a.b.c.d
 fn canonical(addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// Relay frames wait in the socket, not in TLS (`relay::TLS_BUFFER`)
+pub fn small_buffer<IO>(mut s: tokio_rustls::server::TlsStream<IO>) -> tokio_rustls::server::TlsStream<IO> {
+    s.get_mut().1.set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
+    s
 }

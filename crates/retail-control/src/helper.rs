@@ -122,7 +122,7 @@ impl Helper {
                         continue;
                     };
                     let _ = tcp.set_nodelay(true);
-                    retail_proto::relay::limit_unsent(&tcp);
+                    retail_proto::relay::tune(&tcp);
                     let (shared, acceptor, secret) = (shared.clone(), acceptor.clone(), secret.clone());
                     tokio::spawn(async move {
                         if let Err(e) = handle(tcp, peer, &shared, &acceptor, &secret).await {
@@ -204,7 +204,7 @@ async fn handle(
         // The link name is public, so until the secret is shown this is anyone:
         // bound how many may wait and for how long
         let slot = LinkSlot::take(shared, peer.ip().to_canonical()).context("too many unauthenticated link connections")?;
-        let tls = tokio::time::timeout(PICKUP, acceptor.accept(io)).await.context("link handshake timed out")??;
+        let tls = crate::tls::small_buffer(tokio::time::timeout(PICKUP, acceptor.accept(io)).await.context("link handshake timed out")??);
         return link(tls, shared, secret, slot).await;
     }
     // Anyone else is a client of the server

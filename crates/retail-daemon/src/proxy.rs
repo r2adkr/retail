@@ -131,7 +131,7 @@ impl Proxy {
             .await
             .with_context(|| format!("connecting to proxy {}", self.label()))?;
         tcp.set_nodelay(true)?;
-        retail_proto::relay::limit_unsent(&tcp);
+        retail_proto::relay::tune(&tcp);
         Ok(tcp)
     }
 

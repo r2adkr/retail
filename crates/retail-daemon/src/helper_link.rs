@@ -42,11 +42,13 @@ async fn connect(code: &HelperCode) -> Result<tokio_rustls::client::TlsStream<to
     let host = host.trim_matches(['[', ']']);
     let tcp = crate::happy::connect_many(host, port.parse()?, rest).await?;
     tcp.set_nodelay(true)?;
-    retail_proto::relay::limit_unsent(&tcp);
+    retail_proto::relay::tune(&tcp);
     let pin = decode_pin(&code.pin).context("the helper code is damaged")?;
     let target = crate::http::Target { pin: Some(pin), ..Default::default() };
     let name = rustls::pki_types::ServerName::try_from(LINK_NAME)?;
-    Ok(tokio_rustls::TlsConnector::from(target.tls()).connect(name, tcp).await?)
+    let mut tls = tokio_rustls::TlsConnector::from(target.tls()).connect(name, tcp).await?;
+    tls.get_mut().1.set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
+    Ok(tls)
 }
 
 async fn link(code: &HelperCode, inject: &Injector, linked: &AtomicBool) -> Result<()> {

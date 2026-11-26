@@ -64,14 +64,61 @@ const ACTIVE_KEEPALIVE: Duration = Duration::from_secs(1);
 /// A peer that keeps sending data through the relay this long after our
 /// direct path came up cannot hear us directly (one-way UDP failure).
 const RELAY_DATA_GRACE: Duration = Duration::from_secs(2);
-/// Relay frames waiting for the control connection, at most about 1 MB
+/// Large relay frames waiting for the control connection, at most about 1 MB
 const RELAY_OUT_QUEUE: usize = 16;
+/// Small ones, which go first (`relay::SMALL_FRAME`)
+const RELAY_OUT_SMALL: usize = 64;
 /// A relay frame and when it was queued
-pub type Queued = (Instant, Vec<u8>);
+type Queued = (Instant, Vec<u8>);
+
+/// Relay frames for the control connection, in two lanes so small ones go first
+struct RelayIn {
+    small: mpsc::Sender<Queued>,
+    bulk: mpsc::Sender<Queued>,
+}
+
+pub struct RelayOut {
+    small: mpsc::Receiver<Queued>,
+    bulk: mpsc::Receiver<Queued>,
+}
+
+impl RelayIn {
+    fn lane(&self, frame: &[u8]) -> &mpsc::Sender<Queued> {
+        if frame.len() <= retail_proto::relay::SMALL_FRAME { &self.small } else { &self.bulk }
+    }
+}
+
+impl RelayOut {
+    /// The next frame, small ones first; those that waited too long are dropped
+    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+        loop {
+            let (at, frame) = tokio::select! {
+                biased;
+                Some(f) = self.small.recv() => f,
+                Some(f) = self.bulk.recv() => f,
+                else => return None,
+            };
+            if at.elapsed() <= retail_proto::relay::MAX_WAIT {
+                return Some(frame);
+            }
+        }
+    }
+
+    pub fn try_recv(&mut self) -> Option<Vec<u8>> {
+        loop {
+            let (at, frame) = self.small.try_recv().or_else(|_| self.bulk.try_recv()).ok()?;
+            if at.elapsed() <= retail_proto::relay::MAX_WAIT {
+                return Some(frame);
+            }
+        }
+    }
+}
 /// Large frames mean fewer messages, flushes and wakeups per byte: measured
 /// against 16 KB, relayed throughput rose about 60% and CPU per byte fell a
 /// third. Kept under the protocol's 64 KiB frame limit.
 const RELAY_FRAME_BYTES: usize = 60 * 1024;
+/// Fits a relay frame of `relay::SMALL_FRAME` with its header
+const SMALL_DATAGRAM: usize = retail_proto::relay::SMALL_FRAME - 64;
 /// Most time udp-send waits for relay queue room per job. Short waits pace
 /// bulk relay traffic without loss. Past this budget relay frames are dropped,
 /// so a stalled relay delays direct traffic to other peers by at most this
@@ -581,8 +628,8 @@ pub struct Engine {
     /// The UDP socket is IPv6 with IPv4 mapped in (both families usable)
     dual_stack: bool,
     endpoints: watch::Sender<Vec<SocketAddr>>,
-    relay_out: mpsc::Sender<Queued>,
-    relay_out_rx: Mutex<Option<mpsc::Receiver<Queued>>>,
+    relay_out: RelayIn,
+    relay_out_rx: Mutex<Option<RelayOut>>,
     /// User's choice, kept even while the peer is absent from the netmap
     exit_pref: Mutex<Option<Key>>,
     advertise_exit: watch::Sender<bool>,
@@ -645,6 +692,12 @@ impl Engine {
         {
             builder = builder.offload(true);
         }
+        // The same adapter each time: with a random one, Windows identifies a
+        // new network on every connect and keeps a profile for each
+        #[cfg(windows)]
+        {
+            builder = builder.device_guid(0x9b4f3c1e_5d2a_4e8b_a6f0_72657461696d);
+        }
         let tun = builder.build_async().context(
             "creating TUN device (needs Administrator/root; on Windows wintun.dll must sit next to retaild.exe)",
         )?;
@@ -677,7 +730,9 @@ impl Engine {
         );
 
         let public = PublicKey::from(&cfg.private_key);
-        let (relay_out, relay_out_rx) = mpsc::channel(RELAY_OUT_QUEUE);
+        let (small, small_rx) = mpsc::channel(RELAY_OUT_SMALL);
+        let (bulk, bulk_rx) = mpsc::channel(RELAY_OUT_QUEUE);
+        let (relay_out, relay_out_rx) = (RelayIn { small, bulk }, RelayOut { small: small_rx, bulk: bulk_rx });
         let (dns_queries, dns_queries_rx) = mpsc::channel(64);
         #[cfg(target_os = "linux")]
         let vnet_hdr = tun.tcp_gso();
@@ -1097,10 +1152,8 @@ impl Engine {
         if !self.control_connected.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(permit) = self.relay_out.try_reserve() else {
-            return;
-        };
-        Self::relay_frame(permit, key, datagrams);
+        let Some(frame) = Self::relay_frame(key, datagrams) else { return };
+        let _ = self.relay_out.lane(&frame).try_send((Instant::now(), frame));
     }
 
     /// Like [`Self::relay_send`], but waits for room until `deadline` (udp-send only)
@@ -1108,21 +1161,16 @@ impl Engine {
         if !self.control_connected.load(Ordering::Relaxed) {
             return;
         }
-        let permit = match self.relay_out.try_reserve() {
-            Ok(p) => p,
-            Err(mpsc::error::TrySendError::Full(())) => {
-                match tokio::time::timeout_at(deadline.into(), self.relay_out.reserve()).await {
-                    Ok(Ok(p)) => p,
-                    _ => return, // Over this job's budget
-                }
-            }
-            Err(_) => return,
-        };
-        Self::relay_frame(permit, key, datagrams);
+        let Some(frame) = Self::relay_frame(key, datagrams) else { return };
+        let lane = self.relay_out.lane(&frame);
+        if let Err(mpsc::error::TrySendError::Full(item)) = lane.try_send((Instant::now(), frame)) {
+            // Dropped once over this job's budget
+            let _ = tokio::time::timeout_at(deadline.into(), lane.send(item)).await;
+        }
     }
 
-    fn relay_frame<'a>(permit: mpsc::Permit<'_, Queued>, key: &Key, mut datagrams: impl Iterator<Item = &'a [u8]>) {
-        let Some(first) = datagrams.next() else { return };
+    fn relay_frame<'a>(key: &Key, mut datagrams: impl Iterator<Item = &'a [u8]>) -> Option<Vec<u8>> {
+        let first = datagrams.next()?;
         // All but the last datagram of a group have the first one's length
         let n = 1 + datagrams.size_hint().0;
         let mut frame = Vec::with_capacity(32 + (2 + first.len()) * n);
@@ -1132,11 +1180,11 @@ impl Engine {
                 break; // Unreachable since callers send at most MAX_GSO_BYTES
             }
         }
-        permit.send((Instant::now(), frame));
+        Some(frame)
     }
 
     /// Taken once by the control loop
-    pub fn take_relay_out(&self) -> Option<mpsc::Receiver<Queued>> {
+    pub fn take_relay_out(&self) -> Option<RelayOut> {
         self.relay_out_rx.lock().unwrap().take()
     }
 
@@ -1537,9 +1585,18 @@ impl Engine {
                         Stats::add(&self.stats.udp_send_segs, send.count);
                     }
                     Dest::Relay => {
-                        let per_frame = (RELAY_FRAME_BYTES / send.seg.max(1)).max(1) * send.seg;
-                        for part in contents.chunks(per_frame) {
-                            self.relay_send_paced(&send.peer.key, part.chunks(send.seg), relay_deadline).await;
+                        // Small datagrams (a game's packets, a ping) travel one to a
+                        // frame, and so in the small lane, ahead of any download; a
+                        // train's short last one too
+                        let seg = send.seg.max(1);
+                        let tail = if send.count > 1 { contents.len() % seg } else { 0 };
+                        let (bulk, tail) = contents.split_at(contents.len() - tail);
+                        let per_frame = if seg <= SMALL_DATAGRAM { seg } else { (RELAY_FRAME_BYTES / seg).max(1) * seg };
+                        for part in bulk.chunks(per_frame) {
+                            self.relay_send_paced(&send.peer.key, part.chunks(seg), relay_deadline).await;
+                        }
+                        if !tail.is_empty() {
+                            self.relay_send_paced(&send.peer.key, std::iter::once(tail), relay_deadline).await;
                         }
                     }
                     Dest::Search => self.send_to_peer(&send.peer, contents),

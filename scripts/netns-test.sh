@@ -23,7 +23,8 @@
 #   recover       udp-blocked, then the block is lifted      -> relay, then direct
 #   idle-relay    udp-blocked, then 40 s idle                -> still relay, no loss
 #   relay-load    udp-blocked on a 10 Mbit/s link, a download -> relay, pings
-#                 through it stay under 400 ms (no seconds of queue)
+#                 through it stay under 250 ms (no seconds of queue);
+#                 LOAD_DEBUG=1 also shows the link's own ping and the queues
 #   failover      direct, then UDP blocked mid-ping          -> relay, outage < 6 s
 #   failover-a/-b as failover, but only router A (B) drops UDP, so one direction
 #                 dies, then the cut is lifted               -> relay, then direct
@@ -226,7 +227,18 @@ relay_load_checks() {  # ip_b
     nsx hA timeout 30 iperf3 -c "$ip_b" -R -t 12 -J >"$WORK/load.json" 2>/dev/null &
     local load=$!
     sleep 3
+    if [ "${LOAD_DEBUG:-0}" = 1 ]; then
+        local gw
+        gw=$(ip -4 -o addr show inetA | awk '{print $4}' | cut -d/ -f1)
+        nsx hA ping -c 40 -i 0.2 -W 5 "$gw" >"$WORK/link-ping" 2>&1 &
+        ( sleep 4
+          { tc -s qdisc show dev inetA; nsx rA tc -s qdisc show dev wanA
+            for n in "" $(ip netns list | awk '{print $1}'); do
+                echo "## ns ${n:-root}"; ${n:+ip netns exec "$n"} ss -tinH state established
+            done; } >"$WORK/load-debug" 2>&1 ) &
+    fi
     nsx hA ping -c 40 -i 0.2 -W 5 "$ip_b" >"$WORK/load-ping" 2>&1
+    [ "${LOAD_DEBUG:-0}" = 1 ] && sleep 1 && tail -n 1 "$WORK/link-ping" | sed 's/^/  link only: /' && sed 's/^/    /' "$WORK/load-debug"
     wait "$load"
     pkill -x iperf3 || true
     tc qdisc del dev inetA root 2>/dev/null
@@ -237,7 +249,7 @@ relay_load_checks() {  # ip_b
     read -r avg max <<<"$stats"
     echo "  B->A through the relay at 10 Mbit/s: ${bw:-failed} Mbit/s; pings meanwhile avg ${avg:-?} ms, max ${max:-?} ms, $(grep -o '[0-9]*% packet loss' "$WORK/load-ping")"
     [ "${bw:-0}" -ge 4 ] || { echo "  the download was too slow"; ok=0; }
-    awk -v m="${max:-99999}" 'BEGIN{exit !(m < 400)}' || { echo "  pings waited behind the download"; ok=0; }
+    awk -v m="${max:-99999}" 'BEGIN{exit !(m < 250)}' || { echo "  pings waited behind the download"; ok=0; }
     [ "$ok" = 1 ]
 }
 

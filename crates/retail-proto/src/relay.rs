@@ -17,32 +17,38 @@ pub const MAX_FRAME: usize = 64 * 1024;
 /// off on the loss, and what comes after it (a game's packets) does not wait
 /// seconds behind a download on a slow relay.
 pub const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// Frames up to this size (a game's or a call's packets, TCP acknowledgements,
+/// pings) go ahead of larger ones queued for the same connection
+pub const SMALL_FRAME: usize = 512;
+/// What TLS on a relay connection holds before the socket takes it (rustls
+/// keeps 64 KiB otherwise, about 50 ms at 10 Mbit/s in front of every frame)
+pub const TLS_BUFFER: usize = 16 * 1024;
 
-/// Lets a connection that carries the relay keep only a little unsent in the
-/// kernel (32 KiB, about 25 ms at 10 Mbit/s). Left alone, Linux lets it grow
-/// to half a second and more of queue in front of everything written after
-/// it. Windows sizes its send buffer to the connection by itself.
+/// Sets up a connection that carries the relay so a download through it
+/// does not hold up a game's packets behind it:
+/// - BBR where the system has it (Linux): CUBIC fills the slowest link's
+///   queue, which on a 10 Mbit/s link added over 100 ms to every packet
+/// - at most 32 KiB unsent in the kernel, which otherwise grows to half a
+///   second and more on Linux (Windows sizes its send buffer by itself)
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-pub fn limit_unsent(socket: &impl std::os::fd::AsRawFd) {
+pub fn tune(socket: &impl std::os::fd::AsRawFd) {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const TCP_NOTSENT_LOWAT: libc::c_int = 25;
     #[cfg(target_os = "macos")]
     const TCP_NOTSENT_LOWAT: libc::c_int = 0x201;
+    let fd = socket.as_raw_fd();
     let bytes: libc::c_int = 32 * 1024;
-    // SAFETY: a valid descriptor and an int option of the stated size
+    // SAFETY: a valid descriptor and options of the stated sizes; a system
+    // without BBR refuses it and keeps its own congestion control
     unsafe {
-        libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::IPPROTO_TCP,
-            TCP_NOTSENT_LOWAT,
-            (&raw const bytes).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
-        );
+        libc::setsockopt(fd, libc::IPPROTO_TCP, TCP_NOTSENT_LOWAT, (&raw const bytes).cast(), size_of::<libc::c_int>() as libc::socklen_t);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_CONGESTION, b"bbr".as_ptr().cast(), 3);
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
-pub fn limit_unsent<T>(_socket: &T) {}
+pub fn tune<T>(_socket: &T) {}
 const HEADER: usize = 32;
 
 pub fn begin(key: &Key, out: &mut Vec<u8>) {

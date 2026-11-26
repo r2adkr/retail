@@ -208,7 +208,7 @@ async fn carry(carrier: &Carrier, host: &str, port: u16, alts: &[String]) -> Res
         Carrier::Direct => {
             let tcp = crate::happy::connect_many(host, port, alts).await?;
             tcp.set_nodelay(true)?;
-            retail_proto::relay::limit_unsent(&tcp);
+            retail_proto::relay::tune(&tcp);
             let peer = tcp.peer_addr().ok();
             Ok((Box::new(tcp), peer))
         }
@@ -245,7 +245,8 @@ async fn attempt(target: &Target, way: &Way) -> Result<(BoxIo, Option<SocketAddr
 
 async fn tls(io: BoxIo, config: Arc<rustls::ClientConfig>, host: &str) -> Result<BoxIo> {
     let name = rustls::pki_types::ServerName::try_from(host.to_string()).context("invalid TLS server name")?;
-    let stream = tokio_rustls::TlsConnector::from(config).connect(name, io).await?;
+    let mut stream = tokio_rustls::TlsConnector::from(config).connect(name, io).await?;
+    stream.get_mut().1.set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
     Ok(Box::new(stream))
 }
 
