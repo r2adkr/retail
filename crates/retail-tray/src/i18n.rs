@@ -452,7 +452,7 @@ const TABLE: &[[&str; 5]] = &[
 ];
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -470,8 +470,12 @@ mod tests {
         }
     }
 
+    /// Held by tests that set the language, which is one for the whole process
+    pub static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn languages_switch_and_fall_back() {
+        let _language = LANGUAGE.lock().unwrap_or_else(|e| e.into_inner());
         set(LangPref::Ko);
         assert_eq!(tr("Quit"), "종료");
         assert_eq!(trf("{n} min ago", &[("n", &5)]), "5분 전");

@@ -392,6 +392,7 @@ mod tests {
 
     #[test]
     fn errors_say_why_the_server_was_not_reached() {
+        let _language = crate::i18n::tests::LANGUAGE.lock().unwrap_or_else(|e| e.into_inner());
         crate::i18n::set(crate::i18n::LangPref::En);
         let timeout = br#"{"error":"contacting https://vpn.example.com: connecting to 203.0.113.5:443 timed out","reason":"timeout"}"#;
         assert_eq!(api_error(timeout, 400), "No answer from the server\nThe network may block it, or the server is off");
