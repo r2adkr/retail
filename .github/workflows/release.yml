@@ -199,6 +199,8 @@ jobs:
           python3 scripts/bundle.py --app image/retail.app uni/installer uni/retail-tray
           codesign --force --deep --sign - image/retail.app
           codesign --verify --deep --strict --verbose=2 image/retail.app
+          # Dragged onto Applications as other Mac apps are
+          ln -s /Applications image/Applications
           hdiutil create -volname retail -srcfolder image -format UDZO -ov plain.dmg
           python3 scripts/bundle.py --dmg out/retail-macos.dmg uni/installer plain.dmg
           ls -l out
@@ -212,6 +214,7 @@ jobs:
       - name: Try the macOS installer
         run: |
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/vol" out/retail-macos.dmg
+          test "$(readlink "$RUNNER_TEMP/vol/Applications")" = /Applications
           mkdir try && ditto "$RUNNER_TEMP/vol/retail.app" try/retail.app
           hdiutil detach "$RUNNER_TEMP/vol"
           cd try
