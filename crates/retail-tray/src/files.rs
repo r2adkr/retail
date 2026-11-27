@@ -25,6 +25,8 @@ static ASKED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 pub fn on_offers(api: SocketAddr, offers: &[FileOffer]) {
     let mut asked = ASKED.lock().unwrap();
     let asked = asked.get_or_insert_with(HashSet::new);
+    // A restarted daemon numbers its offers from 1 again
+    asked.retain(|id| offers.iter().any(|o| o.id == *id));
     for offer in offers {
         if asked.insert(offer.id) {
             let offer = offer.clone();
@@ -271,7 +273,11 @@ fn ask(api: SocketAddr, offer: FileOffer) {
         .args(["retail", &question(&offer)])
         .output();
     let answer = match out {
-        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim() == "accept"),
+        // Empty: the notification server shows no buttons
+        Ok(o) if o.status.success() => match String::from_utf8_lossy(&o.stdout).trim() {
+            "" => None,
+            answer => Some(answer == "accept"),
+        },
         _ => None,
     };
     // An older notify-send without actions: zenity's question instead
@@ -485,7 +491,9 @@ mod win {
              $null=[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime]\n\
              $x=New-Object Windows.Data.Xml.Dom.XmlDocument\n\
              $x.LoadXml('{}')\n\
-             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{AUMID}').Show([Windows.UI.Notifications.ToastNotification]::new($x))\n",
+             $n=[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{AUMID}')\n\
+             if ($n.Setting -ne 'Enabled') {{ exit 1 }}\n\
+             $n.Show([Windows.UI.Notifications.ToastNotification]::new($x))\n",
             doc.replace('\'', "''")
         );
         let encoded: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
