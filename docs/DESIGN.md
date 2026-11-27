@@ -326,4 +326,4 @@ udp-recv --+-- decrypt[0..K] --+-- tun-write
 - Integrated proxy authentication works on Windows only. Linux and macOS use Basic and SOCKS5 passwords only, and Linux reads the system proxy from environment variables only.
 - Losing the server certificate key without a backup means inviting every device again.
 - Access rules cannot single out hosts on a routed network: a peer reaches all of it or none. Routing networks on Windows and macOS has not been checked on real machines yet.
-- **Other VPNs that use `100.64.0.0/10` conflict**: retail takes addresses from that range and UDP 41641. retaild moves to a random port if 41641 is taken, but the address ranges overlap, so do not run such a VPN on the same device at the same time.
+- **Other VPNs that use `100.64.0.0/10` conflict**: retail takes addresses from that range and UDP 41641. retaild moves to a random port if 41641 is taken (on Windows it holds the port exclusively, since otherwise Tailscale can share it silently and take its datagrams), but the address ranges overlap, so do not run such a VPN on the same device at the same time.

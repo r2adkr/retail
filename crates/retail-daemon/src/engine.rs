@@ -2507,6 +2507,7 @@ fn bind_udp(port: u16) -> std::io::Result<(std::net::UdpSocket, bool)> {
     use socket2::{Domain, Protocol, Socket, Type};
     let dual = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).and_then(|s| {
         s.set_only_v6(false)?;
+        exclusive(&s)?;
         s.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into())?;
         Ok(s)
     });
@@ -2516,6 +2517,7 @@ fn bind_udp(port: u16) -> std::io::Result<(std::net::UdpSocket, bool)> {
         Err(e) => {
             tracing::info!("IPv6 unavailable ({e}); using IPv4 only");
             let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            exclusive(&s)?;
             s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
             (s, false)
         }
@@ -2525,6 +2527,27 @@ fn bind_udp(port: u16) -> std::io::Result<(std::net::UdpSocket, bool)> {
     }
     sock.set_nonblocking(true)?;
     Ok((sock.into(), is_dual))
+}
+
+/// On Windows another program binding the same port with SO_REUSEADDR (Tailscale
+/// on 41641) takes over its datagrams without an error: no STUN answer and no
+/// peer reaches us, so everything goes through the relay. Exclusive use makes
+/// whoever comes second fail instead.
+#[cfg(windows)]
+fn exclusive(s: &socket2::Socket) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOL_SOCKET, setsockopt};
+    let on: i32 = 1;
+    // SAFETY: a valid socket and an i32 option
+    if unsafe { setsockopt(s.as_raw_socket() as usize, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (&raw const on).cast(), 4) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn exclusive(_: &socket2::Socket) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn local_endpoints(port: u16, ipv6: bool) -> Vec<SocketAddr> {
@@ -2615,6 +2638,26 @@ mod tests {
         let later = t0 + Duration::from_secs(2);
         assert!(charge_source(&mut table, "198.51.100.7".parse().unwrap(), later));
         assert!(table.0.len() < 10);
+    }
+
+    /// Windows lets an IPv4 socket (Tailscale's) and our dual-stack one share
+    /// a port in either order: neither may happen, and a port held first
+    /// makes us move to another
+    #[test]
+    fn udp_port_is_ours_alone() {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let v4 = |port: u16| {
+            let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            s.set_reuse_address(true).unwrap();
+            s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into()).map(|()| s)
+        };
+        let (ours, _) = bind_udp(0).unwrap();
+        let port = ours.local_addr().unwrap().port();
+        assert!(v4(port).is_err());
+        drop(ours);
+        let theirs = v4(0).unwrap();
+        let port = theirs.local_addr().unwrap().as_socket().unwrap().port();
+        assert_eq!(bind_udp(port).unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
     }
 
     #[test]
