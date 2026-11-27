@@ -1595,10 +1595,10 @@ impl Engine {
             job.runs = runs;
             Stats::time(&self.stats.crypto_tx, c0);
             if done.send(job).await.is_err() {
-                break;
+                anyhow::bail!("udp-send stage stopped");
             }
         }
-        anyhow::bail!("udp-send stage stopped")
+        anyhow::bail!("tun-read stage stopped")
     }
 
     /// Collects jobs from the encrypt workers in the order they were dealt
@@ -1652,7 +1652,7 @@ impl Engine {
             job.sends.clear();
             Stats::time(&self.stats.busy_udp_send, t0);
             if free.send(job).await.is_err() {
-                break;
+                anyhow::bail!("tun-read stage stopped");
             }
         }
         anyhow::bail!("encrypt stage stopped")
@@ -1745,7 +1745,7 @@ impl Engine {
                 }
             }
             if full.send(batch).await.is_err() {
-                break;
+                anyhow::bail!("tun-write stage stopped");
             }
         }
         anyhow::bail!("udp-recv stage stopped")
@@ -1769,7 +1769,7 @@ impl Engine {
             }
             batch.len = 0;
             if free.send(batch).await.is_err() {
-                break;
+                anyhow::bail!("decrypt stage stopped (handing back a batch)");
             }
         }
         anyhow::bail!("decrypt stage stopped")

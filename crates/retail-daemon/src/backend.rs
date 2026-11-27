@@ -66,9 +66,15 @@ pub struct Backend {
     usage: crate::usage::Usage,
     /// An administrator asked the daemon to exit (`POST /shutdown`)
     pub stop_requested: tokio::sync::Notify,
+    /// Held while a stopped session winds down, so the next one waits for
+    /// its TUN device but nothing else does
+    teardown: Mutex<()>,
+    last_status: std::sync::Mutex<Option<StatusResponse>>,
 }
 
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// How long `status` waits for a session being started or stopped
+const STATUS_WAIT: Duration = Duration::from_secs(1);
 /// A session that ran this long before failing resets the restart backoff
 const HEALTHY_RUN: Duration = Duration::from_secs(60);
 
@@ -113,6 +119,8 @@ impl Backend {
             updater,
             usage,
             stop_requested: tokio::sync::Notify::new(),
+            teardown: Mutex::new(()),
+            last_status: std::sync::Mutex::default(),
         })
     }
 
@@ -134,11 +142,13 @@ impl Backend {
                 loop {
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+                    // Without the settings locked: winding down can take long
+                    me.stop_session().await;
                     let p = me.persisted.lock().await;
-                    if !(p.want_running && p.token.is_some()) {
+                    // Turned off, or connected again meanwhile
+                    if !(p.want_running && p.token.is_some()) || me.session.lock().await.is_some() {
                         break;
                     }
-                    me.stop_session().await;
                     match me.start_locked(&p).await {
                         Ok(()) => {
                             tracing::info!("session restarted");
@@ -550,21 +560,22 @@ impl Backend {
     }
 
     async fn stop_session(&self) {
-        if let Some(mut s) = self.session.lock().await.take() {
-            self.usage.record(&s.engine.peer_status());
-            self.usage.end_session();
-            let _ = s.stop.send(true);
-            let graceful = &mut s.graceful;
-            let _ = tokio::time::timeout(GRACEFUL_STOP, async { while graceful.join_next().await.is_some() {} }).await;
-            s.graceful.shutdown().await;
-            // Wait for every task so the TUN device is released before a new session reuses its name
-            s.tasks.shutdown().await;
-            for t in s.threads {
-                let _ = tokio::task::spawn_blocking(move || t.join()).await;
-            }
-            drop(s.engine);
-            tracing::info!("session stopped");
+        let _teardown = self.teardown.lock().await;
+        // Out of its slot first, so status and settings do not wait for the teardown
+        let Some(mut s) = self.session.lock().await.take() else { return };
+        self.usage.record(&s.engine.peer_status());
+        self.usage.end_session();
+        let _ = s.stop.send(true);
+        let graceful = &mut s.graceful;
+        let _ = tokio::time::timeout(GRACEFUL_STOP, async { while graceful.join_next().await.is_some() {} }).await;
+        s.graceful.shutdown().await;
+        // Wait for every task so the TUN device is released before a new session reuses its name
+        s.tasks.shutdown().await;
+        for t in s.threads {
+            let _ = tokio::task::spawn_blocking(move || t.join()).await;
         }
+        drop(s.engine);
+        tracing::info!("session stopped");
     }
 
     async fn start_locked(&self, p: &Persisted) -> Result<()> {
@@ -582,6 +593,7 @@ impl Backend {
     }
 
     async fn start_session(&self, p: &Persisted) -> Result<Session> {
+        drop(self.teardown.lock().await);
         let target = p.target().context("not registered")?;
         let server = target.url.clone();
         let token = p.token.clone().context("not registered")?;
@@ -736,11 +748,21 @@ impl Backend {
                         return;
                     }
                 };
-                let result = rt.block_on(async {
-                    tokio::select! {
-                        r = fut => r,
-                        _ = stop.wait_for(|s| *s) => Ok(()),
-                    }
+                let run = std::panic::AssertUnwindSafe(|| {
+                    rt.block_on(async {
+                        tokio::select! {
+                            r = fut => r.and_then(|()| Err(anyhow::anyhow!("ended without an error"))),
+                            r = stop.wait_for(|s| *s) => match r {
+                                Ok(_) => Ok(()),
+                                Err(_) => Err(anyhow::anyhow!("its session went away")),
+                            },
+                        }
+                    })
+                });
+                // Stages have died with nothing in the log: say which and how
+                let result = std::panic::catch_unwind(run).unwrap_or_else(|p| {
+                    let what = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+                    Err(anyhow::anyhow!("panicked: {}", what.unwrap_or_default()))
                 });
                 if let Err(e) = result {
                     tracing::error!("{name} stopped: {e:#}");
@@ -769,9 +791,27 @@ impl Backend {
     }
 
     pub async fn status(&self) -> StatusResponse {
-        let p = self.persisted.lock().await;
-        let session = self.session.lock().await;
-        let engine = session.as_ref().map(|s| &s.engine);
+        let locks = || async { (self.persisted.lock().await, self.session.lock().await) };
+        // While a session starts the settings stay locked for seconds; the
+        // tray gives up after 3 s and would report retaild as not running
+        let (p, session) = match tokio::time::timeout(STATUS_WAIT, locks()).await {
+            Ok(l) => l,
+            Err(_) => {
+                let last = self.last_status.lock().unwrap().clone();
+                match last {
+                    // The last answer, as reconnecting
+                    Some(last) => return StatusResponse { control_connected: false, ..last },
+                    None => locks().await,
+                }
+            }
+        };
+        let st = self.status_of(&p, session.as_ref());
+        *self.last_status.lock().unwrap() = Some(st.clone());
+        st
+    }
+
+    fn status_of(&self, p: &Persisted, session: Option<&Session>) -> StatusResponse {
+        let engine = session.map(|s| &s.engine);
         let state = if p.token.is_none() {
             BackendState::NeedsLogin
         } else if engine.is_some() {
@@ -808,7 +848,7 @@ impl Backend {
             },
             memory_peak: crate::memory::peak(),
             control_via: engine.and_then(|e| e.control_via()),
-            servers: saved_servers(&p),
+            servers: saved_servers(p),
             update: self.updater.status(),
             key_expires_at: engine.and_then(|e| e.key_state().0),
             key_expired: engine.is_some_and(|e| e.key_state().1),
