@@ -92,6 +92,11 @@ enum Cmd {
         /// so devices on other networks connect directly, not through the relay
         #[arg(long, value_name = "true|false", num_args = 0..=1, default_missing_value = "true")]
         open_router_port: Option<bool>,
+        /// Keep what this device sends under this many Mbit/s (about 90% of
+        /// the line's upload speed), so a download through it does not slow
+        /// everything else; `off` removes the limit
+        #[arg(long, value_name = "MBIT|off")]
+        upload_limit: Option<String>,
     },
     /// Check for a new release and install it
     Update {
@@ -406,15 +411,20 @@ async fn main() -> Result<()> {
                 _ => println!("retail {} is the newest version", u.current),
             }
         }
-        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update, advertise_routes, open_router_port } => {
+        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update, advertise_routes, open_router_port, upload_limit } => {
             let advertise_routes = advertise_routes.map(|r| if r.trim() == "none" { Vec::new() } else { vec![r] });
             let memory_limit_mb = match memory_limit.as_deref() {
                 None => None,
                 Some("auto") | Some("0") => Some(0),
                 Some(v) => Some(v.parse::<u32>().context("--memory-limit takes a number of MiB or `auto`")?),
             };
+            let upload_limit_mbit = match upload_limit.as_deref() {
+                None => None,
+                Some("off") | Some("none") | Some("0") => Some(0),
+                Some(v) => Some(v.parse::<u32>().context("--upload-limit takes a number of Mbit/s or `off`")?),
+            };
             let named_proxy = proxy.as_deref().is_some_and(|p| !matches!(p.trim(), "" | "auto" | "off" | "none" | "direct"));
-            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes, open_router_port };
+            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes, open_router_port, upload_limit_mbit };
             let st = client.post::<_, StatusResponse>("/prefs", Some(&req)).await?;
             print_status(&st);
             if cfg!(windows) && named_proxy && !st.prefs.proxy_sign_in {
@@ -947,6 +957,9 @@ fn print_status(st: &StatusResponse) {
             println!("router:  did not open UDP {port} (turn on UPnP on the router, or forward UDP {port} to this device)")
         }
         None => {}
+    }
+    if let Some(mbit) = st.prefs.upload_limit_mbit {
+        println!("upload:  limited to {mbit} Mbit/s");
     }
     let limit = st.prefs.memory_limit_mb.map_or_else(|| "automatic".to_string(), |mb| format!("{mb} MiB"));
     match st.memory_peak {

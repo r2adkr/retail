@@ -28,6 +28,7 @@ mod proxy;
 mod reality;
 mod releases;
 mod service;
+mod shaper;
 mod sspi;
 mod state;
 mod transport;

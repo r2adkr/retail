@@ -615,6 +615,10 @@ pub struct Prefs {
     /// connections from other networks
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_router_port: bool,
+    /// Keeps what this device sends under this many Mbit/s, so a download
+    /// through it does not slow everything else (bufferbloat)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_limit_mbit: Option<u32>,
 }
 
 /// `POST /prefs`. Fields left out stay as they are.
@@ -638,6 +642,9 @@ pub struct PrefsRequest {
     pub advertise_routes: Option<Vec<String>>,
     #[serde(default)]
     pub open_router_port: Option<bool>,
+    /// 0 turns the upload limit off
+    #[serde(default)]
+    pub upload_limit_mbit: Option<u32>,
 }
 
 /// `POST /proxy/system`: the proxies the signed-in user's settings choose for

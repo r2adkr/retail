@@ -411,6 +411,9 @@ impl Backend {
         if let Some(mb) = req.memory_limit_mb {
             prefs.memory_limit_mb = (mb > 0).then_some(mb);
         }
+        if let Some(mbit) = req.upload_limit_mbit {
+            prefs.upload_limit_mbit = (mbit > 0).then_some(mbit);
+        }
         if let Some(proxy) = req.proxy.as_deref().map(str::trim) {
             prefs.proxy = match proxy {
                 "" | "auto" => None,
@@ -894,6 +897,7 @@ fn saved_servers(p: &Persisted) -> Vec<retail_proto::api::SavedServer> {
 /// Brings exit-node routing and forwarding in line with `prefs`
 fn apply_exit_prefs(s: &mut Session, prefs: &Prefs) -> Result<()> {
     let (tun, tun_index) = s.engine.tun_device();
+    s.engine.upload.set_mbit(prefs.upload_limit_mbit);
     s.engine.set_exit_node(prefs.exit_node);
     let mut result = Ok(());
     match (prefs.exit_node.is_some(), s.exit_routes.is_some()) {

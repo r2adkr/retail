@@ -51,6 +51,8 @@ pub enum SettingsAction {
     LangMenu,
     AdvertiseExit(bool),
     OpenRouterPort(bool),
+    /// Mbit/s, 0 for none
+    UploadLimit(u32),
     CheckUpdate,
     InstallUpdate,
     AutoUpdate(bool),
@@ -58,7 +60,9 @@ pub enum SettingsAction {
     StartDaemon,
 }
 
-const NETWORK_H: f32 = 140.0;
+const NETWORK_H: f32 = 204.0;
+/// What clicking the upload limit steps through, in Mbit/s (0: none)
+const UPLOAD_STEPS: [u32; 9] = [0, 5, 10, 20, 50, 100, 200, 500, 1000];
 /// The About card: version, then the update row and the automatic-update toggle
 const ABOUT_H: f32 = 60.0 + 64.0 + 60.0;
 const ROW_H: f32 = 50.0;
@@ -751,6 +755,17 @@ impl Settings {
         let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
         c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
         self.regions.push((r, SettingsAction::OpenRouterPort(!on)));
+
+        let y = y + 64.0;
+        c.hline(ix, x + w - 16.0, y, t.border);
+        c.text(tr("Upload limit"), ix, y + 26.0, 13.5, Weight::Regular, t.text, Some(w - 140.0));
+        let sub = tr("Keeps games quick during downloads.");
+        c.text(sub, ix, y + 44.0, 11.5, Weight::Regular, t.dim, Some(w - 140.0));
+        let now = s.prefs.upload_limit_mbit.unwrap_or(0);
+        let label = if now == 0 { tr("None").to_string() } else { format!("{now} Mbit/s") };
+        let next = UPLOAD_STEPS.iter().copied().find(|&m| m > now).unwrap_or(0);
+        let bw = c.measure(&label, 13.0, Weight::Semibold).max(64.0) + 28.0;
+        self.button(c, t, &label, x + w - 16.0 - bw, y + 14.0, bw, Style::Secondary, true, SettingsAction::UploadLimit(next));
 
     }
 

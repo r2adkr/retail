@@ -675,6 +675,10 @@ impl App {
                 let req = retail_proto::api::PrefsRequest { open_router_port: Some(on), ..Default::default() };
                 let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
             }
+            SettingsAction::UploadLimit(mbit) => {
+                let req = retail_proto::api::PrefsRequest { upload_limit_mbit: Some(mbit), ..Default::default() };
+                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+            }
         }
     }
 
@@ -1576,6 +1580,7 @@ mod preview {
                 // `exit` routes internet traffic through desktop-home
                 exit_node: matches!(state, "exit" | "exit-menu").then_some(Key([2; 32])),
                 open_router_port: matches!(state, "port" | "port-refused"),
+                upload_limit_mbit: (state == "port").then_some(50),
                 ..Default::default()
             },
             router_port: match state {

@@ -663,6 +663,9 @@ pub struct Engine {
     /// User's choice, kept even while the peer is absent from the netmap
     exit_pref: Mutex<Option<Key>>,
     advertise_exit: watch::Sender<bool>,
+    /// What this device sends over its line: the tunnel's datagrams, and the
+    /// internet traffic it forwards as an exit node
+    pub upload: crate::shaper::Limiter,
     /// Networks this device offers to route
     advertise_routes: watch::Sender<Vec<Ipv4Net>>,
     /// Networks the server approved for this device, as last told
@@ -792,6 +795,7 @@ impl Engine {
             relay_out_rx: Mutex::new(Some(relay_out_rx)),
             exit_pref: Mutex::new(None),
             advertise_exit: watch::channel(false).0,
+            upload: Default::default(),
             advertise_routes: watch::channel(Vec::new()).0,
             own_routes: RwLock::new(Arc::from(Vec::new())),
             granted_routes: RwLock::new(Vec::new()),
@@ -1454,7 +1458,7 @@ impl Engine {
                 job.sizes[0] = self.tun.recv(&mut job.bufs[0]).await.context("reading TUN device")?;
                 1
             };
-            job.n = n;
+            job.n = if self.upload.on() { self.police(&mut job, n) } else { n };
             if let Some(f) = self.forward.read().unwrap().as_ref() {
                 for j in 0..n {
                     f.outbound(&mut job.bufs[j][..job.sizes[j]]);
@@ -1474,6 +1478,19 @@ impl Engine {
     /// Splits a TUN read into runs of consecutive packets for the same peer
     /// (a TSO super-packet is always one run) and, where a session exists,
     /// reserves the run's send counters and records it as sent.
+    /// Keeps the packets the upload limit lets go, in order, at the front
+    fn police(&self, job: &mut TxJob, n: usize) -> usize {
+        let mut kept = 0;
+        for j in 0..n {
+            if self.upload.allow(job.sizes[j]) {
+                job.bufs.swap(j, kept);
+                job.sizes[kept] = job.sizes[j];
+                kept += 1;
+            }
+        }
+        kept
+    }
+
     fn plan_runs(&self, job: &mut TxJob) {
         job.runs.clear();
         let (bufs, sizes, n) = (&job.bufs, &job.sizes, job.n);
@@ -1941,8 +1958,16 @@ impl Engine {
             Some(_) => self.peers.read().unwrap().routes.iter().map(|(r, _)| *r).collect(),
             None => Vec::new(),
         };
+        // As an exit node, what goes on to the internet leaves over the same line
+        let police = self.upload.on() && here.exit;
+        let upload_ok = |b: &[u8]| {
+            !police || b.len() < 20 || {
+                let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
+                in_mesh(dst) || here.routes.iter().any(|r| r.contains(dst)) || self.upload.allow(b.len())
+            }
+        };
         // Forwarding without the system's NAT: our stack takes what is not for this device
-        let keep = |b: &mut [u8]| match &forward {
+        let keep = |b: &mut [u8]| upload_ok(b) && match &forward {
             Some(f) if b.len() >= 20 && b[16..20] != self.self_ip.octets() => {
                 let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
                 f.inbound(b, here.forwarded(dst) && !routed.iter().any(|r| r.contains(dst)))
