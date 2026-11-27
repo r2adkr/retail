@@ -430,6 +430,17 @@ pub struct StatusResponse {
     /// This device's port on the router, while `open_router_port` asks for it
     #[serde(default)]
     pub router_port: Option<PortState>,
+    /// Traffic since this device started counting, across restarts
+    #[serde(default)]
+    pub usage_total: Option<UsageTotal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotal {
+    /// Unix seconds when counting began
+    pub since: i64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
 }
 
 /// This device's WireGuard port on the router
@@ -686,6 +697,11 @@ pub struct PeerStatus {
     pub exit_node: bool,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    /// Across restarts, as `usage_total` counts it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tx_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_rx_bytes: Option<u64>,
     #[serde(default)]
     pub dns_name: String,
     /// This device takes only some traffic from it (an access rule)

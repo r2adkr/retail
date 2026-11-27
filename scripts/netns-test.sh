@@ -195,6 +195,10 @@ reason_of() {  # site -> why its first peer takes that path
     cli "$1" status --json 2>/dev/null | jq -r '.peers[0].path_reason // "none"'
 }
 
+usage_of() {  # site -> its total traffic, sent/received bytes
+    cli "$1" status --json 2>/dev/null | jq -r '.usage_total | "\(.tx_bytes)/\(.rx_bytes)"'
+}
+
 wait_ping() {  # target timeout_s -> seconds taken, or fails
     local t0 deadline
     t0=$(date +%s.%N)
@@ -1206,7 +1210,7 @@ run_scenario() {
     [ "$sc" = nat64 ] || [[ $sc == helper* ]] && limit=15
     if took=$(wait_ping "$ip_b" "$limit"); then
         path=$(path_of A)
-        printf "  connected after %ss, path: %s (%s)\n" "$took" "$path" "$(reason_of A)"
+        printf "  connected after %ss, path: %s (%s), total %s bytes\n" "$took" "$path" "$(reason_of A)" "$(usage_of A)"
         sleep 2
         local idle_a idle_b
         idle_a=$(awk '/^VmRSS/ {print $2}' "/proc/${pid[A]}/status" 2>/dev/null)

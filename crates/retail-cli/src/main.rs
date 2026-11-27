@@ -943,6 +943,10 @@ fn print_status(st: &StatusResponse) {
         Some(peak) => println!("memory:  peak {}, limit {limit}", human_bytes(peak)),
         None => println!("memory:  limit {limit}"),
     }
+    if let Some(u) = st.usage_total {
+        let days = (now_unix() - u.since).max(0) / 86_400;
+        println!("usage:   sent {}, received {} in total ({days} days)", human_bytes(u.tx_bytes), human_bytes(u.rx_bytes));
+    }
     if let Some(e) = &st.last_error {
         println!("error:   {e}");
     }

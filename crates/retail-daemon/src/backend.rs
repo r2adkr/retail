@@ -63,6 +63,7 @@ pub struct Backend {
     /// Set once the web admin page listens
     pub web: std::sync::OnceLock<retail_web::WebAdmin>,
     pub updater: Arc<crate::update::Updater>,
+    usage: crate::usage::Usage,
     /// An administrator asked the daemon to exit (`POST /shutdown`)
     pub stop_requested: tokio::sync::Notify,
 }
@@ -93,6 +94,7 @@ impl Backend {
         let host = crate::host::Host::new(&opts.state_dir);
         let helper = crate::helper_host::HelperHost::new(&opts.state_dir);
         let updater = Arc::new(crate::update::Updater::new(&opts.state_dir));
+        let usage = crate::usage::Usage::load(&opts.state_dir);
         let device_port = crate::device_port::DevicePort::default();
         device_port.set_wanted(persisted.prefs.open_router_port);
         let (failures, failures_rx) = mpsc::unbounded_channel();
@@ -109,6 +111,7 @@ impl Backend {
             device_port,
             web: std::sync::OnceLock::new(),
             updater,
+            usage,
             stop_requested: tokio::sync::Notify::new(),
         })
     }
@@ -522,14 +525,34 @@ impl Backend {
     /// The daemon is exiting: the session ends, and hosting and the helper
     /// node stop without being turned off, so their router ports and firewall
     /// rule go now and come back at the next start
+    /// Samples traffic for the totals, and saves them now and then
+    pub fn spawn_usage(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            for n in 0u64.. {
+                tick.tick().await;
+                if let Some(s) = me.session.lock().await.as_ref() {
+                    me.usage.record(&s.engine.peer_status());
+                }
+                if n % 10 == 9 {
+                    me.usage.save();
+                }
+            }
+        });
+    }
+
     pub async fn shutdown(&self) {
         self.stop_session().await;
+        self.usage.save();
         self.host.halt().await;
         self.helper.halt().await;
     }
 
     async fn stop_session(&self) {
         if let Some(mut s) = self.session.lock().await.take() {
+            self.usage.record(&s.engine.peer_status());
+            self.usage.end_session();
             let _ = s.stop.send(true);
             let graceful = &mut s.graceful;
             let _ = tokio::time::timeout(GRACEFUL_STOP, async { while graceful.join_next().await.is_some() {} }).await;
@@ -771,7 +794,12 @@ impl Backend {
             server: p.server.clone(),
             control_connected: engine.is_some_and(|e| e.control_connected.load(Ordering::Relaxed)),
             self_node,
-            peers: engine.map(|e| e.peer_status()).unwrap_or_default(),
+            peers: engine.map_or_else(Vec::new, |e| {
+                let mut peers = e.peer_status();
+                self.usage.record(&peers);
+                self.usage.fill(&mut peers);
+                peers
+            }),
             last_error: self.last_error.lock().unwrap().clone(),
             prefs: Prefs {
                 // Without the password: status needs no token
@@ -786,6 +814,7 @@ impl Backend {
             key_expired: engine.is_some_and(|e| e.key_state().1),
             problem: engine.filter(|e| !e.control_connected.load(Ordering::Relaxed)).and_then(|e| e.control_problem()),
             router_port: self.device_port.state().filter(|_| engine.is_some() && p.prefs.open_router_port),
+            usage_total: Some(self.usage.total()),
         }
     }
 }

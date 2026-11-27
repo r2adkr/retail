@@ -2257,6 +2257,8 @@ impl Engine {
                     exit_node: info.exit_node,
                     tx_bytes: tx as u64,
                     rx_bytes: rx as u64,
+                    total_tx_bytes: None,
+                    total_rx_bytes: None,
                     routes: p.routes().to_vec(),
                 }
             })

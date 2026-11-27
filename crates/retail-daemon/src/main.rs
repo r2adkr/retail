@@ -32,6 +32,7 @@ mod sspi;
 mod state;
 mod transport;
 mod update;
+mod usage;
 mod web;
 
 use std::net::SocketAddr;
@@ -155,6 +156,7 @@ async fn main() -> Result<()> {
         }),
     })?);
     backend.spawn_supervisor();
+    backend.spawn_usage();
     if let Some(web) = web::start(backend.clone(), state_dir.clone(), args.web_port).await {
         let _ = backend.web.set(web);
     }

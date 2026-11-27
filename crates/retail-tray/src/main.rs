@@ -1506,6 +1506,8 @@ mod preview {
             exit_node: false,
             tx_bytes: 0,
             rx_bytes: 0,
+            total_tx_bytes: None,
+            total_rx_bytes: None,
             dns_name: format!("{name}.retail.internal"),
             restricted: false,
             routes: vec![],
@@ -1527,6 +1529,8 @@ mod preview {
                 path_reason: Some(r),
                 tx_bytes: tx,
                 rx_bytes: rx,
+                total_tx_bytes: Some(tx * 23),
+                total_rx_bytes: Some(rx * 31),
                 ..p
             };
             peers = vec![
@@ -1580,6 +1584,11 @@ mod preview {
                 _ => None,
             },
             memory_peak: Some(9_437_184),
+            usage_total: state.starts_with("info").then_some(retail_proto::api::UsageTotal {
+                since: 1_793_059_200,
+                tx_bytes: 21_400_000_000,
+                rx_bytes: 74_900_000_000,
+            }),
             key_expires_at: None,
             key_expired: state == "expired",
             control_via: None,
