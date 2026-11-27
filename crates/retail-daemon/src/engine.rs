@@ -1529,7 +1529,8 @@ impl Engine {
         let Some(to_addr) = dst.info.lock().unwrap().direct_ok() else {
             return;
         };
-        if !src.passed_on.allow(d.len()) {
+        // Passed on traffic leaves over this device's line too
+        if !src.passed_on.allow(d.len()) || !self.upload.allow(d.len()) {
             return;
         }
         self.send_now(
@@ -3100,6 +3101,11 @@ impl Engine {
             .collect();
         let here_public = self.stun_public.lock().unwrap().iter().any(Option::is_some)
             || !self.extra_endpoints.lock().unwrap().is_empty();
+        // Names first, so no other lock is taken while a peer's is held
+        let names: HashMap<Key, String> = peers
+            .iter()
+            .map(|p| (p.key, p.info.lock().unwrap().hostname.clone()))
+            .collect();
         let mut out: Vec<PeerStatus> = peers
             .iter()
             .map(|p| {
@@ -3112,13 +3118,7 @@ impl Engine {
                     (None, false) => None,
                 };
                 let relay_via = match (info.direct_ok(), info.uses_relay(), info.via_fresh()) {
-                    (None, true, Some((key, _))) if key != p.key => self
-                        .peers
-                        .read()
-                        .unwrap()
-                        .by_key
-                        .get(&key)
-                        .map(|v| v.info.lock().unwrap().hostname.clone()),
+                    (None, true, Some((key, _))) if key != p.key => names.get(&key).cloned(),
                     _ => None,
                 };
                 PeerStatus {
