@@ -168,6 +168,8 @@ pub struct Host {
     /// Public WireGuard endpoint as mapped on the router, offered as a candidate
     /// because this device's own STUN only sees loopback or the LAN
     pub public_wg: tokio::sync::watch::Sender<Option<SocketAddr>>,
+    /// A network is hosted here now
+    pub hosting: tokio::sync::watch::Sender<bool>,
     /// This device's mesh address, when it is a member of the network
     mesh_ip: Mutex<Option<std::net::Ipv4Addr>>,
 }
@@ -179,6 +181,7 @@ impl Host {
             running: tokio::sync::Mutex::default(),
             last_error: Mutex::default(),
             public_wg: tokio::sync::watch::channel(None).0,
+            hosting: tokio::sync::watch::channel(false).0,
             mesh_ip: Mutex::default(),
         }
     }
@@ -323,6 +326,7 @@ impl Host {
         let device_watch = server.injector().map(|inject| {
             tokio::spawn(follow_device_helper(server.helper_device_code(), inject, device_helper.clone(), device_linked.clone(), stun.clone()))
         });
+        self.hosting.send_replace(true);
         *running = Some(Running {
             server,
             alt_port,
@@ -561,6 +565,7 @@ impl Host {
     /// router's ports and the firewall rule go, and come back at the next start
     pub async fn halt(&self) {
         if let Some(r) = self.running.lock().await.take() {
+            self.hosting.send_replace(false);
             if let Some(t) = r.portmap {
                 t.abort();
             }
@@ -952,6 +957,7 @@ async fn keep_ports_open(
                         tcp: tcp.unwrap_or(0),
                         udp: stun.unwrap_or(0),
                         alt,
+                        wg: o.external(Proto::Udp, ports[2].1),
                     }),
                     notice: o
                         .external_ip
@@ -984,13 +990,18 @@ async fn keep_ports_open(
                     unmapped_ip: portmap::router_ip().await,
                     mapping: Some("not available".into()),
                     router: Some(retail_proto::api::RouterState::Unavailable),
-                    notice: Some(retail_proto::api::ServerNotice::ForwardPorts { tcp: ports[0].1, udp: ports[1].1, alt: alt_port }),
+                    notice: Some(retail_proto::api::ServerNotice::ForwardPorts {
+                        tcp: ports[0].1,
+                        udp: ports[1].1,
+                        alt: alt_port,
+                        wg: Some(ports[2].1),
+                    }),
                     warning: Some(format!(
                         "The router did not open the ports automatically (UPnP/NAT-PMP is off or unsupported). \
                          Devices on other networks can join after you forward TCP {} and UDP {} to this computer, \
                          or use a domain name.",
                         tcp_ports(ports[0].1, alt_port),
-                        ports[1].1
+                        tcp_ports(ports[1].1, Some(ports[2].1))
                     )),
                     ..Reach::default()
                 };
@@ -1089,7 +1100,7 @@ mod tests {
     #[test]
     fn router_state_without_the_second_port() {
         let old: retail_proto::api::RouterState = serde_json::from_str(r#"{"kind":"opened","method":"UPnP","tcp":443,"udp":3478}"#).unwrap();
-        assert_eq!(old, retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: None });
+        assert_eq!(old, retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: None, wg: None });
         const { assert!(ALT_PORTS.start > 1024 && ALT_PORTS.end <= 32768) };
     }
 }

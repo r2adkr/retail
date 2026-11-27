@@ -177,7 +177,7 @@ impl TlsListener {
                         Ok((stream, peer)) => {
                             let _ = stream.set_nodelay(true);
                             retail_proto::relay::tune(&stream);
-                            if raw_tx.send((Box::new(stream), peer)).await.is_err() {
+                            if raw_tx.send((Box::new(retail_proto::relay::paced(stream)), peer)).await.is_err() {
                                 return;
                             }
                         }

@@ -2,6 +2,7 @@ mod backend;
 mod backup;
 mod control;
 mod crypto;
+mod device_port;
 mod engine;
 mod failure;
 mod exit;

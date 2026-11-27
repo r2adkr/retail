@@ -265,11 +265,11 @@ impl Dashboard {
             rows.push((tr("This network"), lan.clone(), t.text));
         }
         match &s.router {
-            Some(RouterState::Opened { method, tcp, udp, alt }) => {
-                let tcp = tcp_ports(*tcp, *alt);
+            Some(RouterState::Opened { method, tcp, udp, alt, wg }) => {
+                let (tcp, udp) = (tcp_ports(*tcp, *alt), tcp_ports(*udp, *wg));
                 rows.push((
                     tr("Router ports"),
-                    trf("Opened with {method} (TCP {tcp}, UDP {udp})", &[("method", method), ("tcp", &tcp), ("udp", udp)]),
+                    trf("Opened with {method} (TCP {tcp}, UDP {udp})", &[("method", method), ("tcp", &tcp), ("udp", &udp)]),
                     t.text,
                 ));
             }
@@ -717,9 +717,9 @@ fn notice_text(n: &ServerNotice) -> String {
             "The router's external address ({router_ip}) is private (CGNAT), so devices on other networks can't reach this server directly. Make a device they can reach the helper node: Manage on the web, then that device's ⋯ menu. Devices on the same network can join as they are.",
             &[("router_ip", router_ip)],
         ),
-        ServerNotice::ForwardPorts { tcp, udp, alt } => trf(
+        ServerNotice::ForwardPorts { tcp, udp, alt, wg } => trf(
             "The router did not open ports automatically. For devices on other networks to connect, forward TCP {tcp} and UDP {udp} to this computer on the router, or set a domain.",
-            &[("tcp", &tcp_ports(*tcp, *alt)), ("udp", udp)],
+            &[("tcp", &tcp_ports(*tcp, *alt)), ("udp", &tcp_ports(*udp, *wg))],
         ),
     }
 }

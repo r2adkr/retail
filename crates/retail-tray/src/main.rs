@@ -666,6 +666,10 @@ impl App {
                 let req = retail_proto::api::PrefsRequest { advertise_exit_node: Some(on), ..Default::default() };
                 let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
             }
+            SettingsAction::OpenRouterPort(on) => {
+                let req = retail_proto::api::PrefsRequest { open_router_port: Some(on), ..Default::default() };
+                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+            }
         }
     }
 
@@ -1538,7 +1542,13 @@ mod preview {
             prefs: retail_proto::api::Prefs {
                 // `exit` routes internet traffic through desktop-home
                 exit_node: matches!(state, "exit" | "exit-menu").then_some(Key([2; 32])),
+                open_router_port: matches!(state, "port" | "port-refused"),
                 ..Default::default()
+            },
+            router_port: match state {
+                "port" => Some(retail_proto::api::PortState::Opened { method: "UPnP".into(), port: 41641 }),
+                "port-refused" => Some(retail_proto::api::PortState::Unavailable { port: 41641 }),
+                _ => None,
             },
             memory_peak: Some(9_437_184),
             key_expires_at: None,
@@ -1672,7 +1682,7 @@ mod preview {
                 public: Some("203.0.113.24:443".into()),
                 lan: vec!["192.168.1.20:443".into()],
                 port_mapping: Some("opened by UPnP (TCP 443, UDP 3478)".into()),
-                router: Some(retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: Some(24581) }),
+                router: Some(retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: Some(24581), wg: Some(41641) }),
                 nodes: vec![
                     node(1, "work-laptop", 1, true, false),
                     node(2, "desktop-home", 2, true, true),

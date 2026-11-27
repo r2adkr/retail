@@ -6,7 +6,7 @@ use retail_proto::LOCAL_API_ADDR;
 use retail_proto::acl::{AclPolicy, AclRule};
 use retail_proto::api::{
     AclRequest, ApiError, BackendState, BackupRequest, BackupResponse, ExpiryRequest, HelperDeviceRequest, RemoveRequest, RenewRequest, RestoreRequest, RoutesRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
-    StatusResponse, TagsRequest, UpRequest,
+    PortState, StatusResponse, TagsRequest, UpRequest,
 };
 
 #[derive(Parser)]
@@ -88,6 +88,10 @@ enum Cmd {
         /// approves them; `none` stops.
         #[arg(long, value_name = "NETWORKS|none")]
         advertise_routes: Option<String>,
+        /// Ask the router (PCP, NAT-PMP or UPnP) to open this device's port,
+        /// so devices on other networks connect directly, not through the relay
+        #[arg(long, value_name = "true|false", num_args = 0..=1, default_missing_value = "true")]
+        open_router_port: Option<bool>,
     },
     /// Check for a new release and install it
     Update {
@@ -402,7 +406,7 @@ async fn main() -> Result<()> {
                 _ => println!("retail {} is the newest version", u.current),
             }
         }
-        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update, advertise_routes } => {
+        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update, advertise_routes, open_router_port } => {
             let advertise_routes = advertise_routes.map(|r| if r.trim() == "none" { Vec::new() } else { vec![r] });
             let memory_limit_mb = match memory_limit.as_deref() {
                 None => None,
@@ -410,7 +414,7 @@ async fn main() -> Result<()> {
                 Some(v) => Some(v.parse::<u32>().context("--memory-limit takes a number of MiB or `auto`")?),
             };
             let named_proxy = proxy.as_deref().is_some_and(|p| !matches!(p.trim(), "" | "auto" | "off" | "none" | "direct"));
-            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes };
+            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes, open_router_port };
             let st = client.post::<_, StatusResponse>("/prefs", Some(&req)).await?;
             print_status(&st);
             if cfg!(windows) && named_proxy && !st.prefs.proxy_sign_in {
@@ -926,6 +930,13 @@ fn print_status(st: &StatusResponse) {
     }
     if st.prefs.auto_update {
         println!("updates: installed automatically");
+    }
+    match &st.router_port {
+        Some(PortState::Opened { method, port }) => println!("router:  UDP {port} opened with {method}"),
+        Some(PortState::Unavailable { port }) => {
+            println!("router:  did not open UDP {port} (turn on UPnP on the router, or forward UDP {port} to this device)")
+        }
+        None => {}
     }
     let limit = st.prefs.memory_limit_mb.map_or_else(|| "automatic".to_string(), |mb| format!("{mb} MiB"));
     match st.memory_peak {

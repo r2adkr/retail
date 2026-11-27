@@ -2175,8 +2175,12 @@ impl Engine {
         self.publish_endpoints();
     }
 
+    pub fn listen_port(&self) -> u16 {
+        self.listen_port
+    }
+
     /// Public endpoints known without STUN (the router's port mapping while
-    /// hosting a network).
+    /// hosting a network, or this device's own).
     pub fn set_extra_endpoints(&self, eps: Vec<SocketAddr>) {
         *self.extra_endpoints.lock().unwrap() = eps;
         self.publish_endpoints();

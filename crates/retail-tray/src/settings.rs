@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use retail_proto::api::{BackendState, SavedServer, StatusResponse};
+use retail_proto::api::{BackendState, PortState, SavedServer, StatusResponse};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::config::ThemePref;
@@ -41,6 +41,7 @@ pub enum SettingsAction {
     /// Opens or closes the language list
     LangMenu,
     AdvertiseExit(bool),
+    OpenRouterPort(bool),
     CheckUpdate,
     InstallUpdate,
     AutoUpdate(bool),
@@ -48,7 +49,7 @@ pub enum SettingsAction {
     StartDaemon,
 }
 
-const NETWORK_H: f32 = 76.0;
+const NETWORK_H: f32 = 140.0;
 /// The About card: version, then the update row and the automatic-update toggle
 const ABOUT_H: f32 = 60.0 + 64.0 + 60.0;
 const ROW_H: f32 = 50.0;
@@ -556,6 +557,30 @@ impl Settings {
         let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
         c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
         self.regions.push((r, SettingsAction::AdvertiseExit(!on)));
+
+        let y = y + 76.0;
+        c.hline(ix, x + w - 16.0, y, t.border);
+        c.text(tr("Open a router port"), ix, y + 26.0, 13.5, Weight::Regular, t.text, Some(w - 100.0));
+        let on = s.prefs.open_router_port;
+        let (sub, color) = match s.router_port.as_ref().filter(|_| on) {
+            Some(PortState::Opened { method, port }) => {
+                (trf("Opened with {method} · UDP {port}", &[("method", method), ("port", port)]), t.text)
+            }
+            Some(PortState::Unavailable { port }) => {
+                (trf("Refused: turn on UPnP or forward UDP {port}", &[("port", port)]), t.amber)
+            }
+            None => (tr("Devices elsewhere connect directly, not via the relay.").to_string(), t.dim),
+        };
+        c.text(&sub, ix, y + 44.0, 11.5, Weight::Regular, color, Some(w - 100.0));
+        let (tw, th) = (42.0, 24.0);
+        let (tx, ty) = (x + w - 16.0 - tw, y + 18.0);
+        let r = Rect::from_xywh(tx - 6.0, ty - 6.0, tw + 12.0, th + 12.0).unwrap();
+        let track = if on { t.accent } else { t.gray };
+        let track = if self.hovered(&r) { shade(track, if self.dark { 1.12 } else { 0.92 }) } else { track };
+        c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
+        let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
+        c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
+        self.regions.push((r, SettingsAction::OpenRouterPort(!on)));
 
     }
 

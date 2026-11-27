@@ -210,7 +210,7 @@ async fn carry(carrier: &Carrier, host: &str, port: u16, alts: &[String]) -> Res
             tcp.set_nodelay(true)?;
             retail_proto::relay::tune(&tcp);
             let peer = tcp.peer_addr().ok();
-            Ok((Box::new(tcp), peer))
+            Ok((Box::new(retail_proto::relay::paced(tcp)), peer))
         }
         Carrier::Proxy(p) => Ok((p.connect(host, port).await?, None)),
     }

@@ -243,6 +243,9 @@ pub enum RouterState {
         udp: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alt: Option<u16>,
+        /// WireGuard's, for direct connections to this device
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wg: Option<u16>,
     },
     /// The router did not open them
     Unavailable,
@@ -259,6 +262,8 @@ pub enum ServerNotice {
         udp: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alt: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wg: Option<u16>,
     },
 }
 
@@ -422,6 +427,19 @@ pub struct StatusResponse {
     /// Why the server cannot be reached, while it cannot
     #[serde(default)]
     pub problem: Option<ConnectionProblem>,
+    /// This device's port on the router, while `open_router_port` asks for it
+    #[serde(default)]
+    pub router_port: Option<PortState>,
+}
+
+/// This device's WireGuard port on the router
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PortState {
+    /// By PCP, NAT-PMP or UPnP, as `port` outside
+    Opened { method: String, port: u16 },
+    /// The router did not open UDP `port`
+    Unavailable { port: u16 },
 }
 
 /// New official releases, as the daemon sees them
@@ -576,6 +594,10 @@ pub struct Prefs {
     /// Networks this device offers to route for the others
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advertise_routes: Vec<crate::route::Ipv4Net>,
+    /// Ask the router to open this device's WireGuard port, for direct
+    /// connections from other networks
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_router_port: bool,
 }
 
 /// `POST /prefs`. Fields left out stay as they are.
@@ -597,6 +619,8 @@ pub struct PrefsRequest {
     /// Networks such as `192.168.1.0/24`; empty stops routing any
     #[serde(default)]
     pub advertise_routes: Option<Vec<String>>,
+    #[serde(default)]
+    pub open_router_port: Option<bool>,
 }
 
 /// `POST /proxy/system`: the proxies the signed-in user's settings choose for

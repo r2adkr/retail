@@ -58,6 +58,8 @@ pub struct Backend {
     pub host: crate::host::Host,
     /// This device as a helper node for a server elsewhere
     pub helper: crate::helper_host::HelperHost,
+    /// This device's own port on the router, when the user allows it
+    device_port: crate::device_port::DevicePort,
     /// Set once the web admin page listens
     pub web: std::sync::OnceLock<retail_web::WebAdmin>,
     pub updater: Arc<crate::update::Updater>,
@@ -91,6 +93,8 @@ impl Backend {
         let host = crate::host::Host::new(&opts.state_dir);
         let helper = crate::helper_host::HelperHost::new(&opts.state_dir);
         let updater = Arc::new(crate::update::Updater::new(&opts.state_dir));
+        let device_port = crate::device_port::DevicePort::default();
+        device_port.set_wanted(persisted.prefs.open_router_port);
         let (failures, failures_rx) = mpsc::unbounded_channel();
         Ok(Backend {
             opts,
@@ -102,6 +106,7 @@ impl Backend {
             failures_rx: Mutex::new(Some(failures_rx)),
             host,
             helper,
+            device_port,
             web: std::sync::OnceLock::new(),
             updater,
             stop_requested: tokio::sync::Notify::new(),
@@ -383,6 +388,9 @@ impl Backend {
         if let Some(on) = req.advertise_exit_node {
             prefs.advertise_exit_node = on;
         }
+        if let Some(on) = req.open_router_port {
+            prefs.open_router_port = on;
+        }
         if let Some(routes) = &req.advertise_routes {
             prefs.advertise_routes = retail_proto::route::parse_routes(routes).map_err(anyhow::Error::msg)?;
         }
@@ -421,6 +429,7 @@ impl Backend {
         let restart = prefs.memory_limit_mb != p.prefs.memory_limit_mb;
         p.prefs = prefs;
         p.save(&self.state_path)?;
+        self.device_port.set_wanted(p.prefs.open_router_port);
         if let Some(s) = session.as_mut()
             && !restart
         {
@@ -578,15 +587,19 @@ impl Backend {
         self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), helper_dir(&self.opts.state_dir, p), stop.subscribe()));
         self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun));
         self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token));
-        // While hosting, the router's mapping is this device's public endpoint
-        let mut public_wg = self.host.public_wg.subscribe();
+        tasks.spawn(self.device_port.run(engine.listen_port(), self.host.hosting.subscribe()));
+        // The router's mapping (the hosted network's, or this device's own) is
+        // this device's public endpoint
+        let (mut public_wg, mut own) = (self.host.public_wg.subscribe(), self.device_port.public.subscribe());
         let e = engine.clone();
         tasks.spawn(async move {
             loop {
-                let eps: Vec<std::net::SocketAddr> = public_wg.borrow_and_update().iter().copied().collect();
+                let hosted = *public_wg.borrow_and_update();
+                let eps: Vec<std::net::SocketAddr> = hosted.or(*own.borrow_and_update()).into_iter().collect();
                 e.set_extra_endpoints(eps);
-                if public_wg.changed().await.is_err() {
-                    break;
+                tokio::select! {
+                    r = public_wg.changed() => if r.is_err() { break },
+                    r = own.changed() => if r.is_err() { break },
                 }
             }
         });
@@ -772,6 +785,7 @@ impl Backend {
             key_expires_at: engine.and_then(|e| e.key_state().0),
             key_expired: engine.is_some_and(|e| e.key_state().1),
             problem: engine.filter(|e| !e.control_connected.load(Ordering::Relaxed)).and_then(|e| e.control_problem()),
+            router_port: self.device_port.state().filter(|_| engine.is_some() && p.prefs.open_router_port),
         }
     }
 }
