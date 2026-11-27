@@ -2182,11 +2182,19 @@ impl Engine {
 
             // Keep delivered packets contiguous and in order
             let first = b.len;
-            let (mut bytes, mut authenticated) = (0, false);
+            // `proves`: something besides the peer's own ping requests, which
+            // it sends whatever it hears from us, so they show only that it
+            // reaches us and must not keep a dead direct path alive
+            let (mut bytes, mut authenticated, mut proves) = (0, false, false);
             for (i, r) in results.iter().enumerate() {
                 match *r {
                     crate::crypto::Decrypted::Packet(len) => {
                         authenticated = true;
+                        let pkt = &b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len];
+                        proves |= !matches!(
+                            crate::ping::parse(pkt),
+                            Some(crate::ping::Msg::Request(_) | crate::ping::Msg::Wake(..))
+                        );
                         if self.take_ping(&peer, &b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len])
                             || !peer
                                 .filter
@@ -2199,7 +2207,10 @@ impl Engine {
                         bytes += len;
                         authenticated = true;
                     }
-                    crate::crypto::Decrypted::Authenticated => authenticated = true,
+                    crate::crypto::Decrypted::Authenticated => {
+                        authenticated = true;
+                        proves = true;
+                    }
                     crate::crypto::Decrypted::Rejected => {
                         tracing::trace!(?src, "transport packet rejected")
                     }
@@ -2210,11 +2221,12 @@ impl Engine {
                     .lock()
                     .unwrap()
                     .note_received(r_idx, bytes, bytes > 0);
-                if peer.mark_rx(src, bytes > 0)
-                    && let Src::Udp(addr) = src
-                {
-                    self.answer_direct(&peer, addr);
-                }
+            }
+            if proves
+                && peer.mark_rx(src, bytes > 0)
+                && let Src::Udp(addr) = src
+            {
+                self.answer_direct(&peer, addr);
             }
         }
     }
