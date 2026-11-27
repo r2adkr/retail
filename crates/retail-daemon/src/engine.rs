@@ -2505,6 +2505,11 @@ fn canonical(addr: SocketAddr) -> SocketAddr {
 /// as candidates, plain IPv4 otherwise.
 fn bind_udp(port: u16) -> std::io::Result<(std::net::UdpSocket, bool)> {
     use socket2::{Domain, Protocol, Socket, Type};
+    // macOS lets our dual-stack socket share a port an IPv4 socket already
+    // holds, as Windows does; an IPv4 bind of our own finds the holder
+    if cfg!(target_os = "macos") && port != 0 {
+        drop(std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?);
+    }
     let dual = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).and_then(|s| {
         s.set_only_v6(false)?;
         exclusive(&s)?;
@@ -2640,8 +2645,8 @@ mod tests {
         assert!(table.0.len() < 10);
     }
 
-    /// Windows lets an IPv4 socket (Tailscale's) and our dual-stack one share
-    /// a port in either order: neither may happen, and a port held first
+    /// Windows and macOS let an IPv4 socket (Tailscale's) and our dual-stack
+    /// one share a port: neither may happen, and a port held first
     /// makes us move to another
     #[test]
     fn udp_port_is_ours_alone() {
