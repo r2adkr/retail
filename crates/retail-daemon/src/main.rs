@@ -1,13 +1,14 @@
 mod backend;
 mod backup;
+mod cloudflared;
 mod control;
 mod crypto;
 mod device_port;
 mod engine;
-mod failure;
 mod exit;
+mod failure;
+mod files;
 mod filter;
-mod cloudflared;
 mod firewall;
 mod forward;
 mod gro;
@@ -22,9 +23,9 @@ mod lan;
 mod local_api;
 mod local_token;
 mod logfile;
-mod ping;
 mod magicdns;
 mod memory;
+mod ping;
 mod portmap;
 mod proxy;
 mod reality;
@@ -47,7 +48,11 @@ use clap::Parser;
 use retail_proto::{DEFAULT_WG_PORT, LOCAL_API_ADDR};
 
 #[derive(Parser)]
-#[command(name = "retaild", version, about = "retail node daemon (run as Administrator/root)")]
+#[command(
+    name = "retaild",
+    version,
+    about = "retail node daemon (run as Administrator/root)"
+)]
 struct Args {
     #[command(subcommand)]
     cmd: Option<service::Cmd>,
@@ -81,7 +86,12 @@ struct Args {
     #[arg(long, env = "RETAIL_SERVE_REALITY", requires = "serve")]
     serve_reality: Option<String>,
     /// HTTPS URL of a CDN in front of the hosted server (repeatable)
-    #[arg(long, env = "RETAIL_SERVE_FRONT", requires = "serve", value_delimiter = ',')]
+    #[arg(
+        long,
+        env = "RETAIL_SERVE_FRONT",
+        requires = "serve",
+        value_delimiter = ','
+    )]
     serve_front: Vec<String>,
     /// Helper node code for the hosted server (or `off`)
     #[arg(long, env = "RETAIL_SERVE_HELPER", requires = "serve")]
@@ -118,8 +128,13 @@ async fn main() -> Result<()> {
     // On Windows a task's stderr is a console nobody sees, so the file is
     // always written there.
     let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let log_file = (args.cmd.is_none() && (cfg!(windows) || (cfg!(target_os = "macos") && !terminal)))
-        .then(|| args.state_dir.clone().unwrap_or_else(state::default_state_dir))
+    let log_file = (args.cmd.is_none()
+        && (cfg!(windows) || (cfg!(target_os = "macos") && !terminal)))
+        .then(|| {
+            args.state_dir
+                .clone()
+                .unwrap_or_else(state::default_state_dir)
+        })
         .and_then(|dir| {
             // Its own folder before anything is written there
             std::fs::create_dir_all(&dir).ok()?;
@@ -134,7 +149,9 @@ async fn main() -> Result<()> {
         return service::run(cmd, args.state_dir.as_deref(), args.api);
     }
     if !args.api.ip().is_loopback() {
-        tracing::warn!("local API is listening on a non-loopback address; anyone who can reach it controls this node");
+        tracing::warn!(
+            "local API is listening on a non-loopback address; anyone who can reach it controls this node"
+        );
     }
     let state_dir = args.state_dir.unwrap_or_else(state::default_state_dir);
     tracing::info!("state directory: {}", state_dir.display());
@@ -199,11 +216,16 @@ async fn main() -> Result<()> {
         }
         b.helper.resume().await;
         if args.helper {
-            let req = retail_proto::api::HelperStartRequest { port: None, public: args.helper_public.clone() };
+            let req = retail_proto::api::HelperStartRequest {
+                port: None,
+                public: args.helper_public.clone(),
+            };
             match b.helper.start(&req).await {
                 // The code lets a server use this node: not in the log, which
                 // a container's operator tooling may collect and ship elsewhere
-                Ok(()) => tracing::info!("helper node running; `retail helper status` prints its code"),
+                Ok(()) => {
+                    tracing::info!("helper node running; `retail helper status` prints its code")
+                }
                 Err(e) => tracing::error!("could not start the helper node: {e:#}"),
             }
         }
@@ -239,7 +261,8 @@ async fn main() -> Result<()> {
     let shutdown_backend = backend.clone();
     let updater = backend.updater.clone();
     // The peer's address lets Linux tell who is asking (local_api::local_user)
-    let app = local_api::router(backend, token, admin, api).into_make_service_with_connect_info::<SocketAddr>();
+    let app = local_api::router(backend, token, admin, api)
+        .into_make_service_with_connect_info::<SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::select! {
@@ -271,10 +294,21 @@ fn init_logging(file: Option<logfile::LogFile>) {
         .and_then(|s| s.parse::<Targets>().ok())
         .unwrap_or_else(|| Targets::new().with_target("retaild", tracing::Level::INFO));
     let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let to_stderr = (file.is_none() || terminal)
-        .then(|| tracing_subscriber::fmt::layer().with_ansi(terminal).with_writer(std::io::stderr));
-    let to_file = file.map(|f| tracing_subscriber::fmt::layer().with_ansi(false).with_writer(move || f.clone()));
-    tracing_subscriber::registry().with(to_stderr).with(to_file).with(filter).init();
+    let to_stderr = (file.is_none() || terminal).then(|| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(terminal)
+            .with_writer(std::io::stderr)
+    });
+    let to_file = file.map(|f| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || f.clone())
+    });
+    tracing_subscriber::registry()
+        .with(to_stderr)
+        .with(to_file)
+        .with(filter)
+        .init();
     // A panic says where, before the service manager's exit code is all that is left
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -312,10 +346,18 @@ mod tests {
     #[test]
     fn serve_flag_from_the_environment() {
         // Containers set these as 1 / 0 as often as true / false
-        for (value, want) in [("1", true), ("true", true), ("yes", true), ("0", false), ("false", false), ("no", false)] {
+        for (value, want) in [
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+        ] {
             // SAFETY: the only test that touches this variable
             unsafe { std::env::set_var("RETAIL_SERVE", value) };
-            let args = super::Args::try_parse_from(["retaild"]).unwrap_or_else(|e| panic!("{value}: {e}"));
+            let args =
+                super::Args::try_parse_from(["retaild"]).unwrap_or_else(|e| panic!("{value}: {e}"));
             assert_eq!(args.serve, want, "{value}");
         }
         unsafe { std::env::remove_var("RETAIL_SERVE") };

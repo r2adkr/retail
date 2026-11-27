@@ -11,7 +11,13 @@ pub struct TextInput {
 
 impl TextInput {
     pub fn new(placeholder: &'static str, secret: bool) -> Self {
-        TextInput { value: String::new(), placeholder, secret, caret: 0, all_selected: false }
+        TextInput {
+            value: String::new(),
+            placeholder,
+            secret,
+            caret: 0,
+            all_selected: false,
+        }
     }
 
     pub fn set(&mut self, value: &str) {

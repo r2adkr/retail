@@ -5,11 +5,11 @@
 pub mod acl;
 pub mod api;
 pub mod invite;
-pub mod package;
-pub mod programs;
 pub mod key;
 pub mod listener;
 pub mod local;
+pub mod package;
+pub mod programs;
 pub mod relay;
 pub mod route;
 pub mod stun;
@@ -28,6 +28,8 @@ pub const WEB_ADMIN_PORT: u16 = 41180;
 /// Official client builds, under `v<version>/`
 pub const RELEASES: &str = "https://github.com/r2adkr/retail/releases/download";
 pub const LOCAL_API_ADDR: &str = "127.0.0.1:41112";
+/// TCP port on a device's mesh address that takes files from other devices
+pub const FILE_PORT: u16 = 41618;
 pub const TUN_MTU: u16 = 1280;
 
 /// Names of devices are `<hostname>.MAGIC_DNS_DOMAIN` (`.internal` is

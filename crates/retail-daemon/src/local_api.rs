@@ -8,15 +8,16 @@
 
 use std::sync::Arc;
 
+use axum::extract::Path;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use axum::extract::Path;
 use retail_proto::api::{
-    ApiError, HelperStartRequest, HelperStatus, InviteRequest, PrefsRequest, ServerSelect, ServerStartRequest, SystemProxy, UpRequest,
+    ApiError, HelperStartRequest, HelperStatus, InviteRequest, PrefsRequest, ServerSelect,
+    ServerStartRequest, SystemProxy, UpRequest,
 };
 
 use crate::backend::Backend;
@@ -27,7 +28,12 @@ pub const LOCAL_HEADER: &str = "x-retail-local";
 #[derive(Clone, Copy)]
 struct Admin(bool);
 
-pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api: std::net::SocketAddr) -> Router {
+pub fn router(
+    backend: Arc<Backend>,
+    token: Arc<String>,
+    admin: Arc<String>,
+    api: std::net::SocketAddr,
+) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/up", post(up))
@@ -39,6 +45,8 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api
         .route("/servers/forget", post(forget_server))
         .route("/prefs", post(prefs))
         .route("/wake", post(wake))
+        .route("/files/{id}/accept", post(accept_file))
+        .route("/files/{id}/decline", post(decline_file))
         .route("/server", get(server_status))
         .route("/server/start", post(server_start))
         .route("/server/stop", post(server_stop))
@@ -57,7 +65,10 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api
         // POST so the guard asks for the token: the answer is a reusable invite
         .route("/server/invites/{id}/code", post(server_named_code))
         // The installer of a named invite, for the tray's server window
-        .route("/server/invites/{id}/package/{variant}", post(server_package))
+        .route(
+            "/server/invites/{id}/package/{variant}",
+            post(server_package),
+        )
         .route("/helper", get(helper_status))
         // POST so the guard asks for the token: the code carries the helper's secret
         .route("/helper/status", post(helper_status_with_code))
@@ -66,11 +77,19 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api
         .route("/proxy/system", post(system_proxy))
         .route("/web/login", post(web_login))
         .route("/shutdown", post(shutdown))
-        .layer(middleware::from_fn(move |req: Request, next: Next| guard(token.clone(), admin.clone(), api, req, next)))
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            guard(token.clone(), admin.clone(), api, req, next)
+        }))
         .with_state(backend)
 }
 
-async fn guard(token: Arc<String>, admin: Arc<String>, api: std::net::SocketAddr, mut req: Request, next: Next) -> Response {
+async fn guard(
+    token: Arc<String>,
+    admin: Arc<String>,
+    api: std::net::SocketAddr,
+    mut req: Request,
+    next: Next,
+) -> Response {
     let host_ok = req
         .headers()
         .get(header::HOST)
@@ -80,10 +99,16 @@ async fn guard(token: Arc<String>, admin: Arc<String>, api: std::net::SocketAddr
     if !host_ok || !req.headers().contains_key(LOCAL_HEADER) {
         return error(StatusCode::FORBIDDEN, "forbidden");
     }
-    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0);
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0);
     let user = peer.and_then(|p| local_user(p, api));
     if req.method() != axum::http::Method::GET {
-        let given = req.headers().get(retail_proto::local::TOKEN_HEADER).map(|v| v.as_bytes());
+        let given = req
+            .headers()
+            .get(retail_proto::local::TOKEN_HEADER)
+            .map(|v| v.as_bytes());
         let ok = given.is_some_and(|g| same_secret(g, token.as_bytes())) || user.is_some();
         if !ok {
             return error(
@@ -92,7 +117,10 @@ async fn guard(token: Arc<String>, admin: Arc<String>, api: std::net::SocketAddr
             );
         }
     }
-    let is_admin = req.headers().get(retail_proto::local::ADMIN_HEADER).is_some_and(|g| same_secret(g.as_bytes(), admin.as_bytes()))
+    let is_admin = req
+        .headers()
+        .get(retail_proto::local::ADMIN_HEADER)
+        .is_some_and(|g| same_secret(g.as_bytes(), admin.as_bytes()))
         || user == Some(LocalUser::Root);
     req.extensions_mut().insert(Admin(is_admin));
     next.run(req).await
@@ -127,7 +155,10 @@ fn local_user(_peer: std::net::SocketAddr, _api: std::net::SocketAddr) -> Option
 /// primary group
 #[cfg(target_os = "linux")]
 fn in_group(uid: u32, group: &str) -> bool {
-    let (Ok(passwd), Ok(groups)) = (std::fs::read_to_string("/etc/passwd"), std::fs::read_to_string("/etc/group")) else {
+    let (Ok(passwd), Ok(groups)) = (
+        std::fs::read_to_string("/etc/passwd"),
+        std::fs::read_to_string("/etc/group"),
+    ) else {
         return false;
     };
     let Some((name, primary)) = passwd.lines().find_map(|l| {
@@ -144,16 +175,29 @@ fn in_group(uid: u32, group: &str) -> bool {
 
 /// Ends the daemon the way a service stop would, undoing its system changes
 /// (Windows has no stop signal for it). Administrators only.
-async fn shutdown(State(b): State<Arc<Backend>>, axum::Extension(Admin(admin)): axum::Extension<Admin>) -> Response {
+async fn shutdown(
+    State(b): State<Arc<Backend>>,
+    axum::Extension(Admin(admin)): axum::Extension<Admin>,
+) -> Response {
     if !admin {
-        return error(StatusCode::FORBIDDEN, "only an administrator can stop retaild");
+        return error(
+            StatusCode::FORBIDDEN,
+            "only an administrator can stop retaild",
+        );
     }
     b.stop_requested.notify_one();
     StatusCode::NO_CONTENT.into_response()
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(ApiError { error: msg.into(), reason: None })).into_response()
+    (
+        status,
+        Json(ApiError {
+            error: msg.into(),
+            reason: None,
+        }),
+    )
+        .into_response()
 }
 
 fn failed(e: anyhow::Error) -> Response {
@@ -162,8 +206,16 @@ fn failed(e: anyhow::Error) -> Response {
 
 /// `failed` for a request that contacts the server: says why it could not be reached
 fn not_reached(e: anyhow::Error) -> Response {
-    let reason = Some(crate::failure::classify(&e)).filter(|r| *r != retail_proto::api::FailReason::Other);
-    (StatusCode::BAD_REQUEST, Json(ApiError { error: format!("{e:#}"), reason })).into_response()
+    let reason =
+        Some(crate::failure::classify(&e)).filter(|r| *r != retail_proto::api::FailReason::Other);
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: format!("{e:#}"),
+            reason,
+        }),
+    )
+        .into_response()
 }
 
 async fn status(State(b): State<Arc<Backend>>) -> Response {
@@ -219,14 +271,48 @@ async fn forget_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSele
     }
 }
 
-async fn prefs(State(b): State<Arc<Backend>>, axum::Extension(Admin(admin)): axum::Extension<Admin>, Json(req): Json<PrefsRequest>) -> Response {
+async fn prefs(
+    State(b): State<Arc<Backend>>,
+    axum::Extension(Admin(admin)): axum::Extension<Admin>,
+    Json(req): Json<PrefsRequest>,
+) -> Response {
     match b.set_prefs(req, admin).await {
         Ok(()) => Json(b.status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn wake(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::WakeRequest>) -> Response {
+async fn accept_file(
+    State(b): State<Arc<Backend>>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> Response {
+    match b.accept_file(id).await {
+        Ok((offer, body)) => {
+            let mut r = Response::new(body);
+            r.headers_mut()
+                .insert(axum::http::header::CONTENT_LENGTH, offer.size.into());
+            r.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/octet-stream"),
+            );
+            r
+        }
+        Err(e) => failed(e),
+    }
+}
+
+async fn decline_file(
+    State(b): State<Arc<Backend>>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> Response {
+    b.decline_file(id);
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn wake(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::WakeRequest>,
+) -> Response {
     match b.wake(&req.peer).await {
         Ok(sent_by) => Json(retail_proto::api::WakeResponse { sent_by }).into_response(),
         Err(e) => failed(e),
@@ -237,7 +323,10 @@ async fn server_status(State(b): State<Arc<Backend>>) -> Response {
     Json(b.server_status().await).into_response()
 }
 
-async fn server_start(State(b): State<Arc<Backend>>, Json(req): Json<ServerStartRequest>) -> Response {
+async fn server_start(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<ServerStartRequest>,
+) -> Response {
     match b.server_start(req).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
@@ -253,27 +342,43 @@ async fn server_stop(State(b): State<Arc<Backend>>) -> Response {
 
 async fn server_named_code(State(b): State<Arc<Backend>>, Path(id): Path<i64>) -> Response {
     match b.host.named_code(id).await {
-        Ok(code) => Json(retail_proto::api::InviteResponse { code, expires_at: 0 }).into_response(),
+        Ok(code) => Json(retail_proto::api::InviteResponse {
+            code,
+            expires_at: 0,
+        })
+        .into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_package(State(b): State<Arc<Backend>>, Path((id, variant)): Path<(i64, String)>) -> Response {
+async fn server_package(
+    State(b): State<Arc<Backend>>,
+    Path((id, variant)): Path<(i64, String)>,
+) -> Response {
     match b.web.get() {
         Some(web) => web.package(id, &variant).await,
-        None => failed(anyhow::anyhow!("the web admin page is off, which also makes installers")),
+        None => failed(anyhow::anyhow!(
+            "the web admin page is off, which also makes installers"
+        )),
     }
 }
 
 async fn helper_status(State(b): State<Arc<Backend>>) -> Response {
-    Json(HelperStatus { code: None, ..b.helper.status().await }).into_response()
+    Json(HelperStatus {
+        code: None,
+        ..b.helper.status().await
+    })
+    .into_response()
 }
 
 async fn helper_status_with_code(State(b): State<Arc<Backend>>) -> Response {
     Json(b.helper.status().await).into_response()
 }
 
-async fn helper_start(State(b): State<Arc<Backend>>, Json(req): Json<HelperStartRequest>) -> Response {
+async fn helper_start(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<HelperStartRequest>,
+) -> Response {
     match b.helper.start(&req).await {
         Ok(()) => Json(b.helper.status().await).into_response(),
         Err(e) => failed(e),
@@ -291,7 +396,10 @@ async fn helper_stop(State(b): State<Arc<Backend>>) -> Response {
 async fn web_login(State(b): State<Arc<Backend>>) -> Response {
     match b.web.get() {
         Some(web) => Json(serde_json::json!({ "url": web.login_link() })).into_response(),
-        None => error(StatusCode::SERVICE_UNAVAILABLE, "the web admin page is off (retaild --web-port)"),
+        None => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the web admin page is off (retaild --web-port)",
+        ),
     }
 }
 
@@ -308,7 +416,11 @@ async fn server_invite(State(b): State<Arc<Backend>>, Json(req): Json<InviteRequ
     }
 }
 
-async fn server_delete_node(State(b): State<Arc<Backend>>, Path(id): Path<i64>, body: axum::body::Bytes) -> Response {
+async fn server_delete_node(
+    State(b): State<Arc<Backend>>,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> Response {
     // The body is optional: older callers send none
     let req: retail_proto::api::RemoveRequest = match body.is_empty() {
         true => Default::default(),
@@ -324,63 +436,97 @@ async fn server_delete_node(State(b): State<Arc<Backend>>, Path(id): Path<i64>, 
     }
 }
 
-async fn server_tags(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::TagsRequest>) -> Response {
+async fn server_tags(
+    State(b): State<Arc<Backend>>,
+    Path(id): Path<i64>,
+    Json(req): Json<retail_proto::api::TagsRequest>,
+) -> Response {
     match b.host.set_tags(id, &req.tags).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_routes(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RoutesRequest>) -> Response {
+async fn server_routes(
+    State(b): State<Arc<Backend>>,
+    Path(id): Path<i64>,
+    Json(req): Json<retail_proto::api::RoutesRequest>,
+) -> Response {
     match b.host.set_routes(id, &req.routes).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_renew(State(b): State<Arc<Backend>>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RenewRequest>) -> Response {
+async fn server_renew(
+    State(b): State<Arc<Backend>>,
+    Path(id): Path<i64>,
+    Json(req): Json<retail_proto::api::RenewRequest>,
+) -> Response {
     match b.host.renew(id, req.never).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_expiry(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::ExpiryRequest>) -> Response {
-    match b.host.set_expiry(req.key_expiry_days, req.remove_inactive_days).await {
+async fn server_expiry(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::ExpiryRequest>,
+) -> Response {
+    match b
+        .host
+        .set_expiry(req.key_expiry_days, req.remove_inactive_days)
+        .await
+    {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_backup(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::BackupRequest>) -> Response {
+async fn server_backup(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::BackupRequest>,
+) -> Response {
     match b.host.backup(&req.passphrase).await {
         Ok(backup) => Json(retail_proto::api::BackupResponse { backup }).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_restore(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::RestoreRequest>) -> Response {
+async fn server_restore(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::RestoreRequest>,
+) -> Response {
     match b.host.restore(&req.backup, &req.passphrase).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_acl(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::AclRequest>) -> Response {
+async fn server_acl(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::AclRequest>,
+) -> Response {
     match b.host.set_acl(req.acl).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_helper_device(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::HelperDeviceRequest>) -> Response {
+async fn server_helper_device(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::HelperDeviceRequest>,
+) -> Response {
     match b.host.set_helper_device(req.id).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),
     }
 }
 
-async fn server_tunnel(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::TunnelRequest>) -> Response {
+async fn server_tunnel(
+    State(b): State<Arc<Backend>>,
+    Json(req): Json<retail_proto::api::TunnelRequest>,
+) -> Response {
     match b.host.set_tunnel(req.on).await {
         Ok(()) => Json(b.server_status().await).into_response(),
         Err(e) => failed(e),

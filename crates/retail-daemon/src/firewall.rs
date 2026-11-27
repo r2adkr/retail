@@ -50,16 +50,31 @@ impl Drop for Inbound {
 fn add_rule() -> bool {
     #[cfg(target_os = "windows")]
     {
-        let Ok(exe) = std::env::current_exe() else { return false };
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
         remove_inbound();
         let program = format!("program={}", exe.display());
         let name = format!("name={RULE}");
         let ok = std::process::Command::new("netsh")
-            .args(["advfirewall", "firewall", "add", "rule", &name, "dir=in", "action=allow", &program, "enable=yes", "profile=any"])
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &name,
+                "dir=in",
+                "action=allow",
+                &program,
+                "enable=yes",
+                "profile=any",
+            ])
             .output()
             .is_ok_and(|o| o.status.success());
         if !ok {
-            tracing::warn!("could not add the Windows Firewall rule; devices may not reach this server");
+            tracing::warn!(
+                "could not add the Windows Firewall rule; devices may not reach this server"
+            );
         }
         ok
     }

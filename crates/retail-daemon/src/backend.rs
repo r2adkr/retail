@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use boringtun::x25519::PublicKey;
 use retail_proto::api::{
-    BackendState, InviteRequest, InviteResponse, Prefs, PrefsRequest, RegisterRequest, SelfStatus, ServerStartRequest,
-    ServerStatus, StatusResponse, UpRequest,
+    BackendState, InviteRequest, InviteResponse, Prefs, PrefsRequest, RegisterRequest, SelfStatus,
+    ServerStartRequest, ServerStatus, StatusResponse, UpRequest,
 };
 use retail_proto::{Key, MESH_PREFIX_LEN};
 use tokio::sync::{Mutex, mpsc, watch};
@@ -65,6 +65,7 @@ pub struct Backend {
     pub web: std::sync::OnceLock<retail_web::WebAdmin>,
     pub updater: Arc<crate::update::Updater>,
     usage: crate::usage::Usage,
+    files: Arc<crate::files::Files>,
     /// An administrator asked the daemon to exit (`POST /shutdown`)
     pub stop_requested: tokio::sync::Notify,
     /// Held while a stopped session winds down, so the next one waits for
@@ -97,7 +98,10 @@ impl Backend {
                 tracing::warn!("saving settings: {e:#}");
             }
         }
-        crate::proxy::set_preference(persisted.prefs.proxy.as_deref(), persisted.prefs.proxy_sign_in);
+        crate::proxy::set_preference(
+            persisted.prefs.proxy.as_deref(),
+            persisted.prefs.proxy_sign_in,
+        );
         let host = crate::host::Host::new(&opts.state_dir);
         let helper = crate::helper_host::HelperHost::new(&opts.state_dir);
         let updater = Arc::new(crate::update::Updater::new(&opts.state_dir));
@@ -119,6 +123,7 @@ impl Backend {
             web: std::sync::OnceLock::new(),
             updater,
             usage,
+            files: Arc::default(),
             stop_requested: tokio::sync::Notify::new(),
             teardown: Mutex::new(()),
             last_status: std::sync::Mutex::default(),
@@ -139,7 +144,9 @@ impl Backend {
                 if last_restart.elapsed() > HEALTHY_RUN {
                     backoff = Duration::from_secs(1);
                 }
-                tracing::warn!("session task '{task}' failed; restarting the session in {backoff:?}");
+                tracing::warn!(
+                    "session task '{task}' failed; restarting the session in {backoff:?}"
+                );
                 loop {
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
@@ -180,16 +187,27 @@ impl Backend {
 
     pub async fn up(&self, mut req: UpRequest) -> Result<()> {
         let mut invite_reality = None;
-        let mut target = match req.invite.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let mut target = match req
+            .invite
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(code) => {
                 let invite = retail_proto::invite::Invite::decode(code).map_err(|e| anyhow!(e))?;
                 req.auth_key = Some(invite.key.clone());
                 // The address ends up in terminals and status: host:port, nothing else
-                if invite.addrs.iter().any(|a| a.chars().any(|c| c.is_control() || c.is_whitespace() || c == '/')) {
+                if invite.addrs.iter().any(|a| {
+                    a.chars()
+                        .any(|c| c.is_control() || c.is_whitespace() || c == '/')
+                }) {
                     anyhow::bail!("the invite code is damaged");
                 }
                 let pin = match &invite.pin {
-                    Some(p) => Some(retail_proto::invite::decode_pin(p).context("the invite code is damaged")?),
+                    Some(p) => Some(
+                        retail_proto::invite::decode_pin(p)
+                            .context("the invite code is damaged")?,
+                    ),
                     None => None,
                 };
                 invite_reality = invite.reality.clone();
@@ -197,7 +215,10 @@ impl Backend {
                     url: format!("https://{}", invite.addrs[0]),
                     pin,
                     alts: invite.addrs[1..].to_vec(),
-                    reality: invite.reality.as_ref().and_then(crate::reality::Params::from_invite),
+                    reality: invite
+                        .reality
+                        .as_ref()
+                        .and_then(crate::reality::Params::from_invite),
                     fronts: invite.fronts.clone(),
                 }
             }
@@ -213,9 +234,17 @@ impl Backend {
             && p.server.as_deref() != Some(server.as_str())
         {
             let current = p.token.is_some() && p.server_pin.as_deref() == Some(pin.as_str());
-            let saved = p.saved.iter().find(|s| s.server_pin.as_deref() == Some(pin.as_str()) && s.token.is_some()).cloned();
+            let saved = p
+                .saved
+                .iter()
+                .find(|s| s.server_pin.as_deref() == Some(pin.as_str()) && s.token.is_some())
+                .cloned();
             if current || saved.is_some() {
-                let old = if current { p.server.clone().unwrap_or_default() } else { saved.as_ref().map(|s| s.server.clone()).unwrap_or_default() };
+                let old = if current {
+                    p.server.clone().unwrap_or_default()
+                } else {
+                    saved.as_ref().map(|s| s.server.clone()).unwrap_or_default()
+                };
                 tracing::info!("{old} is now at {server}");
                 if !current {
                     self.stop_session().await;
@@ -254,7 +283,9 @@ impl Backend {
         }
         if !registered_here || req.auth_key.is_some() {
             let auth_key = req.auth_key.clone().ok_or_else(|| {
-                anyhow!("this node is not registered with {server}; pass --auth-key or an invite code")
+                anyhow!(
+                    "this node is not registered with {server}; pass --auth-key or an invite code"
+                )
             })?;
             let hostname = req
                 .hostname
@@ -262,17 +293,24 @@ impl Backend {
                 .or_else(|| p.hostname.clone())
                 .unwrap_or_else(default_hostname);
             // Proves this device is the one registered with the key
-            let token = p.token.clone().filter(|_| p.server.as_deref() == Some(server.as_str()));
+            let token = p
+                .token
+                .clone()
+                .filter(|_| p.server.as_deref() == Some(server.as_str()));
             if token.is_some() {
                 // A stored token goes only to the server it belongs to: one that
                 // proves the stored pin, or holds the REALITY key saved with the
                 // registration. An invite can name any pin and any REALITY key
                 // next to this server's address, so neither may come from it.
                 if target.pin.as_ref().map(retail_proto::invite::encode_pin) != p.server_pin {
-                    anyhow::bail!("this invite names a different server key than the one {server} had when this device joined");
+                    anyhow::bail!(
+                        "this invite names a different server key than the one {server} had when this device joined"
+                    );
                 }
                 invite_reality = p.server_reality.clone();
-                target.reality = invite_reality.as_ref().and_then(crate::reality::Params::from_invite);
+                target.reality = invite_reality
+                    .as_ref()
+                    .and_then(crate::reality::Params::from_invite);
             }
             let registered = control::register(
                 &target,
@@ -290,7 +328,10 @@ impl Backend {
                 Err(e) => {
                     if previous.server != p.server || previous.token != p.token {
                         *p = previous;
-                        if p.want_running && p.token.is_some() && self.session.lock().await.is_none() {
+                        if p.want_running
+                            && p.token.is_some()
+                            && self.session.lock().await.is_none()
+                        {
                             let _ = self.start_locked(&p).await;
                         }
                     }
@@ -308,7 +349,12 @@ impl Backend {
             p.ip = Some(resp.ip);
             p.prefix_len = Some(resp.prefix_len);
             p.hostname = Some(hostname);
-            if let Some(code) = req.invite.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(code) = req
+                .invite
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 p.invite = Some(code.to_string());
             }
         }
@@ -355,7 +401,12 @@ impl Backend {
             }
             return Ok(());
         }
-        let target = p.saved.iter().find(|s| s.server == server).cloned().with_context(|| format!("{server} is not a saved server"))?;
+        let target = p
+            .saved
+            .iter()
+            .find(|s| s.server == server)
+            .cloned()
+            .with_context(|| format!("{server} is not a saved server"))?;
         self.stop_session().await;
         p.remember_current();
         p.clear_current();
@@ -391,10 +442,15 @@ impl Backend {
             prefs.exit_node = if name.is_empty() || name.eq_ignore_ascii_case("none") {
                 None
             } else {
-                let engine = &session.as_ref().context("connect first: exit nodes are looked up in the network")?.engine;
+                let engine = &session
+                    .as_ref()
+                    .context("connect first: exit nodes are looked up in the network")?
+                    .engine;
                 let (key, hostname, offers) = engine.find_peer(name)?;
                 if !offers {
-                    anyhow::bail!("{hostname} does not offer itself as an exit node (on it: retail set --advertise-exit-node)");
+                    anyhow::bail!(
+                        "{hostname} does not offer itself as an exit node (on it: retail set --advertise-exit-node)"
+                    );
                 }
                 Some(key)
             };
@@ -406,7 +462,8 @@ impl Backend {
             prefs.open_router_port = on;
         }
         if let Some(routes) = &req.advertise_routes {
-            prefs.advertise_routes = retail_proto::route::parse_routes(routes).map_err(anyhow::Error::msg)?;
+            prefs.advertise_routes =
+                retail_proto::route::parse_routes(routes).map_err(anyhow::Error::msg)?;
         }
         if let Some(mb) = req.memory_limit_mb {
             prefs.memory_limit_mb = (mb > 0).then_some(mb);
@@ -419,7 +476,8 @@ impl Backend {
                 "" | "auto" => None,
                 "off" | "none" | "direct" => Some("off".into()),
                 url => {
-                    crate::proxy::Proxy::parse(url).with_context(|| format!("not a proxy address: {url}"))?;
+                    crate::proxy::Proxy::parse(url)
+                        .with_context(|| format!("not a proxy address: {url}"))?;
                     Some(url.to_string())
                 }
             };
@@ -463,9 +521,37 @@ impl Backend {
         Ok(())
     }
 
+    pub fn decline_file(&self, id: u64) -> bool {
+        self.files.decline(id)
+    }
+
+    /// The offer's connection, answered `ok`: its bytes are the file
+    pub async fn accept_file(
+        &self,
+        id: u64,
+    ) -> Result<(retail_proto::api::FileOffer, axum::body::Body)> {
+        use tokio::io::AsyncWriteExt;
+        let (offer, mut conn) = self
+            .files
+            .take(id)
+            .context("that file is no longer offered")?;
+        conn.write_all(
+            b"ok
+",
+        )
+        .await
+        .context("the sender is gone")?;
+        let size = offer.size;
+        Ok((offer, crate::files::body(conn, size)))
+    }
+
     pub async fn wake(&self, name: &str) -> Result<Vec<String>> {
         let session = self.session.lock().await;
-        session.as_ref().context("connect first: devices are woken through the network")?.engine.wake(name)
+        session
+            .as_ref()
+            .context("connect first: devices are woken through the network")?
+            .engine
+            .wake(name)
     }
 
     pub async fn auto_update(&self) -> bool {
@@ -502,7 +588,11 @@ impl Backend {
             return Ok(());
         }
         let code = self.host.self_invite().await?;
-        self.up(UpRequest { invite: Some(code), ..Default::default() }).await?;
+        self.up(UpRequest {
+            invite: Some(code),
+            ..Default::default()
+        })
+        .await?;
         self.exempt_own_node().await;
         Ok(())
     }
@@ -510,7 +600,9 @@ impl Backend {
     /// The device hosting the network never expires from it, even when it
     /// joined before hosting devices were exempt
     pub async fn exempt_own_node(&self) {
-        let Some(own) = self.host.local_url().await else { return };
+        let Some(own) = self.host.local_url().await else {
+            return;
+        };
         let id = {
             let p = self.persisted.lock().await;
             if p.server.as_deref() != Some(own.as_str()) {
@@ -530,7 +622,9 @@ impl Backend {
         let own = self.host.local_url().await?;
         let p = self.persisted.lock().await;
         let running = self.session.lock().await.is_some();
-        (running && p.server.as_deref() == Some(own.as_str())).then_some(p.ip).flatten()
+        (running && p.server.as_deref() == Some(own.as_str()))
+            .then_some(p.ip)
+            .flatten()
     }
 
     pub async fn server_stop(&self) -> Result<()> {
@@ -571,12 +665,17 @@ impl Backend {
     async fn stop_session(&self) {
         let _teardown = self.teardown.lock().await;
         // Out of its slot first, so status and settings do not wait for the teardown
-        let Some(mut s) = self.session.lock().await.take() else { return };
+        let Some(mut s) = self.session.lock().await.take() else {
+            return;
+        };
         self.usage.record(&s.engine.peer_status());
         self.usage.end_session();
         let _ = s.stop.send(true);
         let graceful = &mut s.graceful;
-        let _ = tokio::time::timeout(GRACEFUL_STOP, async { while graceful.join_next().await.is_some() {} }).await;
+        let _ = tokio::time::timeout(GRACEFUL_STOP, async {
+            while graceful.join_next().await.is_some() {}
+        })
+        .await;
         s.graceful.shutdown().await;
         // Wait for every task so the TUN device is released before a new session reuses its name
         s.tasks.shutdown().await;
@@ -625,21 +724,63 @@ impl Backend {
         for (name, task) in engine.data_plane_tasks() {
             threads.push(self.spawn_thread(name, task, stop.subscribe())?);
         }
-        self.spawn(&mut tasks, "timers", engine.clone().timer_loop(), stop.subscribe());
-        self.spawn(&mut tasks, "magicdns", engine.clone().dns_loop(), stop.subscribe());
+        self.spawn(
+            &mut tasks,
+            "timers",
+            engine.clone().timer_loop(),
+            stop.subscribe(),
+        );
+        self.spawn(
+            &mut tasks,
+            "magicdns",
+            engine.clone().dns_loop(),
+            stop.subscribe(),
+        );
         let mut graceful = JoinSet::new();
-        self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), helper_dir(&self.opts.state_dir, p), stop.subscribe()), stop.subscribe());
-        self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun), stop.subscribe());
-        self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token), stop.subscribe());
-        tasks.spawn(self.device_port.run(engine.listen_port(), self.host.hosting.subscribe()));
+        self.spawn(
+            &mut graceful,
+            "helper-role",
+            crate::helper_role::run(
+                engine.clone(),
+                helper_dir(&self.opts.state_dir, p),
+                stop.subscribe(),
+            ),
+            stop.subscribe(),
+        );
+        self.spawn(
+            &mut tasks,
+            "discovery",
+            engine.clone().discovery_loop(stun),
+            stop.subscribe(),
+        );
+        self.spawn(
+            &mut tasks,
+            "control",
+            control::control_loop(engine.clone(), target, token),
+            stop.subscribe(),
+        );
+        self.spawn(
+            &mut tasks,
+            "files",
+            crate::files::serve(engine.clone(), self.files.clone(), stop.subscribe()),
+            stop.subscribe(),
+        );
+        tasks.spawn(
+            self.device_port
+                .run(engine.listen_port(), self.host.hosting.subscribe()),
+        );
         // The router's mapping (the hosted network's, or this device's own) is
         // this device's public endpoint
-        let (mut public_wg, mut own) = (self.host.public_wg.subscribe(), self.device_port.public.subscribe());
+        let (mut public_wg, mut own) = (
+            self.host.public_wg.subscribe(),
+            self.device_port.public.subscribe(),
+        );
         let e = engine.clone();
         tasks.spawn(async move {
             loop {
                 let hosted = *public_wg.borrow_and_update();
-                let eps: Vec<std::net::SocketAddr> = hosted.or(*own.borrow_and_update()).into_iter().collect();
+                let eps: Vec<std::net::SocketAddr> =
+                    hosted.or(*own.borrow_and_update()).into_iter().collect();
                 e.set_extra_endpoints(eps);
                 tokio::select! {
                     r = public_wg.changed() => if r.is_err() { break },
@@ -649,7 +790,10 @@ impl Backend {
         });
         // Registering the domain runs system tools, which can take a moment
         let tun = engine.tun_device().0;
-        let dns = tokio::task::spawn_blocking(move || crate::magicdns::SystemDns::configure(&tun)).await.ok().flatten();
+        let dns = tokio::task::spawn_blocking(move || crate::magicdns::SystemDns::configure(&tun))
+            .await
+            .ok()
+            .flatten();
         let (tun, tun_index) = engine.tun_device();
         // Weak: the session's end must free the engine and its TUN device
         let weak = Arc::downgrade(&engine);
@@ -657,7 +801,9 @@ impl Backend {
             Some(engine) => engine.set_userspace_forwarding(on),
             None => Ok(()),
         });
-        let gateway = Arc::new(std::sync::Mutex::new(Gateway::new(&tun, tun_index, userspace)));
+        let gateway = Arc::new(std::sync::Mutex::new(Gateway::new(
+            &tun, tun_index, userspace,
+        )));
         // Routes and forwarding follow the netmap: what peers route, and what
         // the server approved for this device
         let mut routes = engine.subscribe_routes();
@@ -670,7 +816,9 @@ impl Backend {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut g = gw.lock().unwrap();
                     let exit = g.exit();
-                    let forwarding = g.set(exit, &state.own).context("routing networks for the mesh");
+                    let forwarding = g
+                        .set(exit, &state.own)
+                        .context("routing networks for the mesh");
                     drop(g);
                     let routes = subnets.set(&state.accepted);
                     (forwarding.and(routes), subnets)
@@ -709,10 +857,16 @@ impl Backend {
         });
         // The same for the URLs that forward to it
         let mut fronts = engine.subscribe_server_fronts();
-        let (persisted, state_path, server) = (self.persisted.clone(), self.state_path.clone(), p.server.clone());
+        let (persisted, state_path, server) = (
+            self.persisted.clone(),
+            self.state_path.clone(),
+            p.server.clone(),
+        );
         tasks.spawn(async move {
             while fronts.changed().await.is_ok() {
-                let Some(fresh) = fronts.borrow_and_update().clone() else { continue };
+                let Some(fresh) = fronts.borrow_and_update().clone() else {
+                    continue;
+                };
                 let mut p = persisted.lock().await;
                 if p.server != server || p.server_fronts == fresh {
                     continue;
@@ -724,7 +878,17 @@ impl Backend {
                 }
             }
         });
-        let mut session = Session { engine, started: Instant::now(), tasks, graceful, threads, stop, exit_routes: None, gateway, _dns: dns };
+        let mut session = Session {
+            engine,
+            started: Instant::now(),
+            tasks,
+            graceful,
+            threads,
+            stop,
+            exit_routes: None,
+            gateway,
+            _dns: dns,
+        };
         if let Err(e) = apply_exit_prefs(&mut session, &p.prefs) {
             // The mesh still works, so only report the exit-node problem
             tracing::warn!("{e:#}");
@@ -789,8 +953,13 @@ impl Backend {
     }
 
     /// Runs a session task, recording its error (if it ever returns one) for `status`
-    fn spawn<F>(&self, tasks: &mut JoinSet<()>, name: &'static str, fut: F, stop: watch::Receiver<bool>)
-    where
+    fn spawn<F>(
+        &self,
+        tasks: &mut JoinSet<()>,
+        name: &'static str,
+        fut: F,
+        stop: watch::Receiver<bool>,
+    ) where
         F: Future<Output = Result<()>> + Send + 'static,
     {
         let last_error = self.last_error.clone();
@@ -818,7 +987,12 @@ impl Backend {
                 let last = self.last_status.lock().unwrap().clone();
                 match last {
                     // The last answer, as reconnecting
-                    Some(last) => return StatusResponse { control_connected: false, ..last },
+                    Some(last) => {
+                        return StatusResponse {
+                            control_connected: false,
+                            ..last
+                        };
+                    }
                     None => locks().await,
                 }
             }
@@ -861,7 +1035,9 @@ impl Backend {
             last_error: self.last_error.lock().unwrap().clone(),
             prefs: Prefs {
                 // Without the password: status needs no token
-                proxy: p.prefs.proxy.as_deref().map(|u| crate::proxy::Proxy::parse(u).map_or_else(|| u.to_string(), |x| x.label())),
+                proxy: p.prefs.proxy.as_deref().map(|u| {
+                    crate::proxy::Proxy::parse(u).map_or_else(|| u.to_string(), |x| x.label())
+                }),
                 ..p.prefs.clone()
             },
             memory_peak: crate::memory::peak(),
@@ -870,10 +1046,20 @@ impl Backend {
             update: self.updater.status(),
             key_expires_at: engine.and_then(|e| e.key_state().0),
             key_expired: engine.is_some_and(|e| e.key_state().1),
-            problem: engine.filter(|e| !e.control_connected.load(Ordering::Relaxed)).and_then(|e| e.control_problem()),
-            router_port: self.device_port.state().filter(|_| engine.is_some() && p.prefs.open_router_port),
+            problem: engine
+                .filter(|e| !e.control_connected.load(Ordering::Relaxed))
+                .and_then(|e| e.control_problem()),
+            router_port: self
+                .device_port
+                .state()
+                .filter(|_| engine.is_some() && p.prefs.open_router_port),
             usage_total: Some(self.usage.total()),
             connected_secs: session.map(|s| s.started.elapsed().as_secs()),
+            file_offers: if session.is_some() {
+                self.files.offers()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -887,14 +1073,25 @@ fn saved_servers(p: &Persisted) -> Vec<retail_proto::api::SavedServer> {
         .iter()
         .map(|s| retail_proto::api::SavedServer {
             server: s.server.clone(),
-            ip: if Some(s.server.as_str()) == current { p.ip } else { s.ip },
+            ip: if Some(s.server.as_str()) == current {
+                p.ip
+            } else {
+                s.ip
+            },
             current: Some(s.server.as_str()) == current,
         })
         .collect();
     if let Some(cur) = current
         && !out.iter().any(|s| s.current)
     {
-        out.insert(0, retail_proto::api::SavedServer { server: cur.to_string(), ip: p.ip, current: true });
+        out.insert(
+            0,
+            retail_proto::api::SavedServer {
+                server: cur.to_string(),
+                ip: p.ip,
+                current: true,
+            },
+        );
     }
     out
 }
@@ -935,7 +1132,8 @@ fn apply_exit_prefs(s: &mut Session, prefs: &Prefs) -> Result<()> {
     }
     s.engine.set_advertise_exit(gateway.exit());
     drop(gateway);
-    s.engine.set_advertise_routes(prefs.advertise_routes.clone());
+    s.engine
+        .set_advertise_routes(prefs.advertise_routes.clone());
     result
 }
 
@@ -946,7 +1144,10 @@ fn helper_dir(state_dir: &std::path::Path, p: &Persisted) -> PathBuf {
     // Shared by every network before 1.0.4
     let _ = std::fs::remove_dir_all(base.join("tls"));
     let _ = std::fs::remove_file(base.join("helper-secret"));
-    let id: String = p.public_key().map(|k| k.0[..8].iter().map(|b| format!("{b:02x}")).collect()).unwrap_or_default();
+    let id: String = p
+        .public_key()
+        .map(|k| k.0[..8].iter().map(|b| format!("{b:02x}")).collect())
+        .unwrap_or_default();
     base.join(id)
 }
 
@@ -978,7 +1179,13 @@ mod tests {
             "server_pin": retail_proto::invite::encode_pin(&[7u8; 32]),
         });
         std::fs::write(dir.join("state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
-        let b = Backend::new(Options { state_dir: dir.clone(), listen_port: 0, tun_name: None, memory_limit_mb: None }).unwrap();
+        let b = Backend::new(Options {
+            state_dir: dir.clone(),
+            listen_port: 0,
+            tun_name: None,
+            memory_limit_mb: None,
+        })
+        .unwrap();
         let invite = retail_proto::invite::Invite {
             addrs: vec![addr.to_string()],
             pin: Some(retail_proto::invite::encode_pin(&[8u8; 32])),
@@ -987,10 +1194,22 @@ mod tests {
             fronts: vec![],
         }
         .encode();
-        let err = b.up(UpRequest { invite: Some(invite), ..Default::default() }).await.unwrap_err();
-        assert!(format!("{err:#}").contains("different server key"), "{err:#}");
+        let err = b
+            .up(UpRequest {
+                invite: Some(invite),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("different server key"),
+            "{err:#}"
+        );
         let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
-        assert!(accepted.is_err(), "nothing may be sent to a server proving another pin");
+        assert!(
+            accepted.is_err(),
+            "nothing may be sent to a server proving another pin"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

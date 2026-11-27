@@ -55,8 +55,14 @@ impl Files {
         while let Some(rel) = stack.pop() {
             let entries = match std::fs::read_dir(dir.join(&rel)) {
                 Ok(e) => e,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel.as_os_str().is_empty() => return Ok(files),
-                Err(e) => return Err(e).with_context(|| format!("reading {}", dir.join(&rel).display())),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound && rel.as_os_str().is_empty() =>
+                {
+                    return Ok(files);
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("reading {}", dir.join(&rel).display()));
+                }
             };
             for entry in entries {
                 let entry = entry?;
@@ -69,7 +75,8 @@ impl Files {
                 if kind.is_dir() {
                     stack.push(path);
                 } else if kind.is_file() && entry.metadata()?.len() <= MAX_FILE {
-                    let bytes = std::fs::read(dir.join(&path)).with_context(|| format!("reading {name}"))?;
+                    let bytes = std::fs::read(dir.join(&path))
+                        .with_context(|| format!("reading {name}"))?;
                     files.insert(&name, &bytes);
                 }
             }
@@ -82,7 +89,9 @@ impl Files {
         for name in self.0.keys() {
             let rel = Path::new(name);
             let safe = !name.is_empty()
-                && rel.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                && rel
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)));
             if !safe {
                 bail!("the backup names an unsafe path: {name}");
             }
@@ -90,7 +99,9 @@ impl Files {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let bytes = self.get(name).with_context(|| format!("the backup's {name} is damaged"))?;
+            let bytes = self
+                .get(name)
+                .with_context(|| format!("the backup's {name} is damaged"))?;
             write_private(&path, &bytes)?;
         }
         Ok(())
@@ -106,7 +117,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path).with_context(|| format!("writing {}", path.display()))?;
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
     f.write_all(bytes)?;
     f.sync_all()?;
     Ok(())
@@ -115,8 +128,16 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 fn key(passphrase: &str, salt: &[u8], iterations: u32) -> Result<LessSafeKey> {
     let mut key = [0u8; 32];
     let iterations = NonZeroU32::new(iterations).context("bad backup parameters")?;
-    ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, iterations, salt, passphrase.as_bytes(), &mut key);
-    Ok(LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).map_err(|_| anyhow::anyhow!("key setup failed"))?))
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        salt,
+        passphrase.as_bytes(),
+        &mut key,
+    );
+    Ok(LessSafeKey::new(
+        UnboundKey::new(&AES_256_GCM, &key).map_err(|_| anyhow::anyhow!("key setup failed"))?,
+    ))
 }
 
 pub fn seal(files: &Files, passphrase: &str, created_at: i64) -> Result<String> {
@@ -126,11 +147,17 @@ pub fn seal(files: &Files, passphrase: &str, created_at: i64) -> Result<String> 
     let rng = SystemRandom::new();
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; NONCE_LEN];
-    rng.fill(&mut salt).map_err(|_| anyhow::anyhow!("no randomness"))?;
-    rng.fill(&mut nonce).map_err(|_| anyhow::anyhow!("no randomness"))?;
+    rng.fill(&mut salt)
+        .map_err(|_| anyhow::anyhow!("no randomness"))?;
+    rng.fill(&mut nonce)
+        .map_err(|_| anyhow::anyhow!("no randomness"))?;
     let mut data = serde_json::to_vec(files)?;
     key(passphrase, &salt, ITERATIONS)?
-        .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(FORMAT), &mut data)
+        .seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(FORMAT),
+            &mut data,
+        )
         .map_err(|_| anyhow::anyhow!("encryption failed"))?;
     let sealed = Sealed {
         format: FORMAT.into(),
@@ -145,18 +172,33 @@ pub fn seal(files: &Files, passphrase: &str, created_at: i64) -> Result<String> 
 }
 
 pub fn open(text: &str, passphrase: &str) -> Result<Files> {
-    let sealed: Sealed = serde_json::from_str(text.trim()).ok().filter(|s: &Sealed| s.format == FORMAT).context("this is not a retail server backup")?;
+    let sealed: Sealed = serde_json::from_str(text.trim())
+        .ok()
+        .filter(|s: &Sealed| s.format == FORMAT)
+        .context("this is not a retail server backup")?;
     if sealed.version > VERSION {
         bail!("this backup comes from a newer retail; update this device first");
     }
     if !(1..=10_000_000).contains(&sealed.iterations) {
         bail!("bad backup parameters");
     }
-    let salt = STANDARD.decode(&sealed.salt).context("the backup is damaged")?;
-    let nonce: [u8; NONCE_LEN] = STANDARD.decode(&sealed.nonce).ok().and_then(|n| n.try_into().ok()).context("the backup is damaged")?;
-    let mut data = STANDARD.decode(&sealed.data).context("the backup is damaged")?;
+    let salt = STANDARD
+        .decode(&sealed.salt)
+        .context("the backup is damaged")?;
+    let nonce: [u8; NONCE_LEN] = STANDARD
+        .decode(&sealed.nonce)
+        .ok()
+        .and_then(|n| n.try_into().ok())
+        .context("the backup is damaged")?;
+    let mut data = STANDARD
+        .decode(&sealed.data)
+        .context("the backup is damaged")?;
     let plain = key(passphrase, &salt, sealed.iterations)?
-        .open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(FORMAT), &mut data)
+        .open_in_place(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(FORMAT),
+            &mut data,
+        )
         .map_err(|_| anyhow::anyhow!("wrong passphrase, or the backup is damaged"))?;
     serde_json::from_slice(plain).context("the backup is damaged")
 }
@@ -175,7 +217,12 @@ mod tests {
         assert!(!text.contains("secret") && !text.contains("c2VjcmV0"));
         let back = open(&text, "correct horse").unwrap();
         assert_eq!(back.get("tls/key.pem").unwrap(), b"secret");
-        assert!(open(&text, "wrong horse!").unwrap_err().to_string().contains("wrong passphrase"));
+        assert!(
+            open(&text, "wrong horse!")
+                .unwrap_err()
+                .to_string()
+                .contains("wrong passphrase")
+        );
         assert!(open("{}", "correct horse").is_err());
 
         let dir = std::env::temp_dir().join(format!("retail-backup-{}", std::process::id()));

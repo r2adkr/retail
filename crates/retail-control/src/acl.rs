@@ -21,11 +21,15 @@ fn selects(selector: &str, m: &Member) -> bool {
 
 /// What `receiver` takes from `sender`: `None` if nothing
 pub fn accept(policy: Option<&AclPolicy>, receiver: &Member, sender: &Member) -> Option<Accept> {
-    let Some(policy) = policy else { return Some(Accept::All) };
+    let Some(policy) = policy else {
+        return Some(Accept::All);
+    };
     let mut ports: Vec<PortRule> = Vec::new();
     let mut any = false;
     for rule in &policy.rules {
-        if rule.from.iter().any(|s| selects(s, sender)) && rule.to.iter().any(|s| selects(s, receiver)) {
+        if rule.from.iter().any(|s| selects(s, sender))
+            && rule.to.iter().any(|s| selects(s, receiver))
+        {
             any = true;
             if rule.ports.is_empty() {
                 return Some(Accept::All);
@@ -72,23 +76,45 @@ mod tests {
         let none: Vec<String> = Vec::new();
         let policy = AclPolicy {
             rules: vec![
-                AclRule { from: vec!["*".into()], to: vec!["tag:server".into()], ports: vec!["tcp:443".into(), "icmp".into()] },
-                AclRule { from: vec!["id:1".into()], to: vec!["id:2".into()], ports: vec![] },
+                AclRule {
+                    from: vec!["*".into()],
+                    to: vec!["tag:server".into()],
+                    ports: vec!["tcp:443".into(), "icmp".into()],
+                },
+                AclRule {
+                    from: vec!["id:1".into()],
+                    to: vec!["id:2".into()],
+                    ports: vec![],
+                },
             ],
         };
         let (laptop, server, phone) = (m(1, &none), m(3, &servers), m(4, &none));
         // Anyone may reach the server on 443 and ping it
-        let Some(Accept::Ports { ports }) = accept(Some(&policy), &server, &phone) else { panic!() };
+        let Some(Accept::Ports { ports }) = accept(Some(&policy), &server, &phone) else {
+            panic!()
+        };
         assert!(ports.iter().any(|p| p.matches(6, 443)) && ports.iter().any(|p| p.matches(1, 0)));
         assert!(!ports.iter().any(|p| p.matches(6, 22)));
         // The server may only answer the phone
-        assert_eq!(view(Some(&policy), &phone, &server), Some(Accept::Ports { ports: vec![] }));
+        assert_eq!(
+            view(Some(&policy), &phone, &server),
+            Some(Accept::Ports { ports: vec![] })
+        );
         // Phones do not see each other
         assert_eq!(view(Some(&policy), &phone, &m(5, &none)), None);
         // id:1 reaches id:2 on everything
-        assert_eq!(accept(Some(&policy), &m(2, &none), &laptop), Some(Accept::All));
+        assert_eq!(
+            accept(Some(&policy), &m(2, &none), &laptop),
+            Some(Accept::All)
+        );
         // A rule with `*` ports is the same as none
-        let star = AclPolicy { rules: vec![AclRule { from: vec!["*".into()], to: vec!["*".into()], ports: vec!["*".into()] }] };
+        let star = AclPolicy {
+            rules: vec![AclRule {
+                from: vec!["*".into()],
+                to: vec!["*".into()],
+                ports: vec!["*".into()],
+            }],
+        };
         assert_eq!(accept(Some(&star), &laptop, &phone), Some(Accept::All));
         // An empty policy isolates everyone
         assert_eq!(view(Some(&AclPolicy::default()), &laptop, &phone), None);

@@ -62,7 +62,11 @@ pub struct PortRule {
 }
 
 impl PortRule {
-    pub const ANY: PortRule = PortRule { proto: None, first: 0, last: u16::MAX };
+    pub const ANY: PortRule = PortRule {
+        proto: None,
+        first: 0,
+        last: u16::MAX,
+    };
 
     /// Whether a packet of IP protocol `proto` to `port` (0 for ICMP) matches
     pub fn matches(&self, proto: u8, port: u16) -> bool {
@@ -82,7 +86,11 @@ impl PortRule {
             return Ok(PortRule::ANY);
         }
         if s == "icmp" {
-            return Ok(PortRule { proto: Some(Proto::Icmp), first: 0, last: 0 });
+            return Ok(PortRule {
+                proto: Some(Proto::Icmp),
+                first: 0,
+                last: 0,
+            });
         }
         let (proto, range) = match s.split_once(':') {
             Some(("tcp", r)) => (Some(Proto::Tcp), r),
@@ -90,7 +98,11 @@ impl PortRule {
             Some((p, _)) => return Err(format!("unknown protocol {p:?} (tcp, udp or icmp)")),
             None => (None, s.as_str()),
         };
-        let port = |p: &str| p.trim().parse::<u16>().map_err(|_| format!("not a port: {p:?}"));
+        let port = |p: &str| {
+            p.trim()
+                .parse::<u16>()
+                .map_err(|_| format!("not a port: {p:?}"))
+        };
         let (first, last) = match range {
             "*" => (0, u16::MAX),
             r => match r.split_once('-') {
@@ -116,7 +128,11 @@ impl std::fmt::Display for PortRule {
             Some(Proto::Udp) => write!(f, "udp:")?,
             None => {}
         }
-        if self.first == self.last { write!(f, "{}", self.first) } else { write!(f, "{}-{}", self.first, self.last) }
+        if self.first == self.last {
+            write!(f, "{}", self.first)
+        } else {
+            write!(f, "{}-{}", self.first, self.last)
+        }
     }
 }
 
@@ -139,8 +155,18 @@ pub fn check_selector(s: &str) -> Result<(), String> {
 
 /// Tags are short DNS-like labels
 pub fn check_tag(tag: &str) -> Result<(), String> {
-    let ok = !tag.is_empty() && tag.len() <= 32 && tag.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if ok { Ok(()) } else { Err(format!("not a tag: {tag:?} (lowercase letters, digits and -, up to 32)")) }
+    let ok = !tag.is_empty()
+        && tag.len() <= 32
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "not a tag: {tag:?} (lowercase letters, digits and -, up to 32)"
+        ))
+    }
 }
 
 impl AclPolicy {
@@ -176,7 +202,11 @@ mod tests {
         assert!(r.matches(17, 5050) && r.matches(6, 5000) && !r.matches(1, 0));
         assert!(PortRule::parse("icmp").unwrap().matches(1, 0));
         assert!(PortRule::ANY.matches(1, 0) && PortRule::ANY.matches(6, 1));
-        assert!(PortRule::parse("sctp:1").is_err() && PortRule::parse("9-1").is_err() && PortRule::parse("x").is_err());
+        assert!(
+            PortRule::parse("sctp:1").is_err()
+                && PortRule::parse("9-1").is_err()
+                && PortRule::parse("x").is_err()
+        );
         for s in ["*", "icmp", "tcp:22", "udp:5000-5100", "8080"] {
             assert_eq!(PortRule::parse(s).unwrap().to_string(), s);
         }
@@ -184,9 +214,23 @@ mod tests {
 
     #[test]
     fn selectors_and_policies_are_checked() {
-        assert!(check_selector("*").is_ok() && check_selector("tag:web-1").is_ok() && check_selector("id:7").is_ok());
-        assert!(check_selector("tag:Web").is_err() && check_selector("laptop").is_err() && check_selector("id:x").is_err());
-        let bad = AclPolicy { rules: vec![AclRule { from: vec!["*".into()], to: vec![], ports: vec![] }] };
+        assert!(
+            check_selector("*").is_ok()
+                && check_selector("tag:web-1").is_ok()
+                && check_selector("id:7").is_ok()
+        );
+        assert!(
+            check_selector("tag:Web").is_err()
+                && check_selector("laptop").is_err()
+                && check_selector("id:x").is_err()
+        );
+        let bad = AclPolicy {
+            rules: vec![AclRule {
+                from: vec!["*".into()],
+                to: vec![],
+                ports: vec![],
+            }],
+        };
         assert!(bad.check().is_err());
     }
 }

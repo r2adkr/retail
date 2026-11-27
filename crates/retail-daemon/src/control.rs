@@ -5,12 +5,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use futures_util::{Sink, SinkExt, StreamExt};
 use retail_proto::DEFAULT_STUN_PORT;
-use retail_proto::api::{ApiError, ClientMessage, RegisterRequest, RegisterResponse, ServerMessage};
+use retail_proto::api::{
+    ApiError, ClientMessage, RegisterRequest, RegisterResponse, ServerMessage,
+};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::engine::Engine;
 use crate::http::Target;
@@ -84,7 +86,9 @@ pub async fn register(target: &Target, req: &RegisterRequest) -> Result<Register
         .await
         .with_context(|| format!("contacting {}", target.url))?;
     if !(200..300).contains(&resp.status) {
-        let msg = serde_json::from_slice::<ApiError>(&resp.body).map(|e| printable(&e.error)).unwrap_or_default();
+        let msg = serde_json::from_slice::<ApiError>(&resp.body)
+            .map(|e| printable(&e.error))
+            .unwrap_or_default();
         bail!("registration rejected (HTTP {}): {msg}", resp.status);
     }
     serde_json::from_slice(&resp.body).context("parsing registration response")
@@ -92,7 +96,9 @@ pub async fn register(target: &Target, req: &RegisterRequest) -> Result<Register
 
 pub async fn control_loop(engine: Arc<Engine>, target: Target, token: String) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
-    let mut relay_out = engine.take_relay_out().context("control loop already running")?;
+    let mut relay_out = engine
+        .take_relay_out()
+        .context("control loop already running")?;
     loop {
         let started = Instant::now();
         // Where the server said it is now, except inside networks routed
@@ -130,7 +136,10 @@ pub async fn control_loop(engine: Arc<Engine>, target: Target, token: String) ->
 /// Why the server cannot be reached, for the tray app
 fn problem(engine: &Engine, e: &anyhow::Error) {
     let reason = crate::failure::classify(e);
-    engine.set_control_problem(Some(retail_proto::api::ConnectionProblem { reason, detail: format!("{e:#}") }));
+    engine.set_control_problem(Some(retail_proto::api::ConnectionProblem {
+        reason,
+        detail: format!("{e:#}"),
+    }));
 }
 
 const PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -174,11 +183,16 @@ async fn run_once(
 ) -> Result<()> {
     let server = target.url.as_str();
     let mut req = poll_url(server)?.into_client_request()?;
-    req.headers_mut()
-        .insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}"))?);
+    req.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}"))?,
+    );
     let dialed = crate::transport::dial_reporting(target, |e| problem(engine, e)).await?;
     // Its mesh address is no STUN server for the tunnel's own socket
-    if let Some(addr) = dialed.server_addr.filter(|a| !matches!(a, std::net::SocketAddr::V4(v4) if retail_proto::in_mesh(*v4.ip()))) {
+    if let Some(addr) = dialed
+        .server_addr
+        .filter(|a| !matches!(a, std::net::SocketAddr::V4(v4) if retail_proto::in_mesh(*v4.ip())))
+    {
         engine.set_control_addr(addr);
     }
     match dialed.server_addr {
@@ -189,7 +203,15 @@ async fn run_once(
     let handshake = tokio_tungstenite::client_async_with_config(req, dialed.io, Some(ws_config()));
     let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
         .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer from {server} within {}s", HANDSHAKE_TIMEOUT.as_secs())))?
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "no answer from {server} within {}s",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                ),
+            )
+        })?
         .with_context(|| format!("connecting to {server}"))?
         .0;
     let result = session(engine, ws, relay_out).await;
@@ -213,21 +235,31 @@ where
     let (mut tx, mut rx) = ws.split();
     let mut endpoints = engine.subscribe_endpoints();
     let send_endpoints = |eps| -> Result<Message> {
-        Ok(Message::text(serde_json::to_string(&ClientMessage::Endpoints { endpoints: eps })?))
+        Ok(Message::text(serde_json::to_string(
+            &ClientMessage::Endpoints { endpoints: eps },
+        )?))
     };
     let current = endpoints.borrow_and_update().clone();
     send(&mut tx, send_endpoints(current)?).await?;
     let mut advertise = engine.subscribe_advertise_exit();
     let mut advertise_routes = engine.subscribe_advertise_routes();
     let hostinfo = |exit_node, routes| -> Result<Message> {
-        Ok(Message::text(serde_json::to_string(&ClientMessage::Hostinfo { exit_node, routes, lan: crate::lan::ports() })?))
+        Ok(Message::text(serde_json::to_string(
+            &ClientMessage::Hostinfo {
+                exit_node,
+                routes,
+                lan: crate::lan::ports(),
+            },
+        )?))
     };
     let offer = *advertise.borrow_and_update();
     let routes = advertise_routes.borrow_and_update().clone();
     send(&mut tx, hostinfo(offer, routes)?).await?;
     let mut helper_code = engine.subscribe_helper_code();
     let helper_msg = |code| -> Result<Message> {
-        Ok(Message::text(serde_json::to_string(&ClientMessage::HelperCode { code })?))
+        Ok(Message::text(serde_json::to_string(
+            &ClientMessage::HelperCode { code },
+        )?))
     };
     let code = helper_code.borrow_and_update().clone();
     if code.is_some() {
@@ -320,12 +352,27 @@ mod tests {
 
     #[test]
     fn url_helpers() {
-        assert_eq!(normalize_server(" https://vpn.example.com/ ").unwrap(), "https://vpn.example.com");
+        assert_eq!(
+            normalize_server(" https://vpn.example.com/ ").unwrap(),
+            "https://vpn.example.com"
+        );
         assert!(normalize_server("vpn.example.com").is_err());
-        assert_eq!(poll_url("https://a.b:8443").unwrap(), "wss://a.b:8443/api/v1/poll");
-        assert_eq!(poll_url("http://10.0.0.1:8080").unwrap(), "ws://10.0.0.1:8080/api/v1/poll");
+        assert_eq!(
+            poll_url("https://a.b:8443").unwrap(),
+            "wss://a.b:8443/api/v1/poll"
+        );
+        assert_eq!(
+            poll_url("http://10.0.0.1:8080").unwrap(),
+            "ws://10.0.0.1:8080/api/v1/poll"
+        );
         assert_eq!(default_stun_server("http://10.0.0.1:8080"), "10.0.0.1:3478");
-        assert_eq!(default_stun_server("https://vpn.example.com/x"), "vpn.example.com:3478");
-        assert_eq!(default_stun_server("http://[2001:db8::1]:8080"), "[2001:db8::1]:3478");
+        assert_eq!(
+            default_stun_server("https://vpn.example.com/x"),
+            "vpn.example.com:3478"
+        );
+        assert_eq!(
+            default_stun_server("http://[2001:db8::1]:8080"),
+            "[2001:db8::1]:3478"
+        );
     }
 }

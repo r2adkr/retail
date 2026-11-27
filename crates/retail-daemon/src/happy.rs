@@ -26,17 +26,26 @@ static RESOLVED: Mutex<Option<Resolved>> = Mutex::new(None);
 
 async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     let key = (host.to_string(), port);
-    let looked_up = tokio::time::timeout(LOOKUP_TIMEOUT, tokio::net::lookup_host((host, port))).await;
+    let looked_up =
+        tokio::time::timeout(LOOKUP_TIMEOUT, tokio::net::lookup_host((host, port))).await;
     match looked_up {
         Ok(Ok(addrs)) => {
             let addrs: Vec<SocketAddr> = addrs.collect();
             if !addrs.is_empty() {
-                RESOLVED.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, addrs.clone());
+                RESOLVED
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(HashMap::new)
+                    .insert(key, addrs.clone());
             }
             Ok(addrs)
         }
         failed => {
-            let cached = RESOLVED.lock().unwrap().as_ref().and_then(|m| m.get(&key).cloned());
+            let cached = RESOLVED
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|m| m.get(&key).cloned());
             match (cached, failed) {
                 (Some(addrs), _) => {
                     tracing::debug!(host, "name lookup failed; using the last known addresses");
@@ -50,7 +59,11 @@ async fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
 }
 
 async fn connect_one(addr: SocketAddr) -> io::Result<TcpStream> {
-    let sock = if addr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    let sock = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
     // A server's mesh address (a device hosting the network) is reached
     // through the tunnel; everything else around it
     let mesh = matches!(addr, SocketAddr::V4(v4) if retail_proto::in_mesh(*v4.ip()));
@@ -76,7 +89,8 @@ pub fn interleave(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr
 pub async fn connect_many(host: &str, port: u16, alts: &[String]) -> io::Result<TcpStream> {
     let mut addrs = Vec::new();
     let mut last_err = None;
-    let targets = std::iter::once((host.to_string(), port)).chain(alts.iter().filter_map(|a| split_host_port(a)));
+    let targets = std::iter::once((host.to_string(), port))
+        .chain(alts.iter().filter_map(|a| split_host_port(a)));
     for (h, p) in targets {
         match resolve(&h, p).await {
             Ok(found) => {
@@ -90,10 +104,15 @@ pub async fn connect_many(host: &str, port: u16, alts: &[String]) -> io::Result<
         }
     }
     if addrs.is_empty() {
-        return Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no addresses to connect to")));
+        return Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no addresses to connect to")
+        }));
     }
     if let Some(prefix) = nat64_prefix().await {
-        let synthesized: Vec<SocketAddr> = addrs.iter().filter_map(|a| synthesize(prefix, *a)).collect();
+        let synthesized: Vec<SocketAddr> = addrs
+            .iter()
+            .filter_map(|a| synthesize(prefix, *a))
+            .collect();
         for a in synthesized {
             if !addrs.contains(&a) {
                 addrs.push(a);
@@ -121,11 +140,17 @@ pub async fn nat64_prefix() -> Option<[u8; 12]> {
         *NAT64.lock().unwrap() = Some((std::time::Instant::now(), None));
         return None;
     }
-    let found = match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host(("ipv4only.arpa", 0))).await {
+    let found = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::lookup_host(("ipv4only.arpa", 0)),
+    )
+    .await
+    {
         Ok(Ok(addrs)) => addrs.into_iter().find_map(|a| match a.ip() {
             std::net::IpAddr::V6(v6) => {
                 let o = v6.octets();
-                (o[12..] == [192, 0, 0, 170] || o[12..] == [192, 0, 0, 171]).then(|| o[..12].try_into().unwrap())
+                (o[12..] == [192, 0, 0, 170] || o[12..] == [192, 0, 0, 171])
+                    .then(|| o[..12].try_into().unwrap())
             }
             _ => None,
         }),
@@ -142,7 +167,9 @@ pub async fn nat64_prefix() -> Option<[u8; 12]> {
 fn has_ipv4() -> bool {
     if_addrs::get_if_addrs().is_ok_and(|ifs| {
         ifs.iter().any(|i| match i.ip() {
-            std::net::IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local() && !retail_proto::in_mesh(v4),
+            std::net::IpAddr::V4(v4) => {
+                !v4.is_loopback() && !v4.is_link_local() && !retail_proto::in_mesh(v4)
+            }
             _ => false,
         })
     })
@@ -155,11 +182,16 @@ pub fn nat64_cached() -> Option<[u8; 12]> {
 
 /// The NAT64 address for an IPv4 one
 pub fn synthesize(prefix: [u8; 12], addr: SocketAddr) -> Option<SocketAddr> {
-    let SocketAddr::V4(v4) = addr else { return None };
+    let SocketAddr::V4(v4) = addr else {
+        return None;
+    };
     let mut o = [0u8; 16];
     o[..12].copy_from_slice(&prefix);
     o[12..].copy_from_slice(&v4.ip().octets());
-    Some(SocketAddr::new(std::net::Ipv6Addr::from(o).into(), v4.port()))
+    Some(SocketAddr::new(
+        std::net::Ipv6Addr::from(o).into(),
+        v4.port(),
+    ))
 }
 
 fn split_host_port(s: &str) -> Option<(String, u16)> {
@@ -180,7 +212,10 @@ fn keep(old: Option<io::Error>, new: io::Error) -> io::Error {
 
 pub async fn connect_addrs(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
     if addrs.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "no addresses to connect to"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no addresses to connect to",
+        ));
     }
     let mut attempts: JoinSet<io::Result<TcpStream>> = JoinSet::new();
     let mut pending = addrs.iter().copied();
@@ -189,7 +224,10 @@ pub async fn connect_addrs(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
         attempts.spawn(async move {
             match tokio::time::timeout(ATTEMPT_TIMEOUT, connect_one(addr)).await {
                 Ok(r) => r,
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, format!("connecting to {addr} timed out"))),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("connecting to {addr} timed out"),
+                )),
             }
         });
     };
@@ -233,7 +271,10 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         let got: Vec<String> = interleave(a).iter().map(ToString::to_string).collect();
-        assert_eq!(got, ["[::1]:1", "1.1.1.1:1", "[::2]:1", "2.2.2.2:1", "3.3.3.3:1"]);
+        assert_eq!(
+            got,
+            ["[::1]:1", "1.1.1.1:1", "[::2]:1", "2.2.2.2:1", "3.3.3.3:1"]
+        );
     }
 
     #[tokio::test]
@@ -248,9 +289,15 @@ mod tests {
         // 192.0.2.1 (TEST-NET-1) is never routed, so the connect just hangs
         let dead: SocketAddr = "192.0.2.1:9".parse().unwrap();
         let t0 = Instant::now();
-        let stream = connect_addrs(&[dead, good]).await.expect("falls through to the working address");
+        let stream = connect_addrs(&[dead, good])
+            .await
+            .expect("falls through to the working address");
         assert_eq!(stream.peer_addr().unwrap(), good);
-        assert!(t0.elapsed() < Duration::from_secs(2), "took {:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            t0.elapsed()
+        );
     }
 
     #[tokio::test]

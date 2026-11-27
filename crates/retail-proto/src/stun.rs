@@ -20,7 +20,10 @@ pub type TransactionId = [u8; 12];
 /// bytes, so their second byte is 0. The Binding methods used here have 0x01
 /// there, and every STUN message carries the magic cookie at bytes 4..8.
 pub fn is_stun(p: &[u8]) -> bool {
-    p.len() >= HEADER_LEN && p[0] & 0xC0 == 0 && p[1] == 0x01 && p[4..8] == MAGIC_COOKIE.to_be_bytes()
+    p.len() >= HEADER_LEN
+        && p[0] & 0xC0 == 0
+        && p[1] == 0x01
+        && p[4..8] == MAGIC_COOKIE.to_be_bytes()
 }
 
 fn header(msg_type: u16, body_len: u16, tx: &TransactionId) -> [u8; HEADER_LEN] {

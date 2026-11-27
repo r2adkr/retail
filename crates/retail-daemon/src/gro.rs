@@ -249,7 +249,10 @@ mod tests {
         assert!(c.start(&a));
         assert!(c.try_append(&b));
         assert!(c.try_append(&d));
-        assert!(!c.try_append(&tcp(1240, &[4; 40], TCP_FLAG_ACK)), "closed after short/PSH segment");
+        assert!(
+            !c.try_append(&tcp(1240, &[4; 40], TCP_FLAG_ACK)),
+            "closed after short/PSH segment"
+        );
         assert_eq!(c.merged(), 3);
 
         let out = c.finish().unwrap().to_vec();
@@ -284,11 +287,20 @@ mod tests {
     fn rejects_what_linux_gro_would_not_merge() {
         let mut c = Coalescer::new();
         assert!(c.start(&tcp(1000, &[1; 100], TCP_FLAG_ACK)));
-        assert!(!c.try_append(&tcp(1200, &[1; 100], TCP_FLAG_ACK)), "sequence gap");
-        assert!(!c.try_append(&tcp(1100, &[1; 120], TCP_FLAG_ACK)), "longer than gso_size");
+        assert!(
+            !c.try_append(&tcp(1200, &[1; 100], TCP_FLAG_ACK)),
+            "sequence gap"
+        );
+        assert!(
+            !c.try_append(&tcp(1100, &[1; 120], TCP_FLAG_ACK)),
+            "longer than gso_size"
+        );
         let mut other_ack = tcp(1100, &[1; 100], TCP_FLAG_ACK);
         other_ack[31] ^= 1;
-        assert!(!c.try_append(&other_ack), "different ACK (and now a bad checksum)");
+        assert!(
+            !c.try_append(&other_ack),
+            "different ACK (and now a bad checksum)"
+        );
         let mut corrupt = tcp(1100, &[1; 100], TCP_FLAG_ACK);
         corrupt[60] ^= 0xff;
         assert!(!c.try_append(&corrupt), "bad TCP checksum");

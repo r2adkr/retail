@@ -22,7 +22,11 @@ use crate::portmap::{self, Proto};
 const PORTS: [u16; 2] = [443, 8443];
 
 /// Until `stop` turns true (the session ends)
-pub async fn run(engine: Arc<Engine>, data_dir: PathBuf, mut stop: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+pub async fn run(
+    engine: Arc<Engine>,
+    data_dir: PathBuf,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
     let mut wanted = engine.subscribe_helper_role();
     loop {
         if *stop.borrow() {
@@ -91,13 +95,18 @@ impl Role {
         }
         let helper = match helper {
             Some(h) => h,
-            None => return Err(last.unwrap_or_else(|| anyhow::anyhow!("no port"))).context("listening for the helper node"),
+            None => {
+                return Err(last.unwrap_or_else(|| anyhow::anyhow!("no port")))
+                    .context("listening for the helper node");
+            }
         };
         let port = helper.port();
         let inbound = crate::firewall::Inbound::take();
         // Ports on this device's own router, unless told to leave it alone
         let mapping = if std::env::var_os("RETAIL_NO_PORTMAP").is_none() {
-            portmap::open(&[(Proto::Tcp, port), (Proto::Udp, DEFAULT_STUN_PORT)], 1).await.ok()
+            portmap::open(&[(Proto::Tcp, port), (Proto::Udp, DEFAULT_STUN_PORT)], 1)
+                .await
+                .ok()
         } else {
             None
         };
@@ -122,14 +131,31 @@ impl Role {
             if let Some(m) = &mapping {
                 portmap::close(m).await;
             }
-            bail!("this device has no address other networks can reach (its router opened nothing)");
+            bail!(
+                "this device has no address other networks can reach (its router opened nothing)"
+            );
         }
-        let code = HelperCode { addrs: addrs.clone(), pin: encode_pin(&helper.pin()), secret: helper.secret().to_string() }.encode();
-        Ok(Role { helper, mapping, code, addrs, _inbound: inbound })
+        let code = HelperCode {
+            addrs: addrs.clone(),
+            pin: encode_pin(&helper.pin()),
+            secret: helper.secret().to_string(),
+        }
+        .encode();
+        Ok(Role {
+            helper,
+            mapping,
+            code,
+            addrs,
+            _inbound: inbound,
+        })
     }
 
     /// Until the server stops asking or the session ends: keeps the router's ports open
-    async fn serve(&mut self, wanted: &mut tokio::sync::watch::Receiver<bool>, stop: &mut tokio::sync::watch::Receiver<bool>) {
+    async fn serve(
+        &mut self,
+        wanted: &mut tokio::sync::watch::Receiver<bool>,
+        stop: &mut tokio::sync::watch::Receiver<bool>,
+    ) {
         loop {
             if *stop.borrow() {
                 return;

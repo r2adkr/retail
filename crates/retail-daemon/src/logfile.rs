@@ -23,16 +23,31 @@ impl LogFile {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok()?;
         }
-        let mut inner = Inner { path: path.to_path_buf(), file: None, size: 0 };
+        let mut inner = Inner {
+            path: path.to_path_buf(),
+            file: None,
+            size: 0,
+        };
         inner.reopen();
-        inner.file.is_some().then(|| LogFile(Arc::new(Mutex::new(inner))))
+        inner
+            .file
+            .is_some()
+            .then(|| LogFile(Arc::new(Mutex::new(inner))))
     }
 }
 
 impl Inner {
     fn reopen(&mut self) {
-        self.file = OpenOptions::new().create(true).append(true).open(&self.path).ok();
-        self.size = self.file.as_ref().and_then(|f| f.metadata().ok()).map_or(0, |m| m.len());
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .ok();
+        self.size = self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map_or(0, |m| m.len());
     }
 
     fn rotate(&mut self) {
@@ -79,8 +94,13 @@ mod tests {
             log.write_all(&line).unwrap();
         }
         let now = std::fs::metadata(&path).unwrap().len();
-        let old = std::fs::metadata(path.with_extension("log.1")).unwrap().len();
-        assert!(now <= MAX && old <= MAX && now > 0 && old > 0, "{now} {old}");
+        let old = std::fs::metadata(path.with_extension("log.1"))
+            .unwrap()
+            .len();
+        assert!(
+            now <= MAX && old <= MAX && now > 0 && old > 0,
+            "{now} {old}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

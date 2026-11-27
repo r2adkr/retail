@@ -21,7 +21,14 @@ pub enum LangPref {
 }
 
 impl LangPref {
-    pub const ALL: [LangPref; 6] = [LangPref::System, LangPref::En, LangPref::Ko, LangPref::Ja, LangPref::Zh, LangPref::Es];
+    pub const ALL: [LangPref; 6] = [
+        LangPref::System,
+        LangPref::En,
+        LangPref::Ko,
+        LangPref::Ja,
+        LangPref::Zh,
+        LangPref::Es,
+    ];
 
     /// The name shown in the picker, in its own language
     pub fn label(self) -> &'static str {
@@ -52,7 +59,13 @@ static CURRENT: AtomicU8 = AtomicU8::new(0);
 
 /// The language in use (never `System`)
 pub fn current() -> LangPref {
-    [LangPref::En, LangPref::Ko, LangPref::Ja, LangPref::Zh, LangPref::Es][CURRENT.load(Ordering::Relaxed) as usize]
+    [
+        LangPref::En,
+        LangPref::Ko,
+        LangPref::Ja,
+        LangPref::Zh,
+        LangPref::Es,
+    ][CURRENT.load(Ordering::Relaxed) as usize]
 }
 
 pub fn set(pref: LangPref) {
@@ -104,7 +117,10 @@ fn system() -> Option<LangPref> {
         }
         // Apps started from the Dock or launchd get no LANG
         #[cfg(target_os = "macos")]
-        if let Ok(out) = std::process::Command::new("defaults").args(["read", "-g", "AppleLanguages"]).output() {
+        if let Ok(out) = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleLanguages"])
+            .output()
+        {
             let text = String::from_utf8_lossy(&out.stdout);
             if let Some(first) = text.split('"').nth(1) {
                 return LangPref::parse(first);
@@ -120,7 +136,10 @@ pub fn tr(en: &'static str) -> &'static str {
     if i == 0 {
         return en;
     }
-    TABLE.iter().find(|row| row[0] == en).map_or(en, |row| row[i])
+    TABLE
+        .iter()
+        .find(|row| row[0] == en)
+        .map_or(en, |row| row[i])
 }
 
 /// `tr` with `{name}` placeholders filled in
@@ -223,6 +242,22 @@ const TABLE: &[[&str; 5]] = &[
     ["None", "없음", "なし", "无", "Ninguno"],
     ["Wake up", "켜기", "起動する", "唤醒", "Encender"],
     ["Waking {name}…", "{name}을(를) 켜는 중…", "{name} を起動しています…", "正在唤醒 {name}…", "Encendiendo {name}…"],
+    ["Send a file…", "파일 보내기…", "ファイルを送る…", "发送文件…", "Enviar un archivo…"],
+    ["Choose a file to send to {device}", "{device}에 보낼 파일 선택", "{device} に送るファイルを選択", "选择要发送给 {device} 的文件", "Elige un archivo para {device}"],
+    ["{from} wants to send you {name} ({size}).", "{from}이(가) {name}({size})을(를) 보내려고 합니다.", "{from} が {name}（{size}）を送ろうとしています。", "{from} 想发送 {name}（{size}）给你。", "{from} quiere enviarte {name} ({size})."],
+    ["Accept", "받기", "受け取る", "接收", "Aceptar"],
+    ["Decline", "거절", "断る", "拒绝", "Rechazar"],
+    ["Saved {name} in Downloads.", "{name}을(를) 다운로드 폴더에 저장했습니다.", "{name} をダウンロードに保存しました。", "已将 {name} 保存到下载文件夹。", "{name} se guardó en Descargas."],
+    ["Could not save {name}: {error}", "{name} 저장 실패: {error}", "{name} を保存できません: {error}", "无法保存 {name}：{error}", "No se pudo guardar {name}: {error}"],
+    ["{name} was sent to {device}.", "{name}을(를) {device}에 보냈습니다.", "{name} を {device} に送りました。", "已将 {name} 发送给 {device}。", "{name} se envió a {device}."],
+    ["{device} declined {name}.", "{device}이(가) {name}을(를) 거절했습니다.", "{device} が {name} を断りました。", "{device} 拒绝了 {name}。", "{device} rechazó {name}."],
+    ["Could not send {name}: {error}", "{name} 보내기 실패: {error}", "{name} を送れません: {error}", "无法发送 {name}：{error}", "No se pudo enviar {name}: {error}"],
+    ["the device does not answer (it may need a newer retail)", "기기가 응답하지 않습니다(retail 업데이트가 필요할 수 있음)", "デバイスが応答しません（retail の更新が必要かもしれません）", "设备无响应（可能需要更新 retail）", "el dispositivo no responde (quizá necesite un retail más nuevo)"],
+    ["no answer", "응답 없음", "応答なし", "无应答", "sin respuesta"],
+    ["the device has too many files waiting", "기기에 대기 중인 파일이 너무 많습니다", "デバイスで待機中のファイルが多すぎます", "设备上等待的文件太多", "el dispositivo tiene demasiados archivos en espera"],
+    ["the file changed while it was sent", "보내는 중에 파일이 바뀌었습니다", "送信中にファイルが変更されました", "发送时文件发生了变化", "el archivo cambió durante el envío"],
+    ["the sender stopped", "보내는 쪽이 중단했습니다", "送信側が中断しました", "发送方已停止", "el remitente se detuvo"],
+    ["That file is no longer offered.", "이 파일은 더 이상 받을 수 없습니다.", "このファイルはもう受け取れません。", "该文件已不再提供。", "Ese archivo ya no está disponible."],
     ["Upload limit", "업로드 제한", "アップロード制限", "上传限速", "Límite de subida"],
     ["Keeps games quick during downloads.", "다운로드 중에도 게임이 빠릅니다.", "ダウンロード中もゲームが快適です。", "下载时游戏依然流畅。", "Juegos rápidos al descargar."],
     ["Devices elsewhere connect directly, not via the relay.", "다른 네트워크 기기가 릴레이 없이 바로 연결합니다.", "他のネットワークの端末がリレーなしで直接接続します。", "其他网络的设备直接连接，不经中继。", "Otras redes conectan directo, sin el relé."],
@@ -498,7 +533,11 @@ pub(crate) mod tests {
         let mut seen = std::collections::HashSet::new();
         for row in TABLE {
             assert!(seen.insert(row[0]), "duplicate row {:?}", row[0]);
-            let holes: Vec<&str> = row[0].split('{').skip(1).filter_map(|s| s.split('}').next()).collect();
+            let holes: Vec<&str> = row[0]
+                .split('{')
+                .skip(1)
+                .filter_map(|s| s.split('}').next())
+                .collect();
             for cell in &row[1..] {
                 assert!(!cell.is_empty(), "empty translation of {:?}", row[0]);
                 for h in &holes {

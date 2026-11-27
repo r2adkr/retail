@@ -15,13 +15,16 @@ pub fn peak() -> Option<u64> {
     }
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         // SAFETY: plain struct filled in by the call, and the size passed matches
         unsafe {
             let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
             let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-            (GetProcessMemoryInfo(GetCurrentProcess(), &mut c, size) != 0).then_some(c.PeakWorkingSetSize as u64)
+            (GetProcessMemoryInfo(GetCurrentProcess(), &mut c, size) != 0)
+                .then_some(c.PeakWorkingSetSize as u64)
         }
     }
     #[cfg(target_os = "macos")]
@@ -55,13 +58,16 @@ pub fn current() -> Option<u64> {
     }
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
         // SAFETY: as in `peak`
         unsafe {
             let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
             let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-            (GetProcessMemoryInfo(GetCurrentProcess(), &mut c, size) != 0).then_some(c.WorkingSetSize as u64)
+            (GetProcessMemoryInfo(GetCurrentProcess(), &mut c, size) != 0)
+                .then_some(c.WorkingSetSize as u64)
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -76,7 +82,13 @@ pub fn total() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let kb: u64 = info.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+        let kb: u64 = info
+            .lines()
+            .find(|l| l.starts_with("MemTotal:"))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()?;
         Some(kb * 1024)
     }
     #[cfg(not(target_os = "linux"))]

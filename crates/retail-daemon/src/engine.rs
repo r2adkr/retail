@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use retail_proto::route::Ipv4Net;
 use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Packet, Tunn, TunnResult};
@@ -22,6 +21,7 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use quinn_udp::{RecvMeta, Transmit, UdpSocketState};
 use rand::RngCore;
 use retail_proto::api::{NetMap, Node, PathReason, PeerStatus};
+use retail_proto::route::Ipv4Net;
 use retail_proto::{Key, TUN_MTU, in_mesh, stun};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
@@ -84,7 +84,11 @@ pub struct RelayOut {
 
 impl RelayIn {
     fn lane(&self, frame: &[u8]) -> &mpsc::Sender<Queued> {
-        if frame.len() <= retail_proto::relay::SMALL_FRAME { &self.small } else { &self.bulk }
+        if frame.len() <= retail_proto::relay::SMALL_FRAME {
+            &self.small
+        } else {
+            &self.bulk
+        }
     }
 }
 
@@ -106,7 +110,11 @@ impl RelayOut {
 
     pub fn try_recv(&mut self) -> Option<Vec<u8>> {
         loop {
-            let (at, frame) = self.small.try_recv().or_else(|_| self.bulk.try_recv()).ok()?;
+            let (at, frame) = self
+                .small
+                .try_recv()
+                .or_else(|_| self.bulk.try_recv())
+                .ok()?;
             if at.elapsed() <= retail_proto::relay::MAX_WAIT {
                 return Some(frame);
             }
@@ -284,7 +292,11 @@ impl PeerInfo {
     /// `here_public`: this device knows a public address of its own
     fn path_reason(&self, here_public: bool) -> PathReason {
         if let Some(ep) = self.direct_ok() {
-            return if public_ip(ep.ip()) { PathReason::Internet } else { PathReason::Lan };
+            return if public_ip(ep.ip()) {
+                PathReason::Internet
+            } else {
+                PathReason::Lan
+            };
         }
         if !self.online {
             PathReason::PeerOffline
@@ -333,7 +345,9 @@ impl Peer {
         }
         let since = *info.searching_since.get_or_insert_with(Instant::now);
         let relay_known = info.relay_rx.is_some_and(|t| t.elapsed() < RELAY_REMEMBER);
-        Route::Search { relay: relay_known || since.elapsed() >= RELAY_DELAY }
+        Route::Search {
+            relay: relay_known || since.elapsed() >= RELAY_DELAY,
+        }
     }
 
     /// `tx` and `rx` are the session's data byte counters
@@ -348,8 +362,10 @@ impl Peer {
             info.rx_seen = rx;
             info.rx_at = Some(now);
         }
-        let recent = |t: Option<Instant>| t.is_some_and(|t| now.duration_since(t) < ACTIVE_KEEPALIVE);
-        let quiet_since = |t: Option<Instant>| t.is_some_and(|t| now.duration_since(t) >= DIRECT_SUSPECT);
+        let recent =
+            |t: Option<Instant>| t.is_some_and(|t| now.duration_since(t) < ACTIVE_KEEPALIVE);
+        let quiet_since =
+            |t: Option<Instant>| t.is_some_and(|t| now.duration_since(t) >= DIRECT_SUSPECT);
         if info.direct_ok().is_some() && recent(info.tx_at) && quiet_since(info.last_rx) {
             tracing::info!(peer = %info.hostname, "direct path lost; failing over to the relay");
             info.last_rx = None;
@@ -375,7 +391,10 @@ impl Peer {
         }
         // On an IPv6-only network IPv4 peers are reached through NAT64
         if let Some(prefix) = crate::happy::nat64_cached() {
-            let synthesized: Vec<SocketAddr> = v.iter().filter_map(|a| crate::happy::synthesize(prefix, *a)).collect();
+            let synthesized: Vec<SocketAddr> = v
+                .iter()
+                .filter_map(|a| crate::happy::synthesize(prefix, *a))
+                .collect();
             for a in synthesized {
                 if !v.contains(&a) {
                     v.push(a);
@@ -405,7 +424,9 @@ impl Peer {
                 if info.needs_proof {
                     return false; // See `confirm_direct`
                 }
-                let stale = info.last_rx.is_none_or(|t| now.duration_since(t) >= ENDPOINT_STALE);
+                let stale = info
+                    .last_rx
+                    .is_none_or(|t| now.duration_since(t) >= ENDPOINT_STALE);
                 if info.endpoint != Some(addr) || stale {
                     tracing::info!(peer = %info.hostname, src = %addr, "direct path up");
                     info.endpoint = Some(addr);
@@ -448,7 +469,11 @@ impl Peer {
     /// be a handshake (to prove both directions) rather than a keepalive.
     fn probe_due(&self) -> Option<bool> {
         let mut info = self.info.lock().unwrap();
-        if !info.uses_relay() || info.last_probe.is_some_and(|t| t.elapsed() < PROBE_INTERVAL) {
+        if !info.uses_relay()
+            || info
+                .last_probe
+                .is_some_and(|t| t.elapsed() < PROBE_INTERVAL)
+        {
             return None;
         }
         info.last_probe = Some(Instant::now());
@@ -463,8 +488,17 @@ impl Peer {
         self.routes.read().unwrap().clone()
     }
 
-    fn allowed_src<'a>(&self, routes: &'a [Ipv4Net], foreign: &'a [Ipv4Net]) -> crate::crypto::AllowedSrc<'a> {
-        crate::crypto::AllowedSrc { ip: self.ip(), internet: self.is_exit.load(Ordering::Relaxed), routes, foreign }
+    fn allowed_src<'a>(
+        &self,
+        routes: &'a [Ipv4Net],
+        foreign: &'a [Ipv4Net],
+    ) -> crate::crypto::AllowedSrc<'a> {
+        crate::crypto::AllowedSrc {
+            ip: self.ip(),
+            internet: self.is_exit.load(Ordering::Relaxed),
+            routes,
+            foreign,
+        }
     }
 }
 
@@ -484,7 +518,10 @@ struct PeerTable {
 
 impl PeerTable {
     fn routed(&self, dst: Ipv4Addr) -> Option<&Arc<Peer>> {
-        self.routes.iter().find(|(r, _)| r.contains(dst)).map(|(_, p)| p)
+        self.routes
+            .iter()
+            .find(|(r, _)| r.contains(dst))
+            .map(|(_, p)| p)
     }
 
     fn select_exit(&mut self, key: Option<Key>) {
@@ -527,39 +564,89 @@ impl BufferPlan {
 
 /// Plans from fastest to leanest
 const PLANS: [BufferPlan; 5] = [
-    BufferPlan { workers: 4, depth: PIPELINE_DEPTH, rx_slots: RX_SLOTS_GRO },
-    BufferPlan { workers: 2, depth: PIPELINE_DEPTH, rx_slots: RX_SLOTS_GRO },
-    BufferPlan { workers: 1, depth: PIPELINE_DEPTH, rx_slots: RX_SLOTS_GRO },
-    BufferPlan { workers: 1, depth: PIPELINE_DEPTH, rx_slots: 4 },
-    BufferPlan { workers: 1, depth: 2, rx_slots: 2 },
+    BufferPlan {
+        workers: 4,
+        depth: PIPELINE_DEPTH,
+        rx_slots: RX_SLOTS_GRO,
+    },
+    BufferPlan {
+        workers: 2,
+        depth: PIPELINE_DEPTH,
+        rx_slots: RX_SLOTS_GRO,
+    },
+    BufferPlan {
+        workers: 1,
+        depth: PIPELINE_DEPTH,
+        rx_slots: RX_SLOTS_GRO,
+    },
+    BufferPlan {
+        workers: 1,
+        depth: PIPELINE_DEPTH,
+        rx_slots: 4,
+    },
+    BufferPlan {
+        workers: 1,
+        depth: 2,
+        rx_slots: 2,
+    },
 ];
 
 /// Without a limit returns the measured default, otherwise
 /// the fastest plan whose buffers fit the budget left after `base` bytes.
 fn buffer_plan(limit_mb: Option<u32>, batched: bool, slot_len: usize, base: u64) -> BufferPlan {
     let workers = crypto_workers(batched);
-    let slots = if slot_len > PKT_BUF { RX_SLOTS_GRO } else { RX_SLOTS };
+    let slots = if slot_len > PKT_BUF {
+        RX_SLOTS_GRO
+    } else {
+        RX_SLOTS
+    };
     let Some(limit) = limit_mb else {
-        return BufferPlan { workers, depth: PIPELINE_DEPTH, rx_slots: slots };
+        return BufferPlan {
+            workers,
+            depth: PIPELINE_DEPTH,
+            rx_slots: slots,
+        };
     };
     let budget = (u64::from(limit) << 20).saturating_sub(base + MEMORY_OVERHEAD);
     // More workers than the machine and the environment allow never help
-    let max_workers = if std::env::var_os("RETAIL_CRYPTO_THREADS").is_some() || (batched && cores() >= 4) {
-        workers.max(if batched { MAX_CRYPTO_WORKERS.min(cores() / 2).max(1) } else { 1 })
-    } else {
-        1
-    };
+    let max_workers =
+        if std::env::var_os("RETAIL_CRYPTO_THREADS").is_some() || (batched && cores() >= 4) {
+            workers.max(if batched {
+                MAX_CRYPTO_WORKERS.min(cores() / 2).max(1)
+            } else {
+                1
+            })
+        } else {
+            1
+        };
     let fits = PLANS
         .iter()
-        .map(|p| BufferPlan { rx_slots: if slots == RX_SLOTS { RX_SLOTS } else { p.rx_slots }, ..*p })
+        .map(|p| BufferPlan {
+            rx_slots: if slots == RX_SLOTS {
+                RX_SLOTS
+            } else {
+                p.rx_slots
+            },
+            ..*p
+        })
         .filter(|p| p.workers <= max_workers)
         .find(|p| p.bytes(slot_len) <= budget);
     match fits {
         Some(p) => p,
         None => {
             let p = PLANS[PLANS.len() - 1];
-            tracing::warn!(limit_mb = limit, "memory limit is below what the data plane needs; using the smallest buffers");
-            BufferPlan { rx_slots: if slots == RX_SLOTS { RX_SLOTS } else { p.rx_slots }, ..p }
+            tracing::warn!(
+                limit_mb = limit,
+                "memory limit is below what the data plane needs; using the smallest buffers"
+            );
+            BufferPlan {
+                rx_slots: if slots == RX_SLOTS {
+                    RX_SLOTS
+                } else {
+                    p.rx_slots
+                },
+                ..p
+            }
         }
     }
 }
@@ -599,7 +686,8 @@ impl Stats {
     }
 
     fn take_stages(&self, window: Duration) -> String {
-        let pct = |c: &AtomicU64| c.swap(0, Ordering::Relaxed) as f64 / window.as_nanos() as f64 * 100.0;
+        let pct =
+            |c: &AtomicU64| c.swap(0, Ordering::Relaxed) as f64 / window.as_nanos() as f64 * 100.0;
         format!(
             "tun-read busy {:.0}% wait-next {:.0}% | udp-send busy {:.0}% | udp-recv busy {:.0}% wait-next {:.0}% | tun-write busy {:.0}% | crypto tx {:.0}% rx {:.0}%",
             pct(&self.busy_tun_read),
@@ -752,7 +840,10 @@ impl Engine {
         let (std_udp, dual_stack) = match bind_udp(cfg.listen_port) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("udp/{} unavailable ({e}); using a random port", cfg.listen_port);
+                tracing::warn!(
+                    "udp/{} unavailable ({e}); using a random port",
+                    cfg.listen_port
+                );
                 bind_udp(0)?
             }
         };
@@ -772,7 +863,13 @@ impl Engine {
         let public = PublicKey::from(&cfg.private_key);
         let (small, small_rx) = mpsc::channel(RELAY_OUT_SMALL);
         let (bulk, bulk_rx) = mpsc::channel(RELAY_OUT_QUEUE);
-        let (relay_out, relay_out_rx) = (RelayIn { small, bulk }, RelayOut { small: small_rx, bulk: bulk_rx });
+        let (relay_out, relay_out_rx) = (
+            RelayIn { small, bulk },
+            RelayOut {
+                small: small_rx,
+                bulk: bulk_rx,
+            },
+        );
         let (dns_queries, dns_queries_rx) = mpsc::channel(64);
         #[cfg(target_os = "linux")]
         let vnet_hdr = tun.tcp_gso();
@@ -835,7 +932,10 @@ impl Engine {
             return Ok(());
         }
         *forward = if on {
-            Some(Arc::new(crate::forward::Forward::start(self, self.self_ip).context("forwarding through this device's network stack")?))
+            Some(Arc::new(
+                crate::forward::Forward::start(self, self.self_ip)
+                    .context("forwarding through this device's network stack")?,
+            ))
         } else {
             None
         };
@@ -844,8 +944,16 @@ impl Engine {
 
     /// Sends one IP packet to the peer it is addressed to
     pub fn send_ip(&self, packet: &[u8]) {
-        let Some(dst) = packet.get(16..20).and_then(|d| <[u8; 4]>::try_from(d).ok()).map(Ipv4Addr::from) else { return };
-        let Some(peer) = self.peers.read().unwrap().by_ip.get(&dst).cloned() else { return };
+        let Some(dst) = packet
+            .get(16..20)
+            .and_then(|d| <[u8; 4]>::try_from(d).ok())
+            .map(Ipv4Addr::from)
+        else {
+            return;
+        };
+        let Some(peer) = self.peers.read().unwrap().by_ip.get(&dst).cloned() else {
+            return;
+        };
         let mut out = vec![0u8; (packet.len() + 32).max(148)];
         let n = {
             let mut tunn = peer.tunn.lock().unwrap();
@@ -879,6 +987,10 @@ impl Engine {
         #[cfg(not(target_os = "windows"))]
         let index = 0;
         (name, index)
+    }
+
+    pub fn self_ip(&self) -> Ipv4Addr {
+        self.self_ip
     }
 
     pub fn set_exit_node(&self, key: Option<Key>) {
@@ -918,7 +1030,8 @@ impl Engine {
     }
 
     pub fn set_advertise_routes(&self, routes: Vec<Ipv4Net>) {
-        self.advertise_routes.send_if_modified(|r| std::mem::replace(r, routes.clone()) != routes);
+        self.advertise_routes
+            .send_if_modified(|r| std::mem::replace(r, routes.clone()) != routes);
         // A network withdrawn here stops being routed at once, server or not
         let own = self.own_routes_now();
         *self.own_routes.write().unwrap() = own.clone();
@@ -935,7 +1048,11 @@ impl Engine {
     fn own_routes_now(&self) -> Arc<[Ipv4Net]> {
         let offered = self.advertise_routes.borrow();
         let granted = self.granted_routes.read().unwrap();
-        granted.iter().filter(|r| r.check_route().is_ok() && offered.contains(r)).copied().collect()
+        granted
+            .iter()
+            .filter(|r| r.check_route().is_ok() && offered.contains(r))
+            .copied()
+            .collect()
     }
 
     pub fn subscribe_advertise_routes(&self) -> watch::Receiver<Vec<Ipv4Net>> {
@@ -961,7 +1078,11 @@ impl Engine {
 
     /// What this device takes from the mesh
     fn here<'a>(&self, routes: &'a [Ipv4Net]) -> crate::filter::Here<'a> {
-        crate::filter::Here { ip: self.self_ip, exit: *self.advertise_exit.borrow(), routes }
+        crate::filter::Here {
+            ip: self.self_ip,
+            exit: *self.advertise_exit.borrow(),
+            routes,
+        }
     }
 
     /// Re-applies the exit-node socket bypass, needed on Windows/macOS where it
@@ -1000,26 +1121,42 @@ impl Engine {
         }
 
         let names = crate::magicdns::Names::new(
-            std::iter::once((nm.self_node.dns_name.as_str(), self.self_ip)).chain(nm.peers.iter().map(|n| (n.dns_name.as_str(), n.ip))),
+            std::iter::once((nm.self_node.dns_name.as_str(), self.self_ip))
+                .chain(nm.peers.iter().map(|n| (n.dns_name.as_str(), n.ip))),
         );
         *self.names.write().unwrap() = names;
         *self.self_dns_name.lock().unwrap() = nm.self_node.dns_name.clone();
-        self.helper_role.send_if_modified(|h| std::mem::replace(h, nm.helper) != nm.helper);
+        self.helper_role
+            .send_if_modified(|h| std::mem::replace(h, nm.helper) != nm.helper);
         {
             let mut k = self.key_state.lock().unwrap();
             if nm.expired && !k.1 {
-                tracing::warn!("this device's key expired; the server's administrator can renew it");
+                tracing::warn!(
+                    "this device's key expired; the server's administrator can renew it"
+                );
             }
             *k = (nm.expires_at, nm.expired);
         }
-        let addrs: Vec<String> = nm.server_addrs.iter().take(16).filter(|a| a.len() < 300).cloned().collect();
+        let addrs: Vec<String> = nm
+            .server_addrs
+            .iter()
+            .take(16)
+            .filter(|a| a.len() < 300)
+            .cloned()
+            .collect();
         if !addrs.is_empty() {
-            self.server_addrs.send_if_modified(|cur| std::mem::replace(cur, addrs.clone()) != addrs);
+            self.server_addrs
+                .send_if_modified(|cur| std::mem::replace(cur, addrs.clone()) != addrs);
         }
         if let Some(fronts) = &nm.server_fronts {
-            let fronts: Vec<String> =
-                fronts.iter().filter(|f| f.starts_with("https://") && f.len() < 300).take(8).cloned().collect();
-            self.server_fronts.send_if_modified(|cur| cur.replace(fronts.clone()).as_ref() != Some(&fronts));
+            let fronts: Vec<String> = fronts
+                .iter()
+                .filter(|f| f.starts_with("https://") && f.len() < 300)
+                .take(8)
+                .cloned()
+                .collect();
+            self.server_fronts
+                .send_if_modified(|cur| cur.replace(fronts.clone()).as_ref() != Some(&fronts));
         }
         *self.granted_routes.write().unwrap() = nm.self_node.routes.clone();
         let own_routes = self.own_routes_now();
@@ -1032,7 +1169,11 @@ impl Engine {
             .iter()
             .filter(|n| n.node_key != own_key)
             .flat_map(|n| n.routes.iter().map(move |r| (*r, n.node_key)))
-            .filter(|(r, _)| r.check_route().is_ok() && !local.iter().any(|l| l.overlaps(r)) && !own_routes.iter().any(|o| o.overlaps(r)))
+            .filter(|(r, _)| {
+                r.check_route().is_ok()
+                    && !local.iter().any(|l| l.overlaps(r))
+                    && !own_routes.iter().any(|o| o.overlaps(r))
+            })
             .collect();
 
         let mut kick = Vec::new();
@@ -1055,11 +1196,16 @@ impl Engine {
                     .filter(|e| e.is_ipv4() || (self.dual_stack && usable_ip(e.ip())))
                     .filter(|e| !routed(e))
                     .collect();
-                let routes: Arc<[Ipv4Net]> = accepted.iter().filter(|(_, k)| *k == node.node_key).map(|(r, _)| *r).collect();
+                let routes: Arc<[Ipv4Net]> = accepted
+                    .iter()
+                    .filter(|(_, k)| *k == node.node_key)
+                    .map(|(r, _)| *r)
+                    .collect();
                 let peer = match old.by_key.get(&node.node_key) {
                     Some(p) => {
                         let mut info = p.info.lock().unwrap();
-                        let changed = info.candidates != candidates || (node.online && !info.online);
+                        let changed =
+                            info.candidates != candidates || (node.online && !info.online);
                         info.hostname = display_safe(&node.hostname);
                         info.dns_name = display_safe(&node.dns_name);
                         info.ip = node.ip;
@@ -1093,14 +1239,23 @@ impl Engine {
                 }
             }
             table.select_exit(*self.exit_pref.lock().unwrap());
-            table.routes = accepted.iter().filter_map(|(r, k)| Some((*r, table.by_key.get(k)?.clone()))).collect();
-            table.routes.sort_by_key(|(r, _)| std::cmp::Reverse(r.prefix_len()));
+            table.routes = accepted
+                .iter()
+                .filter_map(|(r, k)| Some((*r, table.by_key.get(k)?.clone())))
+                .collect();
+            table
+                .routes
+                .sort_by_key(|(r, _)| std::cmp::Reverse(r.prefix_len()));
             table.routed = Some(table.routes.iter().map(|(r, _)| *r).collect());
             table
         };
         *self.peers.write().unwrap() = table;
-        let state = RouteState { own: own_routes.to_vec(), accepted: accepted.iter().map(|(r, _)| *r).collect() };
-        self.route_state.send_if_modified(|s| std::mem::replace(s, state.clone()) != state);
+        let state = RouteState {
+            own: own_routes.to_vec(),
+            accepted: accepted.iter().map(|(r, _)| *r).collect(),
+        };
+        self.route_state
+            .send_if_modified(|s| std::mem::replace(s, state.clone()) != state);
 
         // Both sides handshake at once on seeing a new or moved peer, which punches the NAT holes
         let mut out = [0u8; 256];
@@ -1108,7 +1263,12 @@ impl Engine {
             if p.is_fresh() {
                 continue;
             }
-            let result = p.tunn.lock().unwrap().encapsulate(&[], &mut out).len_if_network();
+            let result = p
+                .tunn
+                .lock()
+                .unwrap()
+                .encapsulate(&[], &mut out)
+                .len_if_network();
             match result {
                 Some(n) => self.send_to_peer(&p, &out[..n]),
                 // A handshake is already in flight, so re-send it to the new candidates
@@ -1199,16 +1359,28 @@ impl Engine {
         if !self.control_connected.load(Ordering::Relaxed) {
             return;
         }
-        let Some(frame) = Self::relay_frame(key, datagrams) else { return };
-        let _ = self.relay_out.lane(&frame).try_send((Instant::now(), frame));
+        let Some(frame) = Self::relay_frame(key, datagrams) else {
+            return;
+        };
+        let _ = self
+            .relay_out
+            .lane(&frame)
+            .try_send((Instant::now(), frame));
     }
 
     /// Like [`Self::relay_send`], but waits for room until `deadline` (udp-send only)
-    async fn relay_send_paced<'a>(&self, key: &Key, datagrams: impl Iterator<Item = &'a [u8]>, deadline: Instant) {
+    async fn relay_send_paced<'a>(
+        &self,
+        key: &Key,
+        datagrams: impl Iterator<Item = &'a [u8]>,
+        deadline: Instant,
+    ) {
         if !self.control_connected.load(Ordering::Relaxed) {
             return;
         }
-        let Some(frame) = Self::relay_frame(key, datagrams) else { return };
+        let Some(frame) = Self::relay_frame(key, datagrams) else {
+            return;
+        };
         let lane = self.relay_out.lane(&frame);
         if let Err(mpsc::error::TrySendError::Full(item)) = lane.try_send((Instant::now(), frame)) {
             // Dropped once over this job's budget
@@ -1216,7 +1388,10 @@ impl Engine {
         }
     }
 
-    fn relay_frame<'a>(key: &Key, mut datagrams: impl Iterator<Item = &'a [u8]>) -> Option<Vec<u8>> {
+    fn relay_frame<'a>(
+        key: &Key,
+        mut datagrams: impl Iterator<Item = &'a [u8]>,
+    ) -> Option<Vec<u8>> {
         let first = datagrams.next()?;
         // All but the last datagram of a group have the first one's length
         let n = 1 + datagrams.size_hint().0;
@@ -1292,7 +1467,9 @@ impl Engine {
     /// IPv4 destinations become IPv4-mapped IPv6 addresses on a dual-stack socket
     fn wire(&self, addr: SocketAddr) -> SocketAddr {
         match addr {
-            SocketAddr::V4(v4) if self.dual_stack => SocketAddr::new(IpAddr::V6(v4.ip().to_ipv6_mapped()), v4.port()),
+            SocketAddr::V4(v4) if self.dual_stack => {
+                SocketAddr::new(IpAddr::V6(v4.ip().to_ipv6_mapped()), v4.port())
+            }
             _ => addr,
         }
     }
@@ -1329,7 +1506,10 @@ impl Engine {
             Src::Relay => None,
         };
         let mut cookie = [0u8; 64];
-        match self.mac1.verify_packet(addr.map(|a| a.ip()), dgram, &mut cookie) {
+        match self
+            .mac1
+            .verify_packet(addr.map(|a| a.ip()), dgram, &mut cookie)
+        {
             // Only a cookie proves the address, so only then is it worth a bucket
             Ok(_) => addr.is_none_or(|a| !self.mac1.is_loaded() || self.source_allowed(a.ip())),
             Err(TunnResult::WriteToNetwork(reply)) => {
@@ -1351,7 +1531,11 @@ impl Engine {
     }
 
     fn source_allowed(&self, ip: std::net::IpAddr) -> bool {
-        charge_source(&mut self.handshake_sources.lock().unwrap(), ip, Instant::now())
+        charge_source(
+            &mut self.handshake_sources.lock().unwrap(),
+            ip,
+            Instant::now(),
+        )
     }
 
     fn lookup_incoming(&self, pkt: &[u8]) -> Option<Arc<Peer>> {
@@ -1387,7 +1571,12 @@ impl Engine {
         let gro = self.udp_state.gro_segments().max(1);
         let slot_len = (gro * 1500).clamp(PKT_BUF, MAX_PACKET);
         let base = crate::memory::current().unwrap_or(6 << 20);
-        let plan = buffer_plan(self.memory_limit_mb, self.vnet_hdr && gro > 1, slot_len, base);
+        let plan = buffer_plan(
+            self.memory_limit_mb,
+            self.vnet_hdr && gro > 1,
+            slot_len,
+            base,
+        );
         tracing::info!(
             limit_mb = ?self.memory_limit_mb,
             workers = plan.workers,
@@ -1402,7 +1591,9 @@ impl Engine {
 
         let (job_free_tx, job_free_rx) = mpsc::channel::<TxJob>(k * depth);
         for _ in 0..k * depth {
-            job_free_tx.try_send(TxJob::new()).expect("room for every job");
+            job_free_tx
+                .try_send(TxJob::new())
+                .expect("room for every job");
         }
         let (mut to_encrypt, mut from_encrypt) = (Vec::new(), Vec::new());
         for stage in ENCRYPT_STAGES.iter().take(k) {
@@ -1412,15 +1603,23 @@ impl Engine {
             from_encrypt.push(out_rx);
             tasks.push((*stage, Box::pin(self.clone().encrypt_loop(in_rx, out_tx))));
         }
-        tasks.push(("tun-read", Box::pin(self.clone().tun_loop(job_free_rx, to_encrypt))));
-        tasks.push(("udp-send", Box::pin(self.clone().udp_send_loop(from_encrypt, job_free_tx))));
+        tasks.push((
+            "tun-read",
+            Box::pin(self.clone().tun_loop(job_free_rx, to_encrypt)),
+        ));
+        tasks.push((
+            "udp-send",
+            Box::pin(self.clone().udp_send_loop(from_encrypt, job_free_tx)),
+        ));
 
         let slots = plan.rx_slots;
         // Enough spare receive buffers to keep every decrypt worker busy
         let spare_n = k * (depth + 1);
         let (spare_tx, spare_rx) = mpsc::channel::<Vec<u8>>(spare_n);
         for _ in 0..spare_n {
-            spare_tx.try_send(vec![0u8; slot_len]).expect("room for every spare slot");
+            spare_tx
+                .try_send(vec![0u8; slot_len])
+                .expect("room for every spare slot");
         }
         let (mut to_decrypt, mut from_decrypt) = (Vec::new(), Vec::new());
         for stage in DECRYPT_STAGES.iter().take(k) {
@@ -1428,14 +1627,33 @@ impl Engine {
             let (full, free) = pipeline(depth, RxBatch::new);
             to_decrypt.push(train_tx);
             from_decrypt.push((full.1, free.0));
-            tasks.push((*stage, Box::pin(self.clone().decrypt_loop(train_rx, spare_tx.clone(), full.0, free.1))));
+            tasks.push((
+                *stage,
+                Box::pin(
+                    self.clone()
+                        .decrypt_loop(train_rx, spare_tx.clone(), full.0, free.1),
+                ),
+            ));
         }
-        tasks.push(("udp-recv", Box::pin(self.clone().udp_loop(to_decrypt, spare_rx, spare_n, slots, slot_len))));
-        tasks.push(("tun-write", Box::pin(self.clone().tun_write_loop(from_decrypt))));
+        tasks.push((
+            "udp-recv",
+            Box::pin(
+                self.clone()
+                    .udp_loop(to_decrypt, spare_rx, spare_n, slots, slot_len),
+            ),
+        ));
+        tasks.push((
+            "tun-write",
+            Box::pin(self.clone().tun_write_loop(from_decrypt)),
+        ));
         tasks
     }
 
-    async fn tun_loop(self: Arc<Self>, mut free: mpsc::Receiver<TxJob>, workers: Vec<mpsc::Sender<TxJob>>) -> Result<()> {
+    async fn tun_loop(
+        self: Arc<Self>,
+        mut free: mpsc::Receiver<TxJob>,
+        workers: Vec<mpsc::Sender<TxJob>>,
+    ) -> Result<()> {
         #[cfg(target_os = "linux")]
         let mut original = vec![0u8; TUN_OFFSET + MAX_PACKET];
         let mut turn = 0usize;
@@ -1445,13 +1663,21 @@ impl Engine {
             let n = {
                 let mut n = self
                     .tun
-                    .recv_multiple(&mut original, &mut job.bufs[..TUN_READ], &mut job.sizes[..TUN_READ], 0)
+                    .recv_multiple(
+                        &mut original,
+                        &mut job.bufs[..TUN_READ],
+                        &mut job.sizes[..TUN_READ],
+                        0,
+                    )
                     .await
                     .context("reading TUN device")?;
                 // Under load more super-packets are already waiting: take them
                 // into the same job, which halves the hand-offs between stages
                 while n + TUN_READ <= TUN_BATCH {
-                    let (bufs, sizes) = (&mut job.bufs[n..n + TUN_READ], &mut job.sizes[n..n + TUN_READ]);
+                    let (bufs, sizes) = (
+                        &mut job.bufs[n..n + TUN_READ],
+                        &mut job.sizes[n..n + TUN_READ],
+                    );
                     match self.tun.try_recv_multiple(&mut original, bufs, sizes, 0) {
                         Ok(m) => {
                             Stats::add(&self.stats.tun_reads, 1);
@@ -1464,10 +1690,18 @@ impl Engine {
             };
             #[cfg(not(target_os = "linux"))]
             let n = {
-                job.sizes[0] = self.tun.recv(&mut job.bufs[0]).await.context("reading TUN device")?;
+                job.sizes[0] = self
+                    .tun
+                    .recv(&mut job.bufs[0])
+                    .await
+                    .context("reading TUN device")?;
                 1
             };
-            job.n = if self.upload.on() { self.police(&mut job, n) } else { n };
+            job.n = if self.upload.on() {
+                self.police(&mut job, n)
+            } else {
+                n
+            };
             if let Some(f) = self.forward.read().unwrap().as_ref() {
                 for j in 0..n {
                     f.outbound(&mut job.bufs[j][..job.sizes[j]]);
@@ -1480,7 +1714,10 @@ impl Engine {
             Stats::time(&self.stats.busy_tun_read, t0);
             let worker = &workers[turn % workers.len()];
             turn = turn.wrapping_add(1);
-            worker.send(job).await.map_err(|_| anyhow::anyhow!("encrypt stage stopped"))?;
+            worker
+                .send(job)
+                .await
+                .map_err(|_| anyhow::anyhow!("encrypt stage stopped"))?;
         }
     }
 
@@ -1548,11 +1785,19 @@ impl Engine {
                     (s, first)
                 })
             };
-            job.runs.push(TxRun { range, peer, session });
+            job.runs.push(TxRun {
+                range,
+                peer,
+                session,
+            });
         }
     }
 
-    async fn encrypt_loop(self: Arc<Self>, mut jobs: mpsc::Receiver<TxJob>, done: mpsc::Sender<TxJob>) -> Result<()> {
+    async fn encrypt_loop(
+        self: Arc<Self>,
+        mut jobs: mpsc::Receiver<TxJob>,
+        done: mpsc::Sender<TxJob>,
+    ) -> Result<()> {
         let mut lens: Vec<usize> = Vec::with_capacity(TUN_BATCH);
         while let Some(mut job) = jobs.recv().await {
             let c0 = Instant::now();
@@ -1564,7 +1809,11 @@ impl Engine {
                 lens.clear();
                 match &run.session {
                     Some((session, first)) => {
-                        let packets: Vec<&[u8]> = run.range.clone().map(|j| &job.bufs[j][..job.sizes[j]]).collect();
+                        let packets: Vec<&[u8]> = run
+                            .range
+                            .clone()
+                            .map(|j| &job.bufs[j][..job.sizes[j]])
+                            .collect();
                         crate::crypto::encrypt_batch(session, *first, &packets, &mut job.out);
                         lens.extend(packets.iter().map(|p| p.len() + crate::crypto::OVERHEAD));
                     }
@@ -1574,7 +1823,8 @@ impl Engine {
                         for j in run.range.clone() {
                             let at = job.out.len();
                             job.out.resize(at + (job.sizes[j] + 32).max(148), 0);
-                            match tunn.encapsulate(&job.bufs[j][..job.sizes[j]], &mut job.out[at..]) {
+                            match tunn.encapsulate(&job.bufs[j][..job.sizes[j]], &mut job.out[at..])
+                            {
                                 TunnResult::WriteToNetwork(b) => {
                                     let len = b.len();
                                     job.out.truncate(at + len);
@@ -1590,7 +1840,11 @@ impl Engine {
                     }
                 }
                 let mut at = start;
-                let route = if run.session.is_some() { run.peer.route() } else { Route::Search { relay: false } };
+                let route = if run.session.is_some() {
+                    run.peer.route()
+                } else {
+                    Route::Search { relay: false }
+                };
                 let dst = match route {
                     Route::Direct(dst) => Some(Dest::Udp(dst)),
                     Route::Relay => Some(Dest::Relay),
@@ -1602,7 +1856,14 @@ impl Engine {
                         let max = self.udp_state.max_gso_segments();
                         for (first, count) in gso_groups(&lens, max, MAX_GSO_BYTES) {
                             let total: usize = lens[first..first + count].iter().sum();
-                            let send = TxSend { peer: run.peer.clone(), dst, start: at, seg: lens[first], count, total };
+                            let send = TxSend {
+                                peer: run.peer.clone(),
+                                dst,
+                                start: at,
+                                seg: lens[first],
+                                count,
+                                total,
+                            };
                             job.sends.push(send);
                             at += total;
                         }
@@ -1610,7 +1871,14 @@ impl Engine {
                     // Handshakes or an undiscovered path, so each datagram tries every route
                     None => {
                         for &len in &lens {
-                            let send = TxSend { peer: run.peer.clone(), dst: Dest::Search, start: at, seg: len, count: 1, total: len };
+                            let send = TxSend {
+                                peer: run.peer.clone(),
+                                dst: Dest::Search,
+                                start: at,
+                                seg: len,
+                                count: 1,
+                                total: len,
+                            };
                             job.sends.push(send);
                             at += len;
                         }
@@ -1628,11 +1896,17 @@ impl Engine {
     }
 
     /// Collects jobs from the encrypt workers in the order they were dealt
-    async fn udp_send_loop(self: Arc<Self>, mut workers: Vec<mpsc::Receiver<TxJob>>, free: mpsc::Sender<TxJob>) -> Result<()> {
+    async fn udp_send_loop(
+        self: Arc<Self>,
+        mut workers: Vec<mpsc::Receiver<TxJob>>,
+        free: mpsc::Sender<TxJob>,
+    ) -> Result<()> {
         let k = workers.len();
         let mut turn = 0usize;
         loop {
-            let Some(mut job) = workers[turn % k].recv().await else { break };
+            let Some(mut job) = workers[turn % k].recv().await else {
+                break;
+            };
             turn = turn.wrapping_add(1);
             let t0 = Instant::now();
             let relay_deadline = t0 + RELAY_JOB_WAIT;
@@ -1649,7 +1923,9 @@ impl Engine {
                         };
                         let r = self
                             .udp
-                            .async_io(Interest::WRITABLE, || self.udp_state.try_send((&self.udp).into(), &transmit))
+                            .async_io(Interest::WRITABLE, || {
+                                self.udp_state.try_send((&self.udp).into(), &transmit)
+                            })
                             .await;
                         if let Err(e) = r {
                             tracing::trace!(%dst, segments = send.count, "udp send failed: {e}");
@@ -1662,14 +1938,28 @@ impl Engine {
                         // frame, and so in the small lane, ahead of any download; a
                         // train's short last one too
                         let seg = send.seg.max(1);
-                        let tail = if send.count > 1 { contents.len() % seg } else { 0 };
+                        let tail = if send.count > 1 {
+                            contents.len() % seg
+                        } else {
+                            0
+                        };
                         let (bulk, tail) = contents.split_at(contents.len() - tail);
-                        let per_frame = if seg <= SMALL_DATAGRAM { seg } else { (RELAY_FRAME_BYTES / seg).max(1) * seg };
+                        let per_frame = if seg <= SMALL_DATAGRAM {
+                            seg
+                        } else {
+                            (RELAY_FRAME_BYTES / seg).max(1) * seg
+                        };
                         for part in bulk.chunks(per_frame) {
-                            self.relay_send_paced(&send.peer.key, part.chunks(seg), relay_deadline).await;
+                            self.relay_send_paced(&send.peer.key, part.chunks(seg), relay_deadline)
+                                .await;
                         }
                         if !tail.is_empty() {
-                            self.relay_send_paced(&send.peer.key, std::iter::once(tail), relay_deadline).await;
+                            self.relay_send_paced(
+                                &send.peer.key,
+                                std::iter::once(tail),
+                                relay_deadline,
+                            )
+                            .await;
                         }
                     }
                     Dest::Search => self.send_to_peer(&send.peer, contents),
@@ -1702,7 +1992,8 @@ impl Engine {
             let r = self
                 .udp
                 .async_io(Interest::READABLE, || {
-                    let mut iov: Vec<IoSliceMut<'_>> = rx.iter_mut().map(|b| IoSliceMut::new(b)).collect();
+                    let mut iov: Vec<IoSliceMut<'_>> =
+                        rx.iter_mut().map(|b| IoSliceMut::new(b)).collect();
                     self.udp_state.recv((&self.udp).into(), &mut iov, &mut meta)
                 })
                 .await;
@@ -1724,26 +2015,41 @@ impl Engine {
             let mut job: Vec<Train> = Vec::with_capacity(n);
             let mut dgrams = 0;
             for (m, slot) in meta.iter().zip(rx.iter_mut()).take(n) {
-                let stride = if m.stride == 0 { m.len.max(1) } else { m.stride };
+                let stride = if m.stride == 0 {
+                    m.len.max(1)
+                } else {
+                    m.stride
+                };
                 let count = m.len.div_ceil(stride);
                 Stats::add(&self.stats.udp_recv_dgrams, count);
                 if !job.is_empty() && (dgrams + count > RX_BATCH || job.len() >= max_trains) {
                     let worker = &workers[turn % workers.len()];
                     turn = turn.wrapping_add(1);
-                    worker.send(std::mem::take(&mut job)).await.map_err(|_| anyhow::anyhow!("decrypt stage stopped"))?;
+                    worker
+                        .send(std::mem::take(&mut job))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("decrypt stage stopped"))?;
                     dgrams = 0;
                 }
                 let w = Instant::now();
                 let fresh = spare.recv().await.context("decrypt stage stopped")?;
                 Stats::time(&self.stats.wait_udp_recv, w);
                 let buf = std::mem::replace(slot, fresh);
-                job.push(Train { buf, len: m.len, stride, src: canonical(m.addr) });
+                job.push(Train {
+                    buf,
+                    len: m.len,
+                    stride,
+                    src: canonical(m.addr),
+                });
                 dgrams += count;
             }
             if !job.is_empty() {
                 let worker = &workers[turn % workers.len()];
                 turn = turn.wrapping_add(1);
-                worker.send(job).await.map_err(|_| anyhow::anyhow!("decrypt stage stopped"))?;
+                worker
+                    .send(job)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("decrypt stage stopped"))?;
             }
             Stats::time(&self.stats.busy_udp_recv, t0);
         }
@@ -1762,7 +2068,11 @@ impl Engine {
             let mut batch = free.recv().await.context("tun-write stage stopped")?;
             let c0 = Instant::now();
             for train in &job {
-                self.receive_run(train.buf[..train.len].chunks(train.stride), Src::Udp(train.src), &mut batch);
+                self.receive_run(
+                    train.buf[..train.len].chunks(train.stride),
+                    Src::Udp(train.src),
+                    &mut batch,
+                );
             }
             Stats::time(&self.stats.crypto_rx, c0);
             for train in job {
@@ -1778,14 +2088,19 @@ impl Engine {
     }
 
     /// Collects batches from the decrypt workers in dealing order
-    async fn tun_write_loop(self: Arc<Self>, mut workers: Vec<(mpsc::Receiver<RxBatch>, mpsc::Sender<RxBatch>)>) -> Result<()> {
+    async fn tun_write_loop(
+        self: Arc<Self>,
+        mut workers: Vec<(mpsc::Receiver<RxBatch>, mpsc::Sender<RxBatch>)>,
+    ) -> Result<()> {
         let mut gro = crate::gro::Coalescer::new();
         let k = workers.len();
         let mut turn = 0usize;
         loop {
             let (full, free) = &mut workers[turn % k];
             turn = turn.wrapping_add(1);
-            let Some(mut batch) = full.recv().await else { break };
+            let Some(mut batch) = full.recv().await else {
+                break;
+            };
             let len = batch.len;
             if len > 0 {
                 Stats::add(&self.stats.tun_write_pkts, len);
@@ -1823,7 +2138,14 @@ impl Engine {
                 }
                 continue;
             };
-            let Some(peer) = self.peers.read().unwrap().by_index.get(&(r_idx >> 8)).cloned() else {
+            let Some(peer) = self
+                .peers
+                .read()
+                .unwrap()
+                .by_index
+                .get(&(r_idx >> 8))
+                .cloned()
+            else {
                 continue;
             };
             let session = peer.tunn.lock().unwrap().session_for(r_idx);
@@ -1849,7 +2171,14 @@ impl Engine {
 
             let (peer_routes, foreign) = (peer.routes(), self.foreign_to(&peer));
             let allowed = peer.allowed_src(&peer_routes, foreign.as_deref().unwrap_or_default());
-            crate::crypto::decrypt_batch(&session, &run, &mut b.bufs[b.len..], TUN_OFFSET, allowed, &mut results);
+            crate::crypto::decrypt_batch(
+                &session,
+                &run,
+                &mut b.bufs[b.len..],
+                TUN_OFFSET,
+                allowed,
+                &mut results,
+            );
 
             // Keep delivered packets contiguous and in order
             let first = b.len;
@@ -1859,7 +2188,9 @@ impl Engine {
                     crate::crypto::Decrypted::Packet(len) => {
                         authenticated = true;
                         if self.take_ping(&peer, &b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len])
-                            || !peer.filter.inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], &here)
+                            || !peer
+                                .filter
+                                .inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], &here)
                         {
                             continue;
                         }
@@ -1869,11 +2200,16 @@ impl Engine {
                         authenticated = true;
                     }
                     crate::crypto::Decrypted::Authenticated => authenticated = true,
-                    crate::crypto::Decrypted::Rejected => tracing::trace!(?src, "transport packet rejected"),
+                    crate::crypto::Decrypted::Rejected => {
+                        tracing::trace!(?src, "transport packet rejected")
+                    }
                 }
             }
             if authenticated {
-                peer.tunn.lock().unwrap().note_received(r_idx, bytes, bytes > 0);
+                peer.tunn
+                    .lock()
+                    .unwrap()
+                    .note_received(r_idx, bytes, bytes > 0);
                 if peer.mark_rx(src, bytes > 0)
                     && let Src::Udp(addr) = src
                 {
@@ -1886,14 +2222,21 @@ impl Engine {
     /// A ping or wake request (see `ping`) is handled here, not given to the system
     fn take_ping(&self, peer: &Peer, packet: &[u8]) -> bool {
         use crate::ping::Msg;
-        let Some(msg) = crate::ping::parse(packet) else { return false };
+        let Some(msg) = crate::ping::parse(packet) else {
+            return false;
+        };
         let for_me = packet[16..20] == self.self_ip.octets();
         match msg {
             Msg::Request(nonce) if for_me => {
                 let ip = peer.info.lock().unwrap().ip;
                 self.send_ping(peer, Msg::Reply(nonce), ip);
             }
-            Msg::Reply(nonce) => peer.info.lock().unwrap().ping.answered(nonce, Instant::now()),
+            Msg::Reply(nonce) => peer
+                .info
+                .lock()
+                .unwrap()
+                .ping
+                .answered(nonce, Instant::now()),
             // Only from peers that may reach this device in full, onto one of its own networks
             Msg::Wake(mac, to) if for_me && !peer.filter.restricted() => {
                 let mut last = self.last_wake.lock().unwrap();
@@ -1918,7 +2261,12 @@ impl Engine {
     fn send_ping(&self, peer: &Peer, msg: crate::ping::Msg, to: Ipv4Addr) {
         let packet = crate::ping::build(msg, self.self_ip, to);
         let mut out = [0u8; 160];
-        let n = peer.tunn.lock().unwrap().encapsulate(&packet, &mut out).len_if_network();
+        let n = peer
+            .tunn
+            .lock()
+            .unwrap()
+            .encapsulate(&packet, &mut out)
+            .len_if_network();
         if let Some(n) = n {
             self.send_routed(peer, &out[..n]);
         }
@@ -1928,22 +2276,41 @@ impl Engine {
     /// through every online peer that is. Returns who sent the packet.
     pub fn wake(&self, name: &str) -> anyhow::Result<Vec<String>> {
         let (key, hostname, _) = self.find_peer(name)?;
-        let peers: Vec<Arc<Peer>> = self.peers.read().unwrap().by_key.values().cloned().collect();
-        let target = peers.iter().find(|p| p.key == key).map(|p| p.info.lock().unwrap().lan.clone()).unwrap_or_default();
+        let peers: Vec<Arc<Peer>> = self
+            .peers
+            .read()
+            .unwrap()
+            .by_key
+            .values()
+            .cloned()
+            .collect();
+        let target = peers
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.info.lock().unwrap().lan.clone())
+            .unwrap_or_default();
         if target.is_empty() {
-            anyhow::bail!("{hostname} has not told the server its network card yet (it needs to run retail once while on)");
+            anyhow::bail!(
+                "{hostname} has not told the server its network card yet (it needs to run retail once while on)"
+            );
         }
         let own = crate::lan::ports();
         let mut sent = Vec::new();
         for t in &target {
             if own.iter().any(|o| o.shares_network(t)) {
-                crate::lan::send_magic(t.mac, t.broadcast()).context("sending the Wake-on-LAN packet")?;
+                crate::lan::send_magic(t.mac, t.broadcast())
+                    .context("sending the Wake-on-LAN packet")?;
                 sent.push("this device".to_string());
             }
             for p in peers.iter().filter(|p| p.key != key) {
                 let (online, ip, name, near) = {
                     let i = p.info.lock().unwrap();
-                    (i.online, i.ip, i.hostname.clone(), i.lan.iter().any(|l| l.shares_network(t)))
+                    (
+                        i.online,
+                        i.ip,
+                        i.hostname.clone(),
+                        i.lan.iter().any(|l| l.shares_network(t)),
+                    )
                 };
                 if online && near {
                     self.send_ping(p, crate::ping::Msg::Wake(t.mac, t.broadcast()), ip);
@@ -1986,7 +2353,9 @@ impl Engine {
             TunnResult::WriteToNetwork(b) => {
                 // Replies and packets queued during the handshake go back the way it came
                 self.reply(&peer, b, src);
-                while let TunnResult::WriteToNetwork(b) = tunn.decapsulate(None, &[], &mut out[TUN_OFFSET..]) {
+                while let TunnResult::WriteToNetwork(b) =
+                    tunn.decapsulate(None, &[], &mut out[TUN_OFFSET..])
+                {
                     self.reply(&peer, b, src);
                 }
                 drop(tunn);
@@ -2002,7 +2371,10 @@ impl Engine {
                 let (start, len) = (b.as_ptr() as usize - base, b.len());
                 drop(tunn);
                 let foreign = self.foreign_to(&peer);
-                if !peer.allowed_src(&peer.routes(), foreign.as_deref().unwrap_or_default()).permits(inner_src) {
+                if !peer
+                    .allowed_src(&peer.routes(), foreign.as_deref().unwrap_or_default())
+                    .permits(inner_src)
+                {
                     tracing::debug!(%inner_src, "dropping packet with spoofed source");
                     return false;
                 }
@@ -2011,7 +2383,10 @@ impl Engine {
                     return false;
                 }
                 let own_routes = self.own_routes.read().unwrap().clone();
-                if !peer.filter.inbound(&out[start..start + len], &self.here(&own_routes)) {
+                if !peer
+                    .filter
+                    .inbound(&out[start..start + len], &self.here(&own_routes))
+                {
                     return false;
                 }
                 if start != TUN_OFFSET {
@@ -2040,12 +2415,22 @@ impl Engine {
     /// first, so a burst costs one write.
     async fn write_tun(&self, bufs: &mut [Vec<u8>], gro: &mut crate::gro::Coalescer) {
         let forward = self.forward.read().unwrap().clone();
-        let own_routes = forward.as_ref().map(|_| self.own_routes.read().unwrap().clone()).unwrap_or_else(|| Arc::from(Vec::new()));
+        let own_routes = forward
+            .as_ref()
+            .map(|_| self.own_routes.read().unwrap().clone())
+            .unwrap_or_else(|| Arc::from(Vec::new()));
         let here = self.here(&own_routes);
         // Our sockets would reach networks other peers route back through the
         // tunnel, as this device: one peer's grant is not another's
         let routed: Vec<Ipv4Net> = match forward {
-            Some(_) => self.peers.read().unwrap().routes.iter().map(|(r, _)| *r).collect(),
+            Some(_) => self
+                .peers
+                .read()
+                .unwrap()
+                .routes
+                .iter()
+                .map(|(r, _)| *r)
+                .collect(),
             None => Vec::new(),
         };
         // As an exit node, what goes on to the internet leaves over the same line
@@ -2053,17 +2438,25 @@ impl Engine {
         let upload_ok = |b: &[u8]| {
             !police || b.len() < 20 || {
                 let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
-                in_mesh(dst) || here.routes.iter().any(|r| r.contains(dst)) || self.upload.allow(b.len())
+                in_mesh(dst)
+                    || here.routes.iter().any(|r| r.contains(dst))
+                    || self.upload.allow(b.len())
             }
         };
         // Forwarding without the system's NAT: our stack takes what is not for this device
-        let keep = |b: &mut [u8]| upload_ok(b) && match &forward {
-            Some(f) if b.len() >= 20 && b[16..20] != self.self_ip.octets() => {
-                let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
-                f.inbound(b, here.forwarded(dst) && !routed.iter().any(|r| r.contains(dst)))
-            }
-            Some(f) => f.inbound(b, false),
-            None => true,
+        let keep = |b: &mut [u8]| {
+            upload_ok(b)
+                && match &forward {
+                    Some(f) if b.len() >= 20 && b[16..20] != self.self_ip.octets() => {
+                        let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
+                        f.inbound(
+                            b,
+                            here.forwarded(dst) && !routed.iter().any(|r| r.contains(dst)),
+                        )
+                    }
+                    Some(f) => f.inbound(b, false),
+                    None => true,
+                }
         };
         if !self.vnet_hdr {
             for b in bufs.iter_mut() {
@@ -2096,9 +2489,13 @@ impl Engine {
 
     /// Answers MagicDNS queries (see `magicdns`)
     pub async fn dns_loop(self: Arc<Self>) -> Result<()> {
-        let Some(mut queries) = self.dns_queries_rx.lock().unwrap().take() else { return Ok(()) };
+        let Some(mut queries) = self.dns_queries_rx.lock().unwrap().take() else {
+            return Ok(());
+        };
         while let Some(q) = queries.recv().await {
-            let Some(reply) = crate::magicdns::answer(&q, &self.names.read().unwrap()) else { continue };
+            let Some(reply) = crate::magicdns::answer(&q, &self.names.read().unwrap()) else {
+                continue;
+            };
             if self.vnet_hdr {
                 let mut buf = vec![0u8; TUN_OFFSET];
                 buf.extend_from_slice(&reply);
@@ -2115,7 +2512,8 @@ impl Engine {
     }
 
     pub fn set_helper_code(&self, code: Option<String>) {
-        self.helper_code.send_if_modified(|c| std::mem::replace(c, code.clone()) != code);
+        self.helper_code
+            .send_if_modified(|c| std::mem::replace(c, code.clone()) != code);
     }
 
     pub fn subscribe_helper_code(&self) -> watch::Receiver<Option<String>> {
@@ -2158,12 +2556,22 @@ impl Engine {
                 }
                 if let Some(line) = self.stats.take_line() {
                     tracing::debug!("batching: {line}");
-                    tracing::debug!("stages: {}", self.stats.take_stages(Duration::from_secs(10)));
+                    tracing::debug!(
+                        "stages: {}",
+                        self.stats.take_stages(Duration::from_secs(10))
+                    );
                 } else {
                     self.stats.take_stages(Duration::from_secs(10));
                 }
             }
-            let peers: Vec<Arc<Peer>> = self.peers.read().unwrap().by_key.values().cloned().collect();
+            let peers: Vec<Arc<Peer>> = self
+                .peers
+                .read()
+                .unwrap()
+                .by_key
+                .values()
+                .cloned()
+                .collect();
             for p in peers {
                 let (result, established, tx, rx) = {
                     let mut tunn = p.tunn.lock().unwrap();
@@ -2177,7 +2585,12 @@ impl Engine {
                         _ => None,
                     };
                     let (_, tx, rx, _, _) = tunn.stats();
-                    (r, tunn.time_since_last_handshake().is_some(), tx as u64, rx as u64)
+                    (
+                        r,
+                        tunn.time_since_last_handshake().is_some(),
+                        tx as u64,
+                        rx as u64,
+                    )
                 };
                 if established {
                     let due = {
@@ -2192,7 +2605,12 @@ impl Engine {
                 if established && p.check_liveness(tx, rx) != Liveness::Fine {
                     // Proof of life for a sender, or the first relayed packet after
                     // a direct path was lost
-                    let n = p.tunn.lock().unwrap().encapsulate(&[], &mut out).len_if_network();
+                    let n = p
+                        .tunn
+                        .lock()
+                        .unwrap()
+                        .encapsulate(&[], &mut out)
+                        .len_if_network();
                     if let Some(n) = n {
                         self.send_to_peer(&p, &out[..n]);
                     }
@@ -2207,7 +2625,8 @@ impl Engine {
                     let n = {
                         let mut tunn = p.tunn.lock().unwrap();
                         if handshake {
-                            tunn.format_handshake_initiation(&mut out, true).len_if_network()
+                            tunn.format_handshake_initiation(&mut out, true)
+                                .len_if_network()
                         } else {
                             tunn.encapsulate(&[], &mut out).len_if_network()
                         }
@@ -2232,7 +2651,9 @@ impl Engine {
     /// another is about to work says nothing to the user
     pub fn control_problem(&self) -> Option<retail_proto::api::ConnectionProblem> {
         let p = self.control_problem.lock().unwrap();
-        p.as_ref().filter(|(_, at)| at.elapsed() >= Duration::from_secs(3)).map(|(x, _)| x.clone())
+        p.as_ref()
+            .filter(|(_, at)| at.elapsed() >= Duration::from_secs(3))
+            .map(|(x, _)| x.clone())
     }
 
     pub fn set_control_via(&self, via: Option<String>) {
@@ -2274,7 +2695,9 @@ impl Engine {
             if servers.is_empty() {
                 let control = *self.control_addr.lock().unwrap();
                 servers.push(match control {
-                    Some(addr) => SocketAddr::new(addr.ip(), retail_proto::DEFAULT_STUN_PORT).to_string(),
+                    Some(addr) => {
+                        SocketAddr::new(addr.ip(), retail_proto::DEFAULT_STUN_PORT).to_string()
+                    }
                     None => default_stun.clone(),
                 });
             }
@@ -2284,7 +2707,10 @@ impl Engine {
                         // The public IPv4 and IPv6 endpoints are separate candidates
                         let addrs: Vec<SocketAddr> = addrs.map(canonical).collect();
                         let v4 = addrs.iter().find(|a| a.is_ipv4());
-                        let v6 = addrs.iter().find(|a| a.is_ipv6()).filter(|_| self.dual_stack);
+                        let v6 = addrs
+                            .iter()
+                            .find(|a| a.is_ipv6())
+                            .filter(|_| self.dual_stack);
                         let nat64 = crate::happy::nat64_cached()
                             .filter(|_| self.dual_stack && v6.is_none())
                             .and_then(|p| crate::happy::synthesize(p, *v4?));
@@ -2338,7 +2764,15 @@ impl Engine {
     fn publish_endpoints(&self) {
         let mut eps = local_endpoints(self.listen_port, self.dual_stack);
         let extra = self.extra_endpoints.lock().unwrap().clone();
-        for public in self.stun_public.lock().unwrap().iter().flatten().chain(extra.iter()).rev() {
+        for public in self
+            .stun_public
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .chain(extra.iter())
+            .rev()
+        {
             if !eps.contains(public) {
                 eps.insert(0, *public);
             }
@@ -2354,7 +2788,14 @@ impl Engine {
     }
 
     pub fn peer_status(&self) -> Vec<PeerStatus> {
-        let peers: Vec<Arc<Peer>> = self.peers.read().unwrap().by_key.values().cloned().collect();
+        let peers: Vec<Arc<Peer>> = self
+            .peers
+            .read()
+            .unwrap()
+            .by_key
+            .values()
+            .cloned()
+            .collect();
         let here_public = self.stun_public.lock().unwrap().iter().any(Option::is_some)
             || !self.extra_endpoints.lock().unwrap().is_empty();
         let mut out: Vec<PeerStatus> = peers
@@ -2423,7 +2864,9 @@ fn pipeline<T>(depth: usize, make: impl Fn() -> T) -> (Stage<T>, Stage<T>) {
     let full = mpsc::channel(depth);
     let free = mpsc::channel(depth);
     for _ in 0..depth {
-        free.0.try_send(make()).expect("free list has room for every buffer");
+        free.0
+            .try_send(make())
+            .expect("free list has room for every buffer");
     }
     (full, free)
 }
@@ -2505,7 +2948,10 @@ pub struct RelayRx {
 
 impl RelayRx {
     pub fn new() -> Self {
-        RelayRx { batch: RxBatch::new(), gro: crate::gro::Coalescer::new() }
+        RelayRx {
+            batch: RxBatch::new(),
+            gro: crate::gro::Coalescer::new(),
+        }
     }
 }
 
@@ -2552,7 +2998,11 @@ fn crypto_workers(batched: bool) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or_else(|| {
             let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-            if batched && cores >= 4 { DEFAULT_CRYPTO_WORKERS } else { 1 }
+            if batched && cores >= 4 {
+                DEFAULT_CRYPTO_WORKERS
+            } else {
+                1
+            }
         })
         .clamp(1, MAX_CRYPTO_WORKERS)
 }
@@ -2609,10 +3059,15 @@ fn set_socket_buffers(udp: &UdpSocket) {
 /// or unspecified, and not inside the mesh itself.
 fn usable_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() && !in_mesh(ip),
+        IpAddr::V4(ip) => {
+            !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() && !in_mesh(ip)
+        }
         // fe80::/10 needs a scope id and only works on one link
         IpAddr::V6(ip) => {
-            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() && (ip.segments()[0] & 0xffc0) != 0xfe80
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && (ip.segments()[0] & 0xffc0) != 0xfe80
         }
     }
 }
@@ -2620,7 +3075,11 @@ fn usable_ip(ip: IpAddr) -> bool {
 /// Reachable from other networks: not private, shared (CGNAT), link-local or ULA
 fn public_ip(ip: IpAddr) -> bool {
     match ip.to_canonical() {
-        IpAddr::V4(ip) => usable_ip(IpAddr::V4(ip)) && !ip.is_private() && !(ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64),
+        IpAddr::V4(ip) => {
+            usable_ip(IpAddr::V4(ip))
+                && !ip.is_private()
+                && !(ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64)
+        }
         IpAddr::V6(ip) => usable_ip(IpAddr::V6(ip)) && (ip.segments()[0] & 0xfe00) != 0xfc00,
     }
 }
@@ -2673,7 +3132,16 @@ fn exclusive(s: &socket2::Socket) -> std::io::Result<()> {
     use windows_sys::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOL_SOCKET, setsockopt};
     let on: i32 = 1;
     // SAFETY: a valid socket and an i32 option
-    if unsafe { setsockopt(s.as_raw_socket() as usize, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (&raw const on).cast(), 4) } != 0 {
+    if unsafe {
+        setsockopt(
+            s.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&raw const on).cast(),
+            4,
+        )
+    } != 0
+    {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
@@ -2720,7 +3188,9 @@ fn charge_source(
     if let Some(bucket) = sources.get_mut(&key) {
         return take_token(bucket, now);
     }
-    if sources.len() >= MAX_HANDSHAKE_SOURCES && swept.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+    if sources.len() >= MAX_HANDSHAKE_SOURCES
+        && swept.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+    {
         sources.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(1));
         *swept = Some(now);
     }
@@ -2732,7 +3202,8 @@ fn charge_source(
 
 /// A token bucket of `HANDSHAKES_PER_SOURCE` with room for `HANDSHAKE_BURST`
 fn take_token((tokens, at): &mut (f32, Instant), now: Instant) -> bool {
-    *tokens = (*tokens + now.duration_since(*at).as_secs_f32() * HANDSHAKES_PER_SOURCE).min(HANDSHAKE_BURST);
+    *tokens = (*tokens + now.duration_since(*at).as_secs_f32() * HANDSHAKES_PER_SOURCE)
+        .min(HANDSHAKE_BURST);
     *at = now;
     if *tokens < 1.0 {
         return false;
@@ -2749,7 +3220,10 @@ mod tests {
     fn one_source_gets_a_few_handshakes_at_once() {
         let t0 = Instant::now();
         let mut bucket = (HANDSHAKE_BURST, t0);
-        assert_eq!((0..100).filter(|_| take_token(&mut bucket, t0)).count(), HANDSHAKE_BURST as usize);
+        assert_eq!(
+            (0..100).filter(|_| take_token(&mut bucket, t0)).count(),
+            HANDSHAKE_BURST as usize
+        );
         assert!(take_token(&mut bucket, t0 + Duration::from_millis(60)));
         assert!(!take_token(&mut bucket, t0 + Duration::from_millis(60)));
     }
@@ -2761,16 +3235,33 @@ mod tests {
         let burst = HANDSHAKE_BURST as usize;
         let a: std::net::IpAddr = "2001:db8:1:2::1".parse().unwrap();
         let b: std::net::IpAddr = "2001:db8:1:2:ffff::9".parse().unwrap();
-        assert_eq!((0..burst).filter(|_| charge_source(&mut table, a, t0)).count(), burst);
+        assert_eq!(
+            (0..burst)
+                .filter(|_| charge_source(&mut table, a, t0))
+                .count(),
+            burst
+        );
         assert!(!charge_source(&mut table, b, t0));
-        assert!(charge_source(&mut table, "2001:db8:1:3::1".parse().unwrap(), t0));
+        assert!(charge_source(
+            &mut table,
+            "2001:db8:1:3::1".parse().unwrap(),
+            t0
+        ));
         for i in 0..MAX_HANDSHAKE_SOURCES as u32 {
-            charge_source(&mut table, std::net::Ipv4Addr::from(0x0a00_0000 + i).into(), t0);
+            charge_source(
+                &mut table,
+                std::net::Ipv4Addr::from(0x0a00_0000 + i).into(),
+                t0,
+            );
         }
         assert_eq!(table.0.len(), MAX_HANDSHAKE_SOURCES);
         assert!(!charge_source(&mut table, b, t0));
         let later = t0 + Duration::from_secs(2);
-        assert!(charge_source(&mut table, "198.51.100.7".parse().unwrap(), later));
+        assert!(charge_source(
+            &mut table,
+            "198.51.100.7".parse().unwrap(),
+            later
+        ));
         assert!(table.0.len() < 10);
     }
 
@@ -2783,7 +3274,8 @@ mod tests {
         let v4 = |port: u16| {
             let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
             s.set_reuse_address(true).unwrap();
-            s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into()).map(|()| s)
+            s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())
+                .map(|()| s)
         };
         let (ours, _) = bind_udp(0).unwrap();
         let port = ours.local_addr().unwrap().port();
@@ -2791,7 +3283,10 @@ mod tests {
         drop(ours);
         let theirs = v4(0).unwrap();
         let port = theirs.local_addr().unwrap().as_socket().unwrap().port();
-        assert_eq!(bind_udp(port).unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+        assert_eq!(
+            bind_udp(port).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
     }
 
     #[test]
@@ -2802,14 +3297,20 @@ mod tests {
         assert!(usable_ip("fd00::1".parse().unwrap()));
         assert!(!usable_ip("fe80::1".parse().unwrap()));
         assert!(!usable_ip("::1".parse().unwrap()));
-        assert!(!usable_ip("100.64.0.3".parse().unwrap()), "mesh addresses are not candidates");
+        assert!(
+            !usable_ip("100.64.0.3".parse().unwrap()),
+            "mesh addresses are not candidates"
+        );
         assert!(usable_ip("192.168.1.10".parse().unwrap()));
     }
 
     #[test]
     fn gso_grouping() {
         // A short tail closes the group
-        assert_eq!(gso_groups(&[100, 100, 100, 60, 100], 64, 64000), vec![(0, 4), (4, 1)]);
+        assert_eq!(
+            gso_groups(&[100, 100, 100, 60, 100], 64, 64000),
+            vec![(0, 4), (4, 1)]
+        );
         assert_eq!(gso_groups(&[10; 5], 2, 64000), vec![(0, 2), (2, 2), (4, 1)]);
         assert_eq!(gso_groups(&[100; 4], 64, 250), vec![(0, 2), (2, 2)]);
         // A larger datagram starts a new group
@@ -2828,7 +3329,10 @@ mod tests {
         assert!(tight.bytes(gro_slot) < roomy.bytes(gro_slot));
         assert!(base + MEMORY_OVERHEAD + tight.bytes(gro_slot) <= 9 << 20);
         // An impossible limit still yields the smallest working plan
-        assert_eq!(buffer_plan(Some(1), true, gro_slot, base), PLANS[PLANS.len() - 1]);
+        assert_eq!(
+            buffer_plan(Some(1), true, gro_slot, base),
+            PLANS[PLANS.len() - 1]
+        );
     }
 
     #[test]

@@ -32,7 +32,10 @@ pub struct Target {
 
 impl Target {
     pub fn url(url: impl Into<String>) -> Self {
-        Target { url: url.into(), ..Default::default() }
+        Target {
+            url: url.into(),
+            ..Default::default()
+        }
     }
 
     #[cfg(test)]
@@ -94,7 +97,13 @@ pub(crate) fn parse_url(url: &str) -> Result<Url<'_>> {
     if host.is_empty() {
         bail!("URL has no host");
     }
-    Ok(Url { tls, host, port, authority, base: base.trim_end_matches('/') })
+    Ok(Url {
+        tls,
+        host,
+        port,
+        authority,
+        base: base.trim_end_matches('/'),
+    })
 }
 
 /// Trusts the public web roots plus the PEM certificates in `RETAIL_CA_FILE`,
@@ -150,7 +159,10 @@ struct PinnedKey {
 pub(crate) fn spki_sha256(cert: &rustls::pki_types::CertificateDer<'_>) -> Option<[u8; 32]> {
     let cert = webpki::EndEntityCert::try_from(cert).ok()?;
     let spki = cert.subject_public_key_info();
-    ring::digest::digest(&ring::digest::SHA256, spki.as_ref()).as_ref().try_into().ok()
+    ring::digest::digest(&ring::digest::SHA256, spki.as_ref())
+        .as_ref()
+        .try_into()
+        .ok()
 }
 
 impl rustls::client::danger::ServerCertVerifier for PinnedKey {
@@ -167,8 +179,12 @@ impl rustls::client::danger::ServerCertVerifier for PinnedKey {
             Some(hash) if hash == self.pin => {
                 Ok(rustls::client::danger::ServerCertVerified::assertion())
             }
-            Some(_) => Err(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)),
-            None => Err(rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)),
+            Some(_) => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            )),
+            None => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::BadEncoding,
+            )),
         }
     }
 
@@ -178,7 +194,12 @@ impl rustls::client::danger::ServerCertVerifier for PinnedKey {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -187,11 +208,18 @@ impl rustls::client::danger::ServerCertVerifier for PinnedKey {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -210,14 +238,23 @@ pub async fn post_json(target: &Target, path: &str, body: &[u8]) -> Result<Respo
         let dialed = crate::transport::dial(target).await?;
         exchange(dialed.io, request.as_bytes(), body).await
     };
-    tokio::time::timeout(TIMEOUT, exchanged).await.context("request timed out")?
+    tokio::time::timeout(TIMEOUT, exchanged)
+        .await
+        .context("request timed out")?
 }
-async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, head: &[u8], body: &[u8]) -> Result<Response> {
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
+    mut s: S,
+    head: &[u8],
+    body: &[u8],
+) -> Result<Response> {
     s.write_all(head).await?;
     s.write_all(body).await?;
     s.flush().await?;
     let mut raw = Vec::new();
-    (&mut s).take(MAX_RESPONSE as u64 + 1).read_to_end(&mut raw).await?;
+    (&mut s)
+        .take(MAX_RESPONSE as u64 + 1)
+        .read_to_end(&mut raw)
+        .await?;
     if raw.len() > MAX_RESPONSE {
         bail!("response too large");
     }
@@ -225,7 +262,10 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, head: &[u8], body
 }
 
 pub(crate) fn parse_response(raw: &[u8]) -> Result<Response> {
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").context("malformed HTTP response")?;
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("malformed HTTP response")?;
     let head = std::str::from_utf8(&raw[..split]).context("non-UTF-8 HTTP headers")?;
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or_default();
@@ -237,7 +277,9 @@ pub(crate) fn parse_response(raw: &[u8]) -> Result<Response> {
     let mut chunked = false;
     let mut length = None;
     for line in lines {
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         if k.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked") {
             chunked = true;
@@ -259,8 +301,15 @@ pub(crate) fn parse_response(raw: &[u8]) -> Result<Response> {
 fn dechunk(mut data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
-        let eol = data.windows(2).position(|w| w == b"\r\n").context("malformed chunk")?;
-        let size_str = std::str::from_utf8(&data[..eol])?.split(';').next().unwrap_or("").trim();
+        let eol = data
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .context("malformed chunk")?;
+        let size_str = std::str::from_utf8(&data[..eol])?
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
         let size = usize::from_str_radix(size_str, 16).context("malformed chunk size")?;
         data = &data[eol + 2..];
         if size == 0 {
@@ -278,11 +327,20 @@ mod tests {
     #[test]
     fn urls() {
         let u = parse_url("https://vpn.example.com").unwrap();
-        assert_eq!((u.tls, u.host, u.port, u.authority, u.base), (true, "vpn.example.com", 443, "vpn.example.com", ""));
+        assert_eq!(
+            (u.tls, u.host, u.port, u.authority, u.base),
+            (true, "vpn.example.com", 443, "vpn.example.com", "")
+        );
         let u = parse_url("http://10.0.0.1:8080/retail/").unwrap();
-        assert_eq!((u.tls, u.host, u.port, u.base), (false, "10.0.0.1", 8080, "/retail"));
+        assert_eq!(
+            (u.tls, u.host, u.port, u.base),
+            (false, "10.0.0.1", 8080, "/retail")
+        );
         let u = parse_url("http://[2001:db8::1]:9000").unwrap();
-        assert_eq!((u.host, u.port, u.authority), ("2001:db8::1", 9000, "[2001:db8::1]:9000"));
+        assert_eq!(
+            (u.host, u.port, u.authority),
+            ("2001:db8::1", 9000, "[2001:db8::1]:9000")
+        );
         assert!(parse_url("ftp://x").is_err());
         assert!(parse_url("http://:80").is_err());
     }
@@ -292,8 +350,14 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let make = || {
             let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-            let cert = rcgen::CertificateParams::new(vec!["retail".into()]).unwrap().self_signed(&key).unwrap();
-            (cert.der().clone(), rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap())
+            let cert = rcgen::CertificateParams::new(vec!["retail".into()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+            (
+                cert.der().clone(),
+                rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+            )
         };
         let (good_cert, good_key) = make();
         let (other_cert, other_key) = make();
@@ -302,7 +366,10 @@ mod tests {
         #[derive(Debug)]
         struct Fixed(Arc<rustls::sign::CertifiedKey>);
         impl rustls::server::ResolvesServerCert for Fixed {
-            fn resolve(&self, _: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            fn resolve(
+                &self,
+                _: rustls::server::ClientHello<'_>,
+            ) -> Option<Arc<rustls::sign::CertifiedKey>> {
                 Some(self.0.clone())
             }
         }
@@ -324,19 +391,37 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move {
                 if let Ok((tcp, _)) = listener.accept().await {
-                    let _ = tokio_rustls::TlsAcceptor::from(Arc::new(server)).accept(tcp).await;
+                    let _ = tokio_rustls::TlsAcceptor::from(Arc::new(server))
+                        .accept(tcp)
+                        .await;
                 }
             });
-            let target = Target { url: format!("https://{addr}"), pin: Some(pin), ..Default::default() };
+            let target = Target {
+                url: format!("https://{addr}"),
+                pin: Some(pin),
+                ..Default::default()
+            };
             let tcp = target.connect().await.unwrap();
             let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
-            tokio_rustls::TlsConnector::from(target.tls()).connect(name.to_owned(), tcp).await.is_ok()
+            tokio_rustls::TlsConnector::from(target.tls())
+                .connect(name.to_owned(), tcp)
+                .await
+                .is_ok()
         }
-        assert!(attempt(good_cert.clone(), good_key.clone_key(), pin).await, "pinned key accepted");
-        assert!(!attempt(other_cert, other_key, pin).await, "another key rejected");
+        assert!(
+            attempt(good_cert.clone(), good_key.clone_key(), pin).await,
+            "pinned key accepted"
+        );
+        assert!(
+            !attempt(other_cert, other_key, pin).await,
+            "another key rejected"
+        );
         // The pinned certificate without its private key fails CertificateVerify
         let (_, wrong_key) = make();
-        assert!(!attempt(good_cert, wrong_key, pin).await, "bad handshake signature rejected");
+        assert!(
+            !attempt(good_cert, wrong_key, pin).await,
+            "bad handshake signature rejected"
+        );
     }
 
     #[test]

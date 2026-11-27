@@ -4,19 +4,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use axum::body::Bytes;
+use futures_util::SinkExt;
 use retail_proto::Key;
 use retail_proto::api::{
     ApiError, ClientMessage, NetMap, Node, RegisterRequest, RegisterResponse, ServerMessage,
 };
 use retail_proto::relay;
-use futures_util::SinkExt;
 use tokio::sync::{mpsc, watch};
 
 use crate::db::{Db, NodeRow, RegisterError};
@@ -40,7 +40,10 @@ struct Pacer {
 
 impl Pacer {
     fn new() -> Self {
-        Pacer { due: tokio::time::Instant::now(), applied: Default::default() }
+        Pacer {
+            due: tokio::time::Instant::now(),
+            applied: Default::default(),
+        }
     }
 
     fn applied(&mut self) {
@@ -49,7 +52,11 @@ impl Pacer {
         if self.applied.len() > ENDPOINTS_BURST {
             self.applied.pop_front();
         }
-        self.due = if self.applied.len() == ENDPOINTS_BURST { self.applied[0] + ENDPOINTS_WINDOW } else { now };
+        self.due = if self.applied.len() == ENDPOINTS_BURST {
+            self.applied[0] + ENDPOINTS_WINDOW
+        } else {
+            now
+        };
     }
 }
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -97,7 +104,18 @@ fn relay_queue() -> (Inbox, Outbox) {
     let (small, small_rx) = mpsc::channel(RELAY_QUEUE);
     let (bulk, bulk_rx) = mpsc::channel(RELAY_QUEUE);
     let held = Held::default();
-    (Inbox { small, bulk, held: held.clone() }, Outbox { small: small_rx, bulk: bulk_rx, held })
+    (
+        Inbox {
+            small,
+            bulk,
+            held: held.clone(),
+        },
+        Outbox {
+            small: small_rx,
+            bulk: bulk_rx,
+            held,
+        },
+    )
 }
 
 /// Its lane and its sender, which the server wrote into it
@@ -108,7 +126,9 @@ fn share_of(frame: &[u8]) -> Option<(bool, Key)> {
 impl Inbox {
     /// Never waits: a full lane, or the sender's full share of it, drops the frame
     fn push(&self, frame: Bytes) {
-        let Some(share) = share_of(&frame) else { return };
+        let Some(share) = share_of(&frame) else {
+            return;
+        };
         let mut held = self.held.lock().unwrap();
         let n = held.entry(share).or_insert(0);
         let lane = if share.0 { &self.small } else { &self.bulk };
@@ -150,7 +170,11 @@ impl Outbox {
 
     fn try_recv(&mut self) -> Option<Bytes> {
         loop {
-            let (at, frame) = self.small.try_recv().or_else(|_| self.bulk.try_recv()).ok()?;
+            let (at, frame) = self
+                .small
+                .try_recv()
+                .or_else(|_| self.bulk.try_recv())
+                .ok()?;
             self.taken(&frame);
             if at.elapsed() <= relay::MAX_WAIT {
                 return Some(frame);
@@ -234,7 +258,9 @@ impl AppState {
             attempts.retain(|_, (_, since)| now.duration_since(*since) < Duration::from_secs(60));
         }
         // One IPv6 /64 is one source: its addresses cost nothing
-        let entry = attempts.entry(crate::net::same_network(ip)).or_insert((0, now));
+        let entry = attempts
+            .entry(crate::net::same_network(ip))
+            .or_insert((0, now));
         if now.duration_since(entry.1) >= Duration::from_secs(60) {
             *entry = (0, now);
         }
@@ -248,7 +274,10 @@ impl AppState {
 
     /// Publishes the chosen helper device's code, if it has sent one
     pub(crate) fn refresh_helper_code(&self) {
-        let code = self.db.helper_device().and_then(|id| self.helper_codes.lock().unwrap().get(&id).cloned());
+        let code = self
+            .db
+            .helper_device()
+            .and_then(|id| self.helper_codes.lock().unwrap().get(&id).cloned());
         self.helper_code.send_if_modified(|c| {
             let changed = *c != code;
             *c = code;
@@ -281,7 +310,12 @@ impl AppState {
     }
 
     pub(crate) fn offered_routes(&self, id: i64) -> Vec<Ipv4Net> {
-        self.offered_routes.lock().unwrap().get(&id).cloned().unwrap_or_default()
+        self.offered_routes
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Who routes each network: of the connected nodes offering an approved
@@ -290,9 +324,20 @@ impl AppState {
         let offered = self.offered_routes.lock().unwrap();
         let online = self.online.lock().unwrap();
         let mut owners: HashMap<Ipv4Net, i64> = HashMap::new();
-        for n in nodes.iter().filter(|n| online.contains_key(&n.id) && !n.expired(now)) {
-            for r in offered.get(&n.id).into_iter().flatten().filter(|r| n.approved_routes.contains(r)) {
-                owners.entry(*r).and_modify(|o| *o = (*o).min(n.id)).or_insert(n.id);
+        for n in nodes
+            .iter()
+            .filter(|n| online.contains_key(&n.id) && !n.expired(now))
+        {
+            for r in offered
+                .get(&n.id)
+                .into_iter()
+                .flatten()
+                .filter(|r| n.approved_routes.contains(r))
+            {
+                owners
+                    .entry(*r)
+                    .and_modify(|o| *o = (*o).min(n.id))
+                    .or_insert(n.id);
             }
         }
         owners
@@ -308,8 +353,14 @@ impl AppState {
         loop {
             tick.tick().await;
             let now = crate::db::now_unix();
-            let Ok(nodes) = self.db.all_nodes().await else { continue };
-            let now_expired: std::collections::HashSet<i64> = nodes.iter().filter(|n| n.expired(now)).map(|n| n.id).collect();
+            let Ok(nodes) = self.db.all_nodes().await else {
+                continue;
+            };
+            let now_expired: std::collections::HashSet<i64> = nodes
+                .iter()
+                .filter(|n| n.expired(now))
+                .map(|n| n.id)
+                .collect();
             let mut changed = now_expired != expired;
             for id in now_expired.difference(&expired) {
                 tracing::info!(node_id = id, "device key expired");
@@ -360,7 +411,11 @@ impl AppState {
     async fn online_changed(&self, id: i64, delta: isize) {
         if self.set_online(id, delta) {
             let now = crate::db::now_unix();
-            let live = self.db.all_nodes().await.is_ok_and(|n| n.iter().any(|n| n.id == id && !n.expired(now)));
+            let live = self
+                .db
+                .all_nodes()
+                .await
+                .is_ok_and(|n| n.iter().any(|n| n.id == id && !n.expired(now)));
             if live {
                 self.notify();
             }
@@ -368,11 +423,21 @@ impl AppState {
     }
 
     fn pace_due(&self, id: i64, which: usize) -> tokio::time::Instant {
-        self.pacers.lock().unwrap().entry(id).or_insert_with(|| [Pacer::new(), Pacer::new()])[which].due
+        self.pacers
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_insert_with(|| [Pacer::new(), Pacer::new()])[which]
+            .due
     }
 
     fn paced(&self, id: i64, which: usize) {
-        self.pacers.lock().unwrap().entry(id).or_insert_with(|| [Pacer::new(), Pacer::new()])[which].applied();
+        self.pacers
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_insert_with(|| [Pacer::new(), Pacer::new()])[which]
+            .applied();
     }
 
     /// Never waits. A full or missing inbox drops the frame.
@@ -380,7 +445,14 @@ impl AppState {
         let Some((to, _)) = relay::parse(&frame) else {
             return;
         };
-        let Some(inbox) = self.relays.lock().unwrap().by_key.get(&to).map(|(_, inbox)| inbox.clone()) else {
+        let Some(inbox) = self
+            .relays
+            .lock()
+            .unwrap()
+            .by_key
+            .get(&to)
+            .map(|(_, inbox)| inbox.clone())
+        else {
             return;
         };
         let mut frame = Vec::from(frame);
@@ -396,11 +468,20 @@ impl AppState {
         let online = self.online.lock().unwrap().clone();
         let exits = self.exit_nodes.lock().unwrap().clone();
         let acl = self.db.acl();
-        let Some(me) = nodes.iter().find(|n| n.id == node_id) else { return Ok(None) };
+        let Some(me) = nodes.iter().find(|n| n.id == node_id) else {
+            return Ok(None);
+        };
         let expired = me.expired(now);
-        let viewer = crate::acl::Member { id: me.id, tags: &me.tags };
+        let viewer = crate::acl::Member {
+            id: me.id,
+            tags: &me.tags,
+        };
         let routes_of = |id: i64| {
-            let mut r: Vec<Ipv4Net> = owners.iter().filter(|(_, o)| **o == id).map(|(r, _)| *r).collect();
+            let mut r: Vec<Ipv4Net> = owners
+                .iter()
+                .filter(|(_, o)| **o == id)
+                .map(|(r, _)| *r)
+                .collect();
             r.sort();
             r
         };
@@ -424,7 +505,14 @@ impl AppState {
             .iter()
             .filter(|n| n.id != node_id && !expired && !n.expired(now))
             .filter_map(|n| {
-                let accept = crate::acl::view(acl.as_ref(), &viewer, &crate::acl::Member { id: n.id, tags: &n.tags })?;
+                let accept = crate::acl::view(
+                    acl.as_ref(),
+                    &viewer,
+                    &crate::acl::Member {
+                        id: n.id,
+                        tags: &n.tags,
+                    },
+                )?;
                 Some(to_node(n, accept))
             })
             .collect();
@@ -448,7 +536,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/poll", get(poll))
         .route("/api/v1/tunnel", get(crate::tunnel::websocket))
         .route("/api/v1/tunnel/poll", post(crate::tunnel::poll_open))
-        .route("/api/v1/tunnel/poll/{id}", get(crate::tunnel::poll_down).post(crate::tunnel::poll_up))
+        .route(
+            "/api/v1/tunnel/poll/{id}",
+            get(crate::tunnel::poll_down).post(crate::tunnel::poll_up),
+        )
         .with_state(state)
 }
 
@@ -464,7 +555,14 @@ fn insecure(peer: &crate::tls::PeerAddr) -> Option<Response> {
 }
 
 fn api_error(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(ApiError { error: msg.into(), reason: None })).into_response()
+    (
+        status,
+        Json(ApiError {
+            error: msg.into(),
+            reason: None,
+        }),
+    )
+        .into_response()
 }
 
 async fn register(
@@ -477,10 +575,16 @@ async fn register(
     }
     // Parsed here so the check above comes first
     let Ok(req) = serde_json::from_slice::<RegisterRequest>(&body) else {
-        return api_error(StatusCode::UNPROCESSABLE_ENTITY, "malformed registration request");
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "malformed registration request",
+        );
     };
     if !state.register_allowed(peer.0.ip()) {
-        return api_error(StatusCode::TOO_MANY_REQUESTS, "too many attempts; try again in a minute");
+        return api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts; try again in a minute",
+        );
     }
     match state.db.register(&req).await {
         Ok(resp) => {
@@ -488,12 +592,14 @@ async fn register(
             state.notify();
             Json::<RegisterResponse>(resp).into_response()
         }
-        Err(RegisterError::InvalidAuthKey) => {
-            api_error(StatusCode::UNAUTHORIZED, "invalid, used or expired auth key")
-        }
-        Err(RegisterError::KeyInUse) => {
-            api_error(StatusCode::CONFLICT, "this device key is registered already; only that device can register it again")
-        }
+        Err(RegisterError::InvalidAuthKey) => api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid, used or expired auth key",
+        ),
+        Err(RegisterError::KeyInUse) => api_error(
+            StatusCode::CONFLICT,
+            "this device key is registered already; only that device can register it again",
+        ),
         Err(RegisterError::AddressSpaceExhausted) => {
             api_error(StatusCode::INSUFFICIENT_STORAGE, "no free addresses left")
         }
@@ -552,11 +658,22 @@ async fn poll(
 }
 
 async fn serve_node(state: &AppState, node_id: i64, socket: WebSocket) -> Result<()> {
-    let key = state.db.all_nodes().await?.into_iter().find(|n| n.id == node_id).map(|n| n.node_key);
+    let key = state
+        .db
+        .all_nodes()
+        .await?
+        .into_iter()
+        .find(|n| n.id == node_id)
+        .map(|n| n.node_key);
     let Some(key) = key else { return Ok(()) };
     let conn = state.next_conn.fetch_add(1, Ordering::Relaxed);
     let (inbox, outbox) = relay_queue();
-    state.relays.lock().unwrap().by_key.insert(key, (conn, inbox));
+    state
+        .relays
+        .lock()
+        .unwrap()
+        .by_key
+        .insert(key, (conn, inbox));
     let result = serve_connection(state, node_id, key, socket, outbox).await;
     let mut relays = state.relays.lock().unwrap();
     if relays.by_key.get(&key).is_some_and(|(c, _)| *c == conn) {
@@ -565,7 +682,13 @@ async fn serve_node(state: &AppState, node_id: i64, socket: WebSocket) -> Result
         state.exit_nodes.lock().unwrap().remove(&node_id);
         state.offered_routes.lock().unwrap().remove(&node_id);
         // So does a helper node on it
-        if state.helper_codes.lock().unwrap().remove(&node_id).is_some() {
+        if state
+            .helper_codes
+            .lock()
+            .unwrap()
+            .remove(&node_id)
+            .is_some()
+        {
             state.refresh_helper_code();
         }
     }
@@ -593,7 +716,10 @@ async fn serve_connection(
     changes.mark_changed();
 
     loop {
-        let (endpoints_due, hostinfo_due) = (state.pace_due(node_id, ENDPOINTS), state.pace_due(node_id, HOSTINFO));
+        let (endpoints_due, hostinfo_due) = (
+            state.pace_due(node_id, ENDPOINTS),
+            state.pace_due(node_id, HOSTINFO),
+        );
         tokio::select! {
             biased;
             changed = changes.changed() => {
@@ -748,7 +874,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_connection_shares_the_node_pace() {
-        let path = std::env::temp_dir().join(format!("retail-pace-{}.json", rand::RngCore::next_u64(&mut rand::rngs::OsRng)));
+        let path = std::env::temp_dir().join(format!(
+            "retail-pace-{}.json",
+            rand::RngCore::next_u64(&mut rand::rngs::OsRng)
+        ));
         let state = AppState::new(crate::db::Db::open(&path).await.unwrap(), Vec::new());
         assert!(state.set_online(7, 1));
         assert!(!state.set_online(7, 1), "a second connection is no news");
@@ -758,7 +887,10 @@ mod tests {
             assert!(state.pace_due(7, 1) <= tokio::time::Instant::now());
             state.paced(7, 1);
         }
-        assert!(state.pace_due(7, 1) > tokio::time::Instant::now(), "every connection of node 7 waits now");
+        assert!(
+            state.pace_due(7, 1) > tokio::time::Instant::now(),
+            "every connection of node 7 waits now"
+        );
         assert!(state.pace_due(7, 0) <= tokio::time::Instant::now());
         let _ = std::fs::remove_file(path);
     }

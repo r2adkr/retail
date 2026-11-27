@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 pub const MAGIC: &[u8; 16] = b"RETAIL-PACKAGE-1";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     /// Invite code the installed device joins with; empty in the official
@@ -80,13 +79,20 @@ pub fn read_manifest<R: std::io::Read + std::io::Seek>(file: &mut R) -> Option<M
     file.read_exact(&mut json).ok()?;
     let m: Manifest = serde_json::from_slice(&json).ok()?;
     let end = total - tail_len - len;
-    let in_bounds = m.base_len <= end && m.files.iter().all(|f| f.offset.checked_add(f.len).is_some_and(|e| e <= end));
+    let in_bounds = m.base_len <= end
+        && m.files
+            .iter()
+            .all(|f| f.offset.checked_add(f.len).is_some_and(|e| e <= end));
     in_bounds.then_some(m)
 }
 
 /// The tray app's name, which the package starts as: `.exe` for Windows packages
 pub fn tray_name(m: &Manifest) -> &'static str {
-    if m.files.iter().any(|f| f.name.ends_with(".exe")) { "retail-tray.exe" } else { "retail-tray" }
+    if m.files.iter().any(|f| f.name.ends_with(".exe")) {
+        "retail-tray.exe"
+    } else {
+        "retail-tray"
+    }
 }
 
 /// A package from `start` to `start + len` of a larger file (the one in
@@ -100,7 +106,12 @@ pub struct Window<R> {
 
 impl<R: Seek> Window<R> {
     pub fn new(inner: R, start: u64, len: u64) -> Self {
-        Window { inner, start, len, pos: 0 }
+        Window {
+            inner,
+            start,
+            len,
+            pos: 0,
+        }
     }
 }
 
@@ -125,7 +136,9 @@ impl<R: Seek> Seek for Window<R> {
             SeekFrom::End(d) => self.len.checked_add_signed(d),
             SeekFrom::Current(d) => self.pos.checked_add_signed(d),
         };
-        self.pos = pos.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start"))?;
+        self.pos = pos.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start")
+        })?;
         Ok(self.pos)
     }
 }
@@ -150,7 +163,10 @@ pub fn deb_entry<R: Read + Seek>(r: &mut R, path: &str) -> Option<(u64, u64)> {
         r.seek(SeekFrom::Start(at)).ok()?;
         let mut h = [0u8; 60];
         r.read_exact(&mut h).ok()?;
-        let name = std::str::from_utf8(&h[..16]).ok()?.trim_end().trim_end_matches('/');
+        let name = std::str::from_utf8(&h[..16])
+            .ok()?
+            .trim_end()
+            .trim_end_matches('/');
         let size: u64 = std::str::from_utf8(&h[48..58]).ok()?.trim().parse().ok()?;
         let body = at + 60;
         if body.checked_add(size)? > total {
@@ -167,10 +183,17 @@ pub fn deb_entry<R: Read + Seek>(r: &mut R, path: &str) -> Option<(u64, u64)> {
 /// A file in an uncompressed tar from `start` to `start + len`
 fn tar_entry<R: Read + Seek>(r: &mut R, start: u64, len: u64, path: &str) -> Option<(u64, u64)> {
     let octal = |b: &[u8]| -> Option<u64> {
-        let s = std::str::from_utf8(b).ok()?.trim_matches(|c: char| c == '\0' || c == ' ');
-        if s.is_empty() { Some(0) } else { u64::from_str_radix(s, 8).ok() }
+        let s = std::str::from_utf8(b)
+            .ok()?
+            .trim_matches(|c: char| c == '\0' || c == ' ');
+        if s.is_empty() {
+            Some(0)
+        } else {
+            u64::from_str_radix(s, 8).ok()
+        }
     };
-    let text = |b: &[u8]| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or(&[])).into_owned();
+    let text =
+        |b: &[u8]| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or(&[])).into_owned();
     let mut at = start;
     while at + 512 <= start + len {
         r.seek(SeekFrom::Start(at)).ok()?;
@@ -215,13 +238,21 @@ pub fn dmg_prefix<R: Read + Seek>(r: &mut R) -> Option<u64> {
 
 /// Writes the programs of the package in `r` into `dir` under their own
 /// names, those `want` picks, each replacing an older one atomically
-pub fn extract<R: Read + Seek>(r: &mut R, m: &Manifest, dir: &Path, want: impl Fn(&str) -> bool) -> std::io::Result<Vec<String>> {
+pub fn extract<R: Read + Seek>(
+    r: &mut R,
+    m: &Manifest,
+    dir: &Path,
+    want: impl Fn(&str) -> bool,
+) -> std::io::Result<Vec<String>> {
     let mut parts: Vec<(String, u64, u64)> = vec![(tray_name(m).to_string(), 0, m.base_len)];
     parts.extend(m.files.iter().map(|f| (f.name.clone(), f.offset, f.len)));
     let mut written = Vec::new();
     for (name, offset, len) in parts {
         if !safe_name(&name) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unexpected file name {name}")));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unexpected file name {name}"),
+            ));
         }
         if !want(&name) {
             continue;
@@ -231,7 +262,10 @@ pub fn extract<R: Read + Seek>(r: &mut R, m: &Manifest, dir: &Path, want: impl F
         let mut out = std::fs::File::create(&tmp)?;
         let copied = std::io::copy(&mut r.by_ref().take(len), &mut out)?;
         if copied != len {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("{name} is cut short")));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("{name} is cut short"),
+            ));
         }
         drop(out);
         #[cfg(unix)]
@@ -247,7 +281,12 @@ pub fn extract<R: Read + Seek>(r: &mut R, m: &Manifest, dir: &Path, want: impl F
 
 /// File names the installer accepts, so a manifest cannot write elsewhere
 pub fn safe_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) && !name.starts_with('.')
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !name.starts_with('.')
 }
 
 #[cfg(test)]
@@ -260,22 +299,42 @@ mod tests {
         let base_len = bytes.len() as u64;
         let mut files = Vec::new();
         for (name, data) in [("retaild.exe", &b"daemon"[..]), ("retail.exe", &b"cli"[..])] {
-            files.push(PackedFile { name: name.into(), offset: bytes.len() as u64, len: data.len() as u64 });
+            files.push(PackedFile {
+                name: name.into(),
+                offset: bytes.len() as u64,
+                len: data.len() as u64,
+            });
             bytes.extend_from_slice(data);
         }
-        let m = Manifest { invite: "retail1.abc".into(), network: "home".into(), files, base_len };
+        let m = Manifest {
+            invite: "retail1.abc".into(),
+            network: "home".into(),
+            files,
+            base_len,
+        };
         bytes.extend_from_slice(&trailer(&m));
         let got = read_manifest(&mut std::io::Cursor::new(&bytes)).unwrap();
         assert_eq!(got, m);
         let f = &got.files[0];
-        assert_eq!(&bytes[f.offset as usize..(f.offset + f.len) as usize], b"daemon");
+        assert_eq!(
+            &bytes[f.offset as usize..(f.offset + f.len) as usize],
+            b"daemon"
+        );
         assert!(read_manifest(&mut std::io::Cursor::new(b"plain executable")).is_none());
         // A manifest pointing past its own data is refused
-        let bad = Manifest { base_len: 1 << 40, ..m };
+        let bad = Manifest {
+            base_len: 1 << 40,
+            ..m
+        };
         let mut evil = b"x".to_vec();
         evil.extend_from_slice(&trailer(&bad));
         assert!(read_manifest(&mut std::io::Cursor::new(&evil)).is_none());
-        assert!(safe_name("wintun.dll") && !safe_name("../evil") && !safe_name("a/b") && !safe_name(".x"));
+        assert!(
+            safe_name("wintun.dll")
+                && !safe_name("../evil")
+                && !safe_name("a/b")
+                && !safe_name(".x")
+        );
     }
 
     /// A package in front of a disk image, as macOS gets it: found through
@@ -283,9 +342,25 @@ mod tests {
     #[test]
     fn installer_in_front_of_a_dmg() {
         let mut pkg = b"TRAY".to_vec();
-        let files = vec![PackedFile { name: "retaild".into(), offset: 4, len: 6 }, PackedFile { name: "retail".into(), offset: 10, len: 3 }];
+        let files = vec![
+            PackedFile {
+                name: "retaild".into(),
+                offset: 4,
+                len: 6,
+            },
+            PackedFile {
+                name: "retail".into(),
+                offset: 10,
+                len: 3,
+            },
+        ];
         pkg.extend_from_slice(b"daemoncli");
-        let m = Manifest { invite: String::new(), network: String::new(), files, base_len: 4 };
+        let m = Manifest {
+            invite: String::new(),
+            network: String::new(),
+            files,
+            base_len: 4,
+        };
         pkg.extend_from_slice(&trailer(&m));
         // Image data, then its record pointing at where the data now starts
         let mut file = pkg.clone();
@@ -308,7 +383,10 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("retail-tray")).unwrap(), b"TRAY");
         assert_eq!(std::fs::read(dir.join("retaild")).unwrap(), b"daemon");
         let _ = std::fs::remove_dir_all(dir);
-        assert!(dmg_prefix(&mut std::io::Cursor::new(&pkg)).is_none(), "not an image");
+        assert!(
+            dmg_prefix(&mut std::io::Cursor::new(&pkg)).is_none(),
+            "not an image"
+        );
     }
 
     /// A Debian package made by `scripts/bundle.py --deb` (given in
@@ -316,21 +394,32 @@ mod tests {
     /// readable installer where the install script looks
     #[test]
     fn bundle_py_deb() {
-        let Some(path) = std::env::var_os("RETAIL_BUNDLE_DEB") else { return };
+        let Some(path) = std::env::var_os("RETAIL_BUNDLE_DEB") else {
+            return;
+        };
         let mut f = std::fs::File::open(path).unwrap();
-        let (start, len) = deb_entry(&mut f, DEB_INSTALLER).expect("the installer in the package's data");
+        let (start, len) =
+            deb_entry(&mut f, DEB_INSTALLER).expect("the installer in the package's data");
         let m = read_manifest(&mut Window::new(f, start, len)).expect("it is a package");
-        assert!(m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"), "{m:?}");
+        assert!(
+            m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"),
+            "{m:?}"
+        );
     }
 
     /// A disk image made by `scripts/bundle.py --dmg` (given in
     /// RETAIL_BUNDLE_DMG, as the release workflow does) carries a readable installer
     #[test]
     fn bundle_py_dmg() {
-        let Some(path) = std::env::var_os("RETAIL_BUNDLE_DMG") else { return };
+        let Some(path) = std::env::var_os("RETAIL_BUNDLE_DMG") else {
+            return;
+        };
         let mut f = std::fs::File::open(path).unwrap();
         let len = dmg_prefix(&mut f).expect("an image with a package in front");
         let m = read_manifest(&mut Window::new(f, 0, len)).expect("it is a package");
-        assert!(m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"), "{m:?}");
+        assert!(
+            m.invite.is_empty() && m.files.iter().any(|f| f.name == "retaild"),
+            "{m:?}"
+        );
     }
 }

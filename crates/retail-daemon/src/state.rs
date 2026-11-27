@@ -117,7 +117,11 @@ impl Persisted {
     /// Leaves no current registration (and no key), keeping settings and
     /// the saved servers
     pub fn clear_current(&mut self) {
-        let keep = Persisted { prefs: self.prefs.clone(), saved: std::mem::take(&mut self.saved), ..Default::default() };
+        let keep = Persisted {
+            prefs: self.prefs.clone(),
+            saved: std::mem::take(&mut self.saved),
+            ..Default::default()
+        };
         *self = keep;
         self.prefs.exit_node = None;
     }
@@ -125,9 +129,15 @@ impl Persisted {
     pub fn target(&self) -> Option<crate::http::Target> {
         Some(crate::http::Target {
             url: self.server.clone()?,
-            pin: self.server_pin.as_deref().and_then(retail_proto::invite::decode_pin),
+            pin: self
+                .server_pin
+                .as_deref()
+                .and_then(retail_proto::invite::decode_pin),
             alts: self.server_alts.clone(),
-            reality: self.server_reality.as_ref().and_then(crate::reality::Params::from_invite),
+            reality: self
+                .server_reality
+                .as_ref()
+                .and_then(crate::reality::Params::from_invite),
             fronts: self.server_fronts.clone(),
         })
     }
@@ -158,7 +168,9 @@ impl Persisted {
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o600);
             }
-            let mut f = opts.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+            let mut f = opts
+                .open(&tmp)
+                .with_context(|| format!("writing {}", tmp.display()))?;
             f.write_all(&data)?;
             f.sync_all()?;
         }
@@ -205,12 +217,21 @@ pub fn take_over(dir: &Path) {
     use std::os::windows::fs::MetadataExt;
     const REPARSE_POINT: u32 = 0x400;
     if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_attributes() & REPARSE_POINT != 0) {
-        tracing::warn!("{} was a link to another folder; making it a folder", dir.display());
+        tracing::warn!(
+            "{} was a link to another folder; making it a folder",
+            dir.display()
+        );
         let _ = std::fs::remove_dir(dir).or_else(|_| std::fs::remove_file(dir));
         let _ = std::fs::create_dir(dir);
     }
-    for args in [&["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"][..], &["/reset", "/T", "/C", "/Q"][..]] {
-        let _ = std::process::Command::new("icacls").arg(dir).args(args).output();
+    for args in [
+        &["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"][..],
+        &["/reset", "/T", "/C", "/Q"][..],
+    ] {
+        let _ = std::process::Command::new("icacls")
+            .arg(dir)
+            .args(args)
+            .output();
     }
 }
 
@@ -238,7 +259,14 @@ pub fn secure_dir(dir: &Path) {
         // (the daemon itself included, after a restart)
         let ok = std::process::Command::new("icacls")
             .arg(dir)
-            .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/Q"])
+            .args([
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:(OI)(CI)F",
+                "/grant:r",
+                "*S-1-5-32-544:(OI)(CI)F",
+                "/Q",
+            ])
             .output()
             .is_ok_and(|o| o.status.success());
         // Also the account this runs as, so a daemon started by an administrator
@@ -246,11 +274,17 @@ pub fn secure_dir(dir: &Path) {
         if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME"))
             && !user.ends_with('$')
         {
-            let _ = std::process::Command::new("icacls").arg(dir).args(["/grant", &format!("{domain}\\{user}:(OI)(CI)F"), "/Q"]).output();
+            let _ = std::process::Command::new("icacls")
+                .arg(dir)
+                .args(["/grant", &format!("{domain}\\{user}:(OI)(CI)F"), "/Q"])
+                .output();
         }
         // Everything in it takes the folder's entries, which also mends files
         // an earlier version left with none
-        let _ = std::process::Command::new("icacls").arg(dir.join("*")).args(["/reset", "/T", "/C", "/Q"]).output();
+        let _ = std::process::Command::new("icacls")
+            .arg(dir.join("*"))
+            .args(["/reset", "/T", "/C", "/Q"])
+            .output();
         if ok {
             done.push(dir.to_path_buf());
         } else {
@@ -292,7 +326,10 @@ mod tests {
         let loaded = Persisted::load(&path).unwrap();
         assert_eq!(loaded.server, p.server);
         assert_eq!(loaded.ip, p.ip);
-        assert_eq!(loaded.public_key(), Some(Key(PublicKey::from(&secret).to_bytes())));
+        assert_eq!(
+            loaded.public_key(),
+            Some(Key(PublicKey::from(&secret).to_bytes()))
+        );
 
         let mut again = loaded.clone();
         again.ensure_private_key();
@@ -319,10 +356,18 @@ mod tests {
         assert_eq!(p.saved.len(), 2);
         assert_ne!(p.private_key, key_a);
 
-        let a = p.saved.iter().find(|s| s.server == "https://a.example").unwrap().clone();
+        let a = p
+            .saved
+            .iter()
+            .find(|s| s.server == "https://a.example")
+            .unwrap()
+            .clone();
         p.remember_current();
         p.load_profile(&a);
-        assert_eq!((p.token.as_deref(), p.private_key.clone(), p.ip), (Some("ta"), key_a, Some(Ipv4Addr::new(100, 64, 0, 2))));
+        assert_eq!(
+            (p.token.as_deref(), p.private_key.clone(), p.ip),
+            (Some("ta"), key_a, Some(Ipv4Addr::new(100, 64, 0, 2)))
+        );
         // Remembering again replaces rather than duplicates
         p.remember_current();
         assert_eq!(p.saved.len(), 2);

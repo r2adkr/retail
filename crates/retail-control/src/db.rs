@@ -185,11 +185,18 @@ pub fn now_unix() -> i64 {
 /// it for tests.
 pub fn day_secs() -> i64 {
     static DAY: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *DAY.get_or_init(|| std::env::var("RETAIL_DAY_SECONDS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(86_400))
+    *DAY.get_or_init(|| {
+        std::env::var("RETAIL_DAY_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(86_400)
+    })
 }
 
 fn expiry(days: Option<u32>, exempt: bool, now: i64) -> Option<i64> {
-    days.filter(|_| !exempt).map(|d| now.saturating_add(i64::from(d) * day_secs()))
+    days.filter(|_| !exempt)
+        .map(|d| now.saturating_add(i64::from(d) * day_secs()))
 }
 
 /// Checks a database file, for restoring a backup
@@ -235,10 +242,13 @@ impl Store {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
         f.write_all(&bytes)?;
         f.sync_all()?;
-        std::fs::rename(&tmp, &self.path).with_context(|| format!("replacing {}", self.path.display()))?;
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("replacing {}", self.path.display()))?;
         Ok(())
     }
 }
@@ -246,7 +256,8 @@ impl Store {
 impl Db {
     pub async fn open(path: &Path) -> Result<Self> {
         let data = match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?,
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Data::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
@@ -259,8 +270,21 @@ impl Db {
                 data.nodes[i].label = unique_label(&data.nodes, &base, data.nodes[i].id);
             }
         }
-        data.next_id = data.next_id.max(data.nodes.iter().map(|n| n.id).chain(data.keys.iter().map(|k| k.id)).max().unwrap_or(0));
-        Ok(Db { inner: Arc::new(Mutex::new(Store { path: path.to_path_buf(), data, started_at: now_unix() })) })
+        data.next_id = data.next_id.max(
+            data.nodes
+                .iter()
+                .map(|n| n.id)
+                .chain(data.keys.iter().map(|k| k.id))
+                .max()
+                .unwrap_or(0),
+        );
+        Ok(Db {
+            inner: Arc::new(Mutex::new(Store {
+                path: path.to_path_buf(),
+                data,
+                started_at: now_unix(),
+            })),
+        })
     }
 
     /// Only the hash of the returned key is stored
@@ -278,7 +302,9 @@ impl Db {
         let now = now_unix();
         let mut s = self.inner.lock().unwrap();
         // Prune expired keys, except used single-use ones within a week of expiry
-        s.data.keys.retain(|k| k.expires_at > now || (k.used && !k.reusable && k.expires_at > now - 7 * 86400));
+        s.data.keys.retain(|k| {
+            k.expires_at > now || (k.used && !k.reusable && k.expires_at > now - 7 * 86400)
+        });
         let id = s.next_id();
         s.data.keys.push(KeyRec {
             id,
@@ -324,14 +350,23 @@ impl Db {
     pub async fn named_secret(&self, id: i64) -> Result<Option<String>> {
         let now = now_unix();
         let s = self.inner.lock().unwrap();
-        Ok(s.data.keys.iter().find(|k| k.id == id && k.expires_at > now).and_then(|k| k.secret.clone()))
+        Ok(s.data
+            .keys
+            .iter()
+            .find(|k| k.id == id && k.expires_at > now)
+            .and_then(|k| k.secret.clone()))
     }
 
     pub async fn register(&self, req: &RegisterRequest) -> Result<RegisterResponse, RegisterError> {
         let now = now_unix();
         let mut s = self.inner.lock().unwrap();
         let key_hash = hash_secret(req.auth_key.trim());
-        if !s.data.keys.iter().any(|k| k.key_hash == key_hash && k.expires_at > now && (k.reusable || !k.used)) {
+        if !s
+            .data
+            .keys
+            .iter()
+            .any(|k| k.key_hash == key_hash && k.expires_at > now && (k.reusable || !k.used))
+        {
             return Err(RegisterError::InvalidAuthKey);
         }
         // A key everyone can read in their netmap is no proof: re-registering
@@ -361,7 +396,11 @@ impl Db {
             Some(i) => {
                 let id = s.data.nodes[i].id;
                 // A new name gets a free label; it never takes one in use
-                let label = if s.data.nodes[i].hostname == hostname { s.data.nodes[i].label.clone() } else { unique_label(&s.data.nodes, &hostname, id) };
+                let label = if s.data.nodes[i].hostname == hostname {
+                    s.data.nodes[i].label.clone()
+                } else {
+                    unique_label(&s.data.nodes, &hostname, id)
+                };
                 let n = &mut s.data.nodes[i];
                 n.token_hash = token_hash;
                 n.hostname = hostname;
@@ -400,7 +439,12 @@ impl Db {
             }
         };
         s.save().map_err(RegisterError::Internal)?;
-        Ok(RegisterResponse { node_id, ip, prefix_len: MESH_PREFIX_LEN, token })
+        Ok(RegisterResponse {
+            node_id,
+            ip,
+            prefix_len: MESH_PREFIX_LEN,
+            token,
+        })
     }
 
     pub async fn list_preauth(&self) -> Result<Vec<PreauthRow>> {
@@ -437,7 +481,11 @@ impl Db {
     pub async fn node_id_by_token(&self, token: &str) -> Result<Option<i64>> {
         let hash = hash_secret(token);
         let s = self.inner.lock().unwrap();
-        Ok(s.data.nodes.iter().find(|n| n.token_hash == hash).map(|n| n.id))
+        Ok(s.data
+            .nodes
+            .iter()
+            .find(|n| n.token_hash == hash)
+            .map(|n| n.id))
     }
 
     pub async fn all_nodes(&self) -> Result<Vec<NodeRow>> {
@@ -457,7 +505,9 @@ impl Db {
                 tags: n.tags.clone(),
                 dns_name: format!("{}.{}", n.label, retail_proto::MAGIC_DNS_DOMAIN),
                 expires_at: n.expires_at,
-                invite_id: n.invite_id.filter(|id| s.data.keys.iter().any(|k| k.id == *id)),
+                invite_id: n
+                    .invite_id
+                    .filter(|id| s.data.keys.iter().any(|k| k.id == *id)),
                 approved_routes: n.routes.clone(),
                 lan: n.lan.clone(),
             })
@@ -469,7 +519,9 @@ impl Db {
     /// Returns whether the stored endpoints changed
     pub async fn set_endpoints(&self, id: i64, endpoints: &[SocketAddr]) -> Result<bool> {
         let mut s = self.inner.lock().unwrap();
-        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else {
+            return Ok(false);
+        };
         n.last_seen = Some(now_unix());
         if n.endpoints == endpoints {
             return Ok(false);
@@ -503,7 +555,11 @@ impl Db {
 
     /// A new key lifetime starts now for every device it applies to, so
     /// turning it on never cuts off devices that joined long ago
-    pub fn set_expiry_settings(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {
+    pub fn set_expiry_settings(
+        &self,
+        key_days: Option<u32>,
+        inactive_days: Option<u32>,
+    ) -> Result<()> {
         let check = |d: Option<u32>| d.is_none_or(|d| (1..=3650).contains(&d));
         if !check(key_days) || !check(inactive_days) {
             anyhow::bail!("days are 1 to 3650");
@@ -514,7 +570,12 @@ impl Db {
             s.data.key_expiry_days = key_days;
             // Keys that expired stay expired until renewed: a new setting
             // must not bring back a device that was cut off
-            for n in s.data.nodes.iter_mut().filter(|n| n.expires_at.is_none_or(|t| t > now)) {
+            for n in s
+                .data
+                .nodes
+                .iter_mut()
+                .filter(|n| n.expires_at.is_none_or(|t| t > now))
+            {
                 n.expires_at = expiry(key_days, n.exempt(), now);
             }
         }
@@ -528,7 +589,9 @@ impl Db {
         let now = now_unix();
         let mut s = self.inner.lock().unwrap();
         let policy = s.data.key_expiry_days;
-        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else {
+            return Ok(false);
+        };
         n.no_expiry = never;
         n.expires_at = expiry(policy, n.exempt(), now);
         s.save()?;
@@ -540,7 +603,11 @@ impl Db {
     /// earlier database may belong to someone else now
     pub fn keep_forever(&self, id: i64, key: &Key) -> Result<()> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id && n.node_key == *key)
+        if let Some(n) = s
+            .data
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id && n.node_key == *key)
             && !n.no_expiry
         {
             n.no_expiry = true;
@@ -553,10 +620,17 @@ impl Db {
     /// The networks a device may route. `false` if there is no such device.
     /// Returns whether it changed
     pub fn set_lan(&self, id: i64, lan: &[retail_proto::api::LanPort]) -> Result<bool> {
-        let mut lan: Vec<_> = lan.iter().copied().filter(retail_proto::api::LanPort::valid).take(retail_proto::api::LanPort::MAX).collect();
+        let mut lan: Vec<_> = lan
+            .iter()
+            .copied()
+            .filter(retail_proto::api::LanPort::valid)
+            .take(retail_proto::api::LanPort::MAX)
+            .collect();
         lan.sort_by_key(|p| (p.addr, p.mac));
         let mut s = self.inner.lock().unwrap();
-        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else {
+            return Ok(false);
+        };
         if n.lan == lan {
             return Ok(false);
         }
@@ -576,7 +650,9 @@ impl Db {
         routes.sort();
         routes.dedup();
         let mut s = self.inner.lock().unwrap();
-        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else {
+            return Ok(false);
+        };
         n.routes = routes;
         s.save()?;
         Ok(true)
@@ -588,14 +664,18 @@ impl Db {
     pub fn remove_inactive(&self, online: &dyn Fn(i64) -> bool) -> Result<Vec<i64>> {
         let now = now_unix();
         let mut s = self.inner.lock().unwrap();
-        let Some(days) = s.data.remove_inactive_days else { return Ok(Vec::new()) };
+        let Some(days) = s.data.remove_inactive_days else {
+            return Ok(Vec::new());
+        };
         let cutoff = now - i64::from(days) * day_secs();
         let started = s.started_at;
         let stale: Vec<i64> = s
             .data
             .nodes
             .iter()
-            .filter(|n| !n.exempt() && !online(n.id) && n.last_seen.is_some_and(|t| t.max(started) < cutoff))
+            .filter(|n| {
+                !n.exempt() && !online(n.id) && n.last_seen.is_some_and(|t| t.max(started) < cutoff)
+            })
             .map(|n| n.id)
             .collect();
         if !stale.is_empty() {
@@ -631,14 +711,20 @@ impl Db {
 
     /// `false` if there is no such device
     pub fn set_tags(&self, id: i64, tags: &[String]) -> Result<bool> {
-        let mut tags: Vec<String> = tags.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
+        let mut tags: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
         for t in &tags {
             retail_proto::acl::check_tag(t).map_err(anyhow::Error::msg)?;
         }
         tags.sort();
         tags.dedup();
         let mut s = self.inner.lock().unwrap();
-        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else {
+            return Ok(false);
+        };
         n.tags = tags;
         s.save()?;
         Ok(true)
@@ -677,7 +763,12 @@ impl Db {
     /// With `revoke_invite`, the invite it joined with goes too
     pub async fn delete_node(&self, id: i64, revoke_invite: bool) -> Result<bool> {
         let mut s = self.inner.lock().unwrap();
-        let invite = s.data.nodes.iter().find(|n| n.id == id).and_then(|n| n.invite_id);
+        let invite = s
+            .data
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| n.invite_id);
         if revoke_invite && let Some(k) = invite {
             s.data.keys.retain(|x| x.id != k);
         }
@@ -731,7 +822,12 @@ fn unique_label(nodes: &[NodeRec], base: &str, id: i64) -> String {
 
 /// Shown to every member, so short and plain
 fn sanitize_os(os: &str) -> String {
-    let s: String = os.trim().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(16).collect();
+    let s: String = os
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(16)
+        .collect();
     if s.is_empty() { "unknown".into() } else { s }
 }
 
@@ -740,7 +836,13 @@ fn sanitize_hostname(name: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .take(63)
         .collect();
     let s = s.trim_matches('-').to_string();
@@ -769,29 +871,65 @@ mod tests {
     #[tokio::test]
     async fn names_are_unique_and_kept() {
         let (db, path) = temp_db().await;
-        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
-        let host = |name: &str, byte: u8| RegisterRequest { hostname: name.into(), ..req(&key, byte) };
+        let key = db
+            .create_preauth(true, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let host = |name: &str, byte: u8| RegisterRequest {
+            hostname: name.into(),
+            ..req(&key, byte)
+        };
         let a = db.register(&host("nas", 1)).await.unwrap();
         db.register(&host("nas", 2)).await.unwrap();
         let c = db.register(&host("laptop", 3)).await.unwrap();
         let names = |db: &Db| {
             let db = db.clone();
-            async move { db.all_nodes().await.unwrap().into_iter().map(|n| n.dns_name).collect::<Vec<_>>() }
+            async move {
+                db.all_nodes()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|n| n.dns_name)
+                    .collect::<Vec<_>>()
+            }
         };
-        assert_eq!(names(&db).await, ["nas.retail.internal", "nas-2.retail.internal", "laptop.retail.internal"]);
+        assert_eq!(
+            names(&db).await,
+            [
+                "nas.retail.internal",
+                "nas-2.retail.internal",
+                "laptop.retail.internal"
+            ]
+        );
         // Renaming to a name in use gets a free one instead of taking it
-        db.register(&RegisterRequest { token: Some(c.token.clone()), ..host("nas", 3) }).await.unwrap();
+        db.register(&RegisterRequest {
+            token: Some(c.token.clone()),
+            ..host("nas", 3)
+        })
+        .await
+        .unwrap();
         assert_eq!(names(&db).await[2], "nas-3.retail.internal");
         // a keeps its name when it registers again with the same hostname
-        db.register(&RegisterRequest { token: Some(a.token.clone()), ..host("nas", 1) }).await.unwrap();
-        assert_eq!(names(&Db::open(&path).await.unwrap()).await[0], "nas.retail.internal");
+        db.register(&RegisterRequest {
+            token: Some(a.token.clone()),
+            ..host("nas", 1)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            names(&Db::open(&path).await.unwrap()).await[0],
+            "nas.retail.internal"
+        );
         let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
     async fn register_allocates_and_reuses_ips() {
         let (db, path) = temp_db().await;
-        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let key = db
+            .create_preauth(true, Duration::from_secs(60))
+            .await
+            .unwrap();
 
         let a = db.register(&req(&key, 1)).await.unwrap();
         let b = db.register(&req(&key, 2)).await.unwrap();
@@ -799,16 +937,37 @@ mod tests {
         assert_eq!(b.ip, Ipv4Addr::new(100, 64, 0, 2));
 
         // Someone else with an invite and a's public key cannot take a over
-        assert!(matches!(db.register(&req(&key, 1)).await, Err(RegisterError::KeyInUse)));
-        let wrong = RegisterRequest { token: Some("rtl-guess".into()), ..req(&key, 1) };
-        assert!(matches!(db.register(&wrong).await, Err(RegisterError::KeyInUse)));
-        assert_eq!(db.node_id_by_token(&a.token).await.unwrap(), Some(a.node_id));
+        assert!(matches!(
+            db.register(&req(&key, 1)).await,
+            Err(RegisterError::KeyInUse)
+        ));
+        let wrong = RegisterRequest {
+            token: Some("rtl-guess".into()),
+            ..req(&key, 1)
+        };
+        assert!(matches!(
+            db.register(&wrong).await,
+            Err(RegisterError::KeyInUse)
+        ));
+        assert_eq!(
+            db.node_id_by_token(&a.token).await.unwrap(),
+            Some(a.node_id)
+        );
         // a itself can, with its token
-        let a2 = db.register(&RegisterRequest { token: Some(a.token.clone()), ..req(&key, 1) }).await.unwrap();
+        let a2 = db
+            .register(&RegisterRequest {
+                token: Some(a.token.clone()),
+                ..req(&key, 1)
+            })
+            .await
+            .unwrap();
         assert_eq!((a2.node_id, a2.ip), (a.node_id, a.ip));
         assert_ne!(a2.token, a.token);
         assert_eq!(db.node_id_by_token(&a.token).await.unwrap(), None);
-        assert_eq!(db.node_id_by_token(&a2.token).await.unwrap(), Some(a.node_id));
+        assert_eq!(
+            db.node_id_by_token(&a2.token).await.unwrap(),
+            Some(a.node_id)
+        );
 
         assert!(db.delete_node(a.node_id, false).await.unwrap());
         let c = db.register(&req(&key, 3)).await.unwrap();
@@ -821,7 +980,11 @@ mod tests {
         // Everything but endpoints survives a restart
         let reopened = Db::open(&path).await.unwrap();
         assert_eq!(reopened.all_nodes().await.unwrap().len(), 2);
-        assert_eq!(reopened.node_id_by_token(&a2.token).await.unwrap(), None, "a was deleted");
+        assert_eq!(
+            reopened.node_id_by_token(&a2.token).await.unwrap(),
+            None,
+            "a was deleted"
+        );
         let d = reopened.register(&req(&key, 4)).await.unwrap();
         assert!(d.node_id > c.node_id, "ids are never reused");
         let _ = std::fs::remove_file(path);
@@ -830,20 +993,38 @@ mod tests {
     #[tokio::test]
     async fn single_use_and_expired_keys() {
         let (db, path) = temp_db().await;
-        let once = db.create_preauth(false, Duration::from_secs(60)).await.unwrap();
+        let once = db
+            .create_preauth(false, Duration::from_secs(60))
+            .await
+            .unwrap();
         assert!(db.register(&req(&once, 1)).await.is_ok());
-        assert!(matches!(db.register(&req(&once, 2)).await, Err(RegisterError::InvalidAuthKey)));
+        assert!(matches!(
+            db.register(&req(&once, 2)).await,
+            Err(RegisterError::InvalidAuthKey)
+        ));
 
-        let expired = db.create_preauth(true, Duration::from_secs(0)).await.unwrap();
-        assert!(matches!(db.register(&req(&expired, 3)).await, Err(RegisterError::InvalidAuthKey)));
-        assert!(matches!(db.register(&req("rtl-auth-bogus", 4)).await, Err(RegisterError::InvalidAuthKey)));
+        let expired = db
+            .create_preauth(true, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert!(matches!(
+            db.register(&req(&expired, 3)).await,
+            Err(RegisterError::InvalidAuthKey)
+        ));
+        assert!(matches!(
+            db.register(&req("rtl-auth-bogus", 4)).await,
+            Err(RegisterError::InvalidAuthKey)
+        ));
         let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_registrations_and_writes() {
         let (db, path) = temp_db().await;
-        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let key = db
+            .create_preauth(true, Duration::from_secs(60))
+            .await
+            .unwrap();
         let first = db.register(&req(&key, 200)).await.unwrap();
 
         let writer = {
@@ -859,11 +1040,16 @@ mod tests {
         for i in 0..32u8 {
             let db = db.clone();
             let key = key.clone();
-            regs.push(tokio::spawn(async move { db.register(&req(&key, i)).await }));
+            regs.push(tokio::spawn(
+                async move { db.register(&req(&key, i)).await },
+            ));
         }
         let mut ips = std::collections::HashSet::new();
         for r in regs {
-            let resp = r.await.unwrap().expect("registration must not fail under contention");
+            let resp = r
+                .await
+                .unwrap()
+                .expect("registration must not fail under contention");
             assert!(ips.insert(resp.ip), "duplicate IP {}", resp.ip);
         }
         writer.await.unwrap();
@@ -876,31 +1062,72 @@ mod tests {
         let (id1, old) = db.set_named("family", None).await.unwrap();
         assert!(db.register(&req(&old, 1)).await.is_ok());
         assert!(db.register(&req(&old, 2)).await.is_ok(), "reusable");
-        let (id2, new) = db.set_named("family", Some(Duration::from_secs(3600))).await.unwrap();
-        assert!(matches!(db.register(&req(&old, 3)).await, Err(RegisterError::InvalidAuthKey)), "old code void");
+        let (id2, new) = db
+            .set_named("family", Some(Duration::from_secs(3600)))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                db.register(&req(&old, 3)).await,
+                Err(RegisterError::InvalidAuthKey)
+            ),
+            "old code void"
+        );
         assert!(db.register(&req(&new, 3)).await.is_ok());
-        assert_eq!(db.all_nodes().await.unwrap().len(), 3, "joined devices stay");
+        assert_eq!(
+            db.all_nodes().await.unwrap().len(),
+            3,
+            "joined devices stay"
+        );
         assert_eq!(db.named_secret(id1).await.unwrap(), None);
         assert_eq!(db.named_secret(id2).await.unwrap(), Some(new.clone()));
         let (_, work) = db.set_named("work", None).await.unwrap();
-        assert!(db.register(&req(&work, 4)).await.is_ok(), "several names coexist");
+        assert!(
+            db.register(&req(&work, 4)).await.is_ok(),
+            "several names coexist"
+        );
         assert!(db.register(&req(&new, 5)).await.is_ok());
         assert!(db.delete_preauth(id2).await.unwrap());
-        assert!(matches!(db.register(&req(&new, 6)).await, Err(RegisterError::InvalidAuthKey)), "revoked");
+        assert!(
+            matches!(
+                db.register(&req(&new, 6)).await,
+                Err(RegisterError::InvalidAuthKey)
+            ),
+            "revoked"
+        );
         let rows = db.list_preauth().await.unwrap();
-        assert!(rows.iter().any(|r| r.name.as_deref() == Some("work") && r.uses == 1 && r.expires_at == NEVER));
+        assert!(
+            rows.iter()
+                .any(|r| r.name.as_deref() == Some("work") && r.uses == 1 && r.expires_at == NEVER)
+        );
     }
 
     #[tokio::test]
     async fn keeping_forever_needs_the_same_device() {
         let (db, _path) = temp_db().await;
-        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let key = db
+            .create_preauth(true, Duration::from_secs(60))
+            .await
+            .unwrap();
         db.set_expiry_settings(Some(30), None).unwrap();
         let a = db.register(&req(&key, 2)).await.unwrap();
-        let exp = |id| db.inner.lock().unwrap().data.nodes.iter().find(|n| n.id == id).unwrap().expires_at;
+        let exp = |id| {
+            db.inner
+                .lock()
+                .unwrap()
+                .data
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .expires_at
+        };
         let theirs = db.inner.lock().unwrap().data.nodes[0].node_key;
         db.keep_forever(a.node_id, &Key([0xee; 32])).unwrap();
-        assert!(exp(a.node_id).is_some(), "an id from another database names someone else");
+        assert!(
+            exp(a.node_id).is_some(),
+            "an id from another database names someone else"
+        );
         db.keep_forever(a.node_id, &theirs).unwrap();
         assert_eq!(exp(a.node_id), None);
     }
@@ -908,15 +1135,32 @@ mod tests {
     #[tokio::test]
     async fn helper_exemption_ends_with_the_role() {
         let (db, path) = temp_db().await;
-        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let key = db
+            .create_preauth(true, Duration::from_secs(60))
+            .await
+            .unwrap();
         let a = db.register(&req(&key, 2)).await.unwrap();
         let b = db.register(&req(&key, 3)).await.unwrap();
         db.set_expiry_settings(Some(30), Some(1)).unwrap();
-        let exp = |id| db.inner.lock().unwrap().data.nodes.iter().find(|n| n.id == id).unwrap().expires_at;
+        let exp = |id| {
+            db.inner
+                .lock()
+                .unwrap()
+                .data
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .expires_at
+        };
         db.set_helper_device(Some(a.node_id)).unwrap();
         assert_eq!(exp(a.node_id), None, "the helper never expires");
         db.renew(a.node_id, false).unwrap();
-        assert_eq!(exp(a.node_id), None, "not even when renewed with the network's time");
+        assert_eq!(
+            exp(a.node_id),
+            None,
+            "not even when renewed with the network's time"
+        );
         // Moving the role, then ending it, gives each former helper a lifetime again
         db.set_helper_device(Some(b.node_id)).unwrap();
         assert!(exp(a.node_id).is_some(), "a kept the helper's exemption");
@@ -944,15 +1188,29 @@ mod tests {
     #[tokio::test]
     async fn key_expiry_and_inactive_devices() {
         let (db, path) = temp_db().await;
-        let key = db.create_preauth(true, Duration::from_secs(60)).await.unwrap();
+        let key = db
+            .create_preauth(true, Duration::from_secs(60))
+            .await
+            .unwrap();
         let host = db.create_host_key(Duration::from_secs(60)).await.unwrap();
         let h = db.register(&req(&host, 1)).await.unwrap();
         let a = db.register(&req(&key, 2)).await.unwrap();
         let row = |db: &Db, id| {
             let db = db.clone();
-            async move { db.all_nodes().await.unwrap().into_iter().find(|n| n.id == id).unwrap() }
+            async move {
+                db.all_nodes()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|n| n.id == id)
+                    .unwrap()
+            }
         };
-        assert_eq!(row(&db, a.node_id).await.expires_at, None, "no expiry by default");
+        assert_eq!(
+            row(&db, a.node_id).await.expires_at,
+            None,
+            "no expiry by default"
+        );
         assert!(row(&db, a.node_id).await.invite_id.is_some());
         // Turning it on starts the clock now for everyone but the host
         db.set_expiry_settings(Some(30), None).unwrap();
@@ -969,13 +1227,31 @@ mod tests {
         assert!(row(&db, a.node_id).await.expires_at.is_some());
         assert!(db.set_expiry_settings(Some(0), None).is_err());
         // An expired key stays expired when the setting changes
-        db.inner.lock().unwrap().data.nodes.iter_mut().find(|n| n.id == a.node_id).unwrap().expires_at = Some(now - 10);
+        db.inner
+            .lock()
+            .unwrap()
+            .data
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == a.node_id)
+            .unwrap()
+            .expires_at = Some(now - 10);
         db.set_expiry_settings(Some(60), None).unwrap();
-        assert!(row(&db, a.node_id).await.expired(now_unix()), "a new setting revived an expired key");
+        assert!(
+            row(&db, a.node_id).await.expired(now_unix()),
+            "a new setting revived an expired key"
+        );
         db.set_expiry_settings(None, None).unwrap();
-        assert!(row(&db, a.node_id).await.expired(now_unix()), "turning expiry off revived an expired key");
+        assert!(
+            row(&db, a.node_id).await.expired(now_unix()),
+            "turning expiry off revived an expired key"
+        );
         db.renew(a.node_id, false).unwrap();
-        assert_eq!(row(&db, a.node_id).await.expires_at, None, "renewed with expiry off: never");
+        assert_eq!(
+            row(&db, a.node_id).await.expires_at,
+            None,
+            "renewed with expiry off: never"
+        );
         db.set_expiry_settings(Some(30), None).unwrap();
         // Inactive devices go, unless online, exempt or never seen
         let b = db.register(&req(&key, 3)).await.unwrap();
@@ -987,17 +1263,36 @@ mod tests {
             }
         }
         // Not right after the server started, whatever the last-seen times say
-        assert!(db.remove_inactive(&|_| false).unwrap().is_empty(), "nothing goes at start");
+        assert!(
+            db.remove_inactive(&|_| false).unwrap().is_empty(),
+            "nothing goes at start"
+        );
         db.inner.lock().unwrap().started_at = now - 3 * day_secs();
-        assert_eq!(db.remove_inactive(&|id| id == b.node_id).unwrap(), vec![a.node_id]);
-        assert_eq!(db.all_nodes().await.unwrap().len(), 2, "host and online b stay");
+        assert_eq!(
+            db.remove_inactive(&|id| id == b.node_id).unwrap(),
+            vec![a.node_id]
+        );
+        assert_eq!(
+            db.all_nodes().await.unwrap().len(),
+            2,
+            "host and online b stay"
+        );
         // Routes are checked
-        assert!(db.set_routes(b.node_id, &["0.0.0.0/0".parse().unwrap()]).is_err());
-        assert!(db.set_routes(b.node_id, &["192.168.1.0/24".parse().unwrap()]).unwrap());
+        assert!(
+            db.set_routes(b.node_id, &["0.0.0.0/0".parse().unwrap()])
+                .is_err()
+        );
+        assert!(
+            db.set_routes(b.node_id, &["192.168.1.0/24".parse().unwrap()])
+                .unwrap()
+        );
         assert_eq!(row(&db, b.node_id).await.approved_routes.len(), 1);
         // Removing a device can revoke the invite it used
         assert!(db.delete_node(b.node_id, true).await.unwrap());
-        assert!(matches!(db.register(&req(&key, 4)).await, Err(RegisterError::InvalidAuthKey)));
+        assert!(matches!(
+            db.register(&req(&key, 4)).await,
+            Err(RegisterError::InvalidAuthKey)
+        ));
         check(&db.snapshot().unwrap()).unwrap();
         let _ = std::fs::remove_file(path);
     }

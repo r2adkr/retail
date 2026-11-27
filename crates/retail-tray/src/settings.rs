@@ -1,11 +1,13 @@
 use std::time::{Duration, Instant};
 
-use retail_proto::api::{BackendState, PathReason, PeerStatus, PortState, SavedServer, StatusResponse};
+use retail_proto::api::{
+    BackendState, PathReason, PeerStatus, PortState, SavedServer, StatusResponse,
+};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::config::ThemePref;
-use crate::i18n::{LangPref, tr, trf};
 use crate::draw::{Canvas, Theme, contains, shade, with_alpha};
+use crate::i18n::{LangPref, tr, trf};
 use crate::input::TextInput;
 use crate::text::{Fonts, Weight};
 use crate::ui::View;
@@ -155,7 +157,8 @@ impl Settings {
     }
 
     pub fn logged_in(&self) -> bool {
-        self.status().is_some_and(|s| s.state != BackendState::NeedsLogin)
+        self.status()
+            .is_some_and(|s| s.state != BackendState::NeedsLogin)
     }
 
     /// Servers joined before, the current one included
@@ -164,7 +167,8 @@ impl Settings {
     }
 
     pub fn show_form(&self) -> bool {
-        matches!(self.view, View::Status(_)) && (self.adding || (!self.logged_in() && self.servers().is_empty()))
+        matches!(self.view, View::Status(_))
+            && (self.adding || (!self.logged_in() && self.servers().is_empty()))
     }
 
     /// Scrolls the saved servers by `rows`; true if anything moved
@@ -183,17 +187,23 @@ impl Settings {
     pub fn over_server_list(&self, x: f32, y: f32) -> bool {
         let top = 76.0 + 14.0 + 8.0;
         let bottom = top + self.servers().len().min(MAX_ROWS) as f32 * ROW_H;
-        self.tab == Tab::General && self.show_list() && (PAD..=WIDTH - PAD).contains(&x) && (top..=bottom).contains(&y)
+        self.tab == Tab::General
+            && self.show_list()
+            && (PAD..=WIDTH - PAD).contains(&x)
+            && (top..=bottom).contains(&y)
     }
 
     /// The other devices, while connected
     fn peers(&self) -> &[PeerStatus] {
-        self.status().filter(|s| s.state == BackendState::Running).map_or(&[], |s| &s.peers)
+        self.status()
+            .filter(|s| s.state == BackendState::Running)
+            .map_or(&[], |s| &s.peers)
     }
 
     /// The Info tab has data once connected
     fn connected(&self) -> bool {
-        self.status().is_some_and(|s| s.state == BackendState::Running)
+        self.status()
+            .is_some_and(|s| s.state == BackendState::Running)
     }
 
     /// The top of the device list on the Info tab
@@ -218,15 +228,19 @@ impl Settings {
 
     /// The saved servers, to switch between
     pub fn show_list(&self) -> bool {
-        matches!(self.view, View::Status(_)) && !self.show_form() && (self.changing || !self.logged_in())
+        matches!(self.view, View::Status(_))
+            && !self.show_form()
+            && (self.changing || !self.logged_in())
     }
 
     pub fn is_busy(&self) -> bool {
-        self.busy.is_some_and(|t| t.elapsed() < Duration::from_secs(45))
+        self.busy
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(45))
     }
 
     pub fn is_checking(&self) -> bool {
-        self.checking.is_some_and(|t| t.elapsed() < Duration::from_secs(45))
+        self.checking
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(45))
     }
 
     /// A server address instead of an invite code also needs its auth key
@@ -237,11 +251,16 @@ impl Settings {
 
     /// The form's fields in order, the auth key only when it is needed
     pub fn form_fields(&self) -> &'static [usize] {
-        if self.with_auth_key() { &[SERVER, AUTH_KEY, DEVICE] } else { &[SERVER, DEVICE] }
+        if self.with_auth_key() {
+            &[SERVER, AUTH_KEY, DEVICE]
+        } else {
+            &[SERVER, DEVICE]
+        }
     }
 
     pub fn logout_armed(&self) -> bool {
-        self.confirm_logout.is_some_and(|t| t.elapsed() < Duration::from_secs(4))
+        self.confirm_logout
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(4))
     }
 
     /// Pre-fills the device name from the current registration
@@ -255,13 +274,24 @@ impl Settings {
 
     /// The about card has the update rows only while retaild answers
     fn about_h(&self) -> f32 {
-        if matches!(self.view, View::Status(_)) { ABOUT_H } else { 60.0 }
+        if matches!(self.view, View::Status(_)) {
+            ABOUT_H
+        } else {
+            60.0
+        }
     }
 
     fn card_h(&self) -> f32 {
         match &self.view {
-            View::Status(_) if self.show_form() => 16.0 + self.form_fields().len() as f32 * (20.0 + FIELD_H + 14.0) + HINT_H + BUTTON_H + 18.0,
-            View::Status(_) if self.show_list() => 8.0 + self.servers().len().min(MAX_ROWS) as f32 * ROW_H + 14.0 + BUTTON_H + 18.0,
+            View::Status(_) if self.show_form() => {
+                16.0 + self.form_fields().len() as f32 * (20.0 + FIELD_H + 14.0)
+                    + HINT_H
+                    + BUTTON_H
+                    + 18.0
+            }
+            View::Status(_) if self.show_list() => {
+                8.0 + self.servers().len().min(MAX_ROWS) as f32 * ROW_H + 14.0 + BUTTON_H + 18.0
+            }
             View::Status(_) => 16.0 + 2.0 * 50.0 + BUTTON_H + 26.0,
             // Room for the start button, or for the progress bar
             View::Offline if self.daemon.text().2.is_some() => 92.0 + 16.0,
@@ -281,19 +311,42 @@ impl Settings {
                 return 76.0 + 14.0 + 60.0 + 24.0;
             }
             let rows = self.peers().len().min(MAX_PEERS);
-            let list = if rows == 0 { 60.0 } else { 16.0 + rows as f32 * PEER_ROW_H };
+            let list = if rows == 0 {
+                60.0
+            } else {
+                16.0 + rows as f32 * PEER_ROW_H
+            };
             return self.peers_top() + list + 24.0;
         }
         // Mirrors `render`: title, then the sections (label 14 + content),
         // 40 between sections, 24 bottom padding
-        let message = self.message.as_ref().map_or(0.0, |(m, _)| 30.0 + 18.0 * m.matches('\n').count() as f32);
-        let network = if self.show_network() { 40.0 + 14.0 + NETWORK_H } else { 0.0 };
-        76.0 + (14.0 + self.card_h() + message) + network + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + 44.0) + 40.0 + (14.0 + self.about_h()) + 24.0
+        let message = self
+            .message
+            .as_ref()
+            .map_or(0.0, |(m, _)| 30.0 + 18.0 * m.matches('\n').count() as f32);
+        let network = if self.show_network() {
+            40.0 + 14.0 + NETWORK_H
+        } else {
+            0.0
+        };
+        76.0 + (14.0 + self.card_h() + message)
+            + network
+            + 40.0
+            + (14.0 + 44.0)
+            + 40.0
+            + (14.0 + 44.0)
+            + 40.0
+            + (14.0 + self.about_h())
+            + 24.0
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<SettingsAction> {
         // Last drawn is on top (the open language list)
-        self.regions.iter().rev().find(|(r, _)| contains(r, x, y)).map(|(_, a)| a.clone())
+        self.regions
+            .iter()
+            .rev()
+            .find(|(r, _)| contains(r, x, y))
+            .map(|(_, a)| a.clone())
     }
 
     fn hovered(&self, r: &Rect) -> bool {
@@ -307,7 +360,15 @@ impl Settings {
         let h = self.height();
         c.fill_rect(0.0, 0.0, WIDTH, h, t.bg);
 
-        c.text(tr("Settings"), PAD, 44.0, 20.0, Weight::Semibold, t.text, None);
+        c.text(
+            tr("Settings"),
+            PAD,
+            44.0,
+            20.0,
+            Weight::Semibold,
+            t.text,
+            None,
+        );
         self.tabs(&mut c, &t);
         if self.tab == Tab::Info {
             self.info(&mut c, &t);
@@ -323,23 +384,59 @@ impl Settings {
         let inner_w = WIDTH - 2.0 * PAD - 32.0;
         match self.view.clone() {
             View::Loading => {
-                c.text(tr("Connecting to retaild…"), inner_x, y + 36.0, 13.5, Weight::Regular, t.dim, None);
+                c.text(
+                    tr("Connecting to retaild…"),
+                    inner_x,
+                    y + 36.0,
+                    13.5,
+                    Weight::Regular,
+                    t.dim,
+                    None,
+                );
             }
             View::Offline => {
                 let (title, hint, bar) = self.daemon.text();
-                c.text(&title, inner_x, y + 36.0, 14.0, Weight::Semibold, t.text, None);
-                c.text(&hint, inner_x, y + 60.0, 12.5, Weight::Regular, t.dim, Some(inner_w));
+                c.text(
+                    &title,
+                    inner_x,
+                    y + 36.0,
+                    14.0,
+                    Weight::Semibold,
+                    t.text,
+                    None,
+                );
+                c.text(
+                    &hint,
+                    inner_x,
+                    y + 60.0,
+                    12.5,
+                    Weight::Regular,
+                    t.dim,
+                    Some(inner_w),
+                );
                 match bar {
                     Some(f) => crate::ui::progress_bar(&mut c, &t, inner_x, y + 84.0, inner_w, f),
                     None => {
                         let label = tr("Start retaild");
                         let bw = c.measure(label, 13.0, Weight::Semibold) + 28.0;
                         let busy = self.daemon.is_starting();
-                        self.button(&mut c, &t, label, inner_x, y + 80.0, bw, Style::Primary, !busy, SettingsAction::StartDaemon);
+                        self.button(
+                            &mut c,
+                            &t,
+                            label,
+                            inner_x,
+                            y + 80.0,
+                            bw,
+                            Style::Primary,
+                            !busy,
+                            SettingsAction::StartDaemon,
+                        );
                     }
                 }
             }
-            View::Status(_) if self.show_form() => self.form(&mut c, &t, inner_x, y + 16.0, inner_w),
+            View::Status(_) if self.show_form() => {
+                self.form(&mut c, &t, inner_x, y + 16.0, inner_w)
+            }
             View::Status(_) if self.show_list() => self.server_list(&mut c, &t, y),
             View::Status(s) => self.account(&mut c, &t, &s, inner_x, y + 16.0, inner_w),
         }
@@ -349,7 +446,15 @@ impl Settings {
             // A second line is the hint under an error
             for (i, line) in msg.lines().enumerate() {
                 let color = if i == 0 { color } else { t.dim };
-                c.text(line, PAD + 4.0, y + 22.0, 12.5, Weight::Regular, color, Some(WIDTH - 2.0 * PAD - 8.0));
+                c.text(
+                    line,
+                    PAD + 4.0,
+                    y + 22.0,
+                    12.5,
+                    Weight::Regular,
+                    color,
+                    Some(WIDTH - 2.0 * PAD - 8.0),
+                );
                 y += if i == 0 { 30.0 } else { 18.0 };
             }
         }
@@ -367,8 +472,8 @@ impl Settings {
         y += 40.0;
         section(&mut c, &t, tr("Appearance"), y);
         y += 14.0;
-        let themes =
-            [ThemePref::System, ThemePref::Light, ThemePref::Dark].map(|p| (p == self.theme, theme_label(p), SettingsAction::Theme(p)));
+        let themes = [ThemePref::System, ThemePref::Light, ThemePref::Dark]
+            .map(|p| (p == self.theme, theme_label(p), SettingsAction::Theme(p)));
         self.segmented(&mut c, &t, y, &themes);
         y += 44.0;
 
@@ -402,7 +507,15 @@ impl Settings {
             View::Offline => tr("retaild is not running"),
             View::Loading => tr("Checking retaild…"),
         };
-        c.text(daemon, inner_x, y + 45.0, 12.0, Weight::Regular, t.dim, Some(inner_w));
+        c.text(
+            daemon,
+            inner_x,
+            y + 45.0,
+            12.0,
+            Weight::Regular,
+            t.dim,
+            Some(inner_w),
+        );
         if let View::Status(s) = self.view.clone() {
             self.updates(&mut c, &t, &s, y + 60.0);
         }
@@ -420,7 +533,11 @@ impl Settings {
     /// General | Info, at the right of the title
     fn tabs(&mut self, c: &mut Canvas, t: &Theme) {
         let tabs = [(Tab::General, tr("General")), (Tab::Info, tr("Info"))];
-        let seg = tabs.iter().map(|(_, l)| c.measure(l, 12.5, Weight::Semibold)).fold(0.0, f32::max) + 28.0;
+        let seg = tabs
+            .iter()
+            .map(|(_, l)| c.measure(l, 12.5, Weight::Semibold))
+            .fold(0.0, f32::max)
+            + 28.0;
         // Beside the title, clear of the window buttons at the top right
         let (h, y) = (32.0, 22.0);
         let x = PAD + c.measure(tr("Settings"), 20.0, Weight::Semibold) + 16.0;
@@ -430,13 +547,32 @@ impl Settings {
             let r = Rect::from_xywh(sx, y + 4.0, seg, h - 8.0).unwrap();
             let selected = tab == self.tab;
             if selected {
-                c.fill_rrect(sx, y + 4.0, seg, h - 8.0, 6.0, if self.dark { t.hover } else { t.bg });
+                c.fill_rrect(
+                    sx,
+                    y + 4.0,
+                    seg,
+                    h - 8.0,
+                    6.0,
+                    if self.dark { t.hover } else { t.bg },
+                );
             } else if self.hovered(&r) {
                 c.fill_rrect(sx, y + 4.0, seg, h - 8.0, 6.0, with_alpha(t.hover, 0.6));
             }
-            let weight = if selected { Weight::Semibold } else { Weight::Regular };
+            let weight = if selected {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
             let lw = c.measure(label, 12.5, weight);
-            c.text(label, sx + (seg - lw) / 2.0, y + 20.5, 12.5, weight, if selected { t.text } else { t.dim }, None);
+            c.text(
+                label,
+                sx + (seg - lw) / 2.0,
+                y + 20.5,
+                12.5,
+                weight,
+                if selected { t.text } else { t.dim },
+                None,
+            );
             self.regions.push((r, SettingsAction::Tab(tab)));
         }
     }
@@ -450,7 +586,15 @@ impl Settings {
         y += 14.0;
         let Some(s) = self.status().filter(|_| self.connected()).cloned() else {
             c.fill_rrect(x, y, w, 60.0, 12.0, t.surface);
-            c.text(tr("Connect to see usage and paths."), ix, y + 35.0, 13.0, Weight::Regular, t.dim, Some(iw));
+            c.text(
+                tr("Connect to see usage and paths."),
+                ix,
+                y + 35.0,
+                13.0,
+                Weight::Regular,
+                t.dim,
+                Some(iw),
+            );
             return;
         };
         c.fill_rrect(x, y, w, USAGE_H, 12.0, t.surface);
@@ -459,22 +603,73 @@ impl Settings {
         let col = iw / 2.0;
         // An older retaild counts only this connection
         let total = s.usage_total;
-        label_value(c, t, tr("Total sent"), &bytes(total.map_or(tx, |u| u.tx_bytes)), ix, y + 8.0, col - 8.0);
-        label_value(c, t, tr("Total received"), &bytes(total.map_or(rx, |u| u.rx_bytes)), ix + col, y + 8.0, col);
+        label_value(
+            c,
+            t,
+            tr("Total sent"),
+            &bytes(total.map_or(tx, |u| u.tx_bytes)),
+            ix,
+            y + 8.0,
+            col - 8.0,
+        );
+        label_value(
+            c,
+            t,
+            tr("Total received"),
+            &bytes(total.map_or(rx, |u| u.rx_bytes)),
+            ix + col,
+            y + 8.0,
+            col,
+        );
         let time = |secs: Option<u64>| secs.map_or_else(|| "—".to_string(), crate::ui::duration);
-        label_value(c, t, tr("Total connected"), &time(total.map(|u| u.connected_secs)), ix, y + 58.0, col - 8.0);
-        label_value(c, t, tr("Connected this time"), &time(s.connected_secs), ix + col, y + 58.0, col);
+        label_value(
+            c,
+            t,
+            tr("Total connected"),
+            &time(total.map(|u| u.connected_secs)),
+            ix,
+            y + 58.0,
+            col - 8.0,
+        );
+        label_value(
+            c,
+            t,
+            tr("Connected this time"),
+            &time(s.connected_secs),
+            ix + col,
+            y + 58.0,
+            col,
+        );
         let now = format!("↑ {}  ↓ {}", bytes(tx), bytes(rx));
         label_value(c, t, tr("This connection"), &now, ix, y + 108.0, col - 8.0);
-        let count = |kind: &str| s.peers.iter().filter(|p| p.path.as_deref().is_some_and(|v| v.starts_with(kind))).count();
-        let paths = trf("Direct {d} · Relay {r}", &[("d", &count("direct")), ("r", &count("relay"))]);
+        let count = |kind: &str| {
+            s.peers
+                .iter()
+                .filter(|p| p.path.as_deref().is_some_and(|v| v.starts_with(kind)))
+                .count()
+        };
+        let paths = trf(
+            "Direct {d} · Relay {r}",
+            &[("d", &count("direct")), ("r", &count("relay"))],
+        );
         label_value(c, t, tr("Paths"), &paths, ix + col, y + 108.0, col);
         let memory = s.memory_peak.map_or_else(|| "—".to_string(), bytes);
         label_value(c, t, tr("Memory peak"), &memory, ix, y + 158.0, col - 8.0);
         y += USAGE_H;
         if let Some(u) = total {
-            let hint = trf("Totals and each device's usage since {date}.", &[("date", &date(u.since))]);
-            c.text(&hint, x + 4.0, y + 18.0, 11.5, Weight::Regular, t.dim, Some(w - 8.0));
+            let hint = trf(
+                "Totals and each device's usage since {date}.",
+                &[("date", &date(u.since))],
+            );
+            c.text(
+                &hint,
+                x + 4.0,
+                y + 18.0,
+                11.5,
+                Weight::Regular,
+                t.dim,
+                Some(w - 8.0),
+            );
         }
         y += USAGE_HINT_H;
 
@@ -484,7 +679,15 @@ impl Settings {
         let peers = &s.peers;
         if peers.is_empty() {
             c.fill_rrect(x, y, w, 60.0, 12.0, t.surface);
-            c.text(tr("No other devices yet."), ix, y + 35.0, 13.0, Weight::Regular, t.dim, Some(iw));
+            c.text(
+                tr("No other devices yet."),
+                ix,
+                y + 35.0,
+                13.0,
+                Weight::Regular,
+                t.dim,
+                Some(iw),
+            );
             return;
         }
         self.peer_scroll = self.peer_scroll.min(peers.len().saturating_sub(MAX_PEERS));
@@ -494,7 +697,12 @@ impl Settings {
         let top = y;
         y += 8.0;
         let right = x + w - 16.0;
-        for (i, p) in peers.iter().enumerate().skip(self.peer_scroll).take(MAX_PEERS) {
+        for (i, p) in peers
+            .iter()
+            .enumerate()
+            .skip(self.peer_scroll)
+            .take(MAX_PEERS)
+        {
             if i > self.peer_scroll {
                 c.hline(ix, right, y, t.border);
             }
@@ -504,22 +712,66 @@ impl Settings {
                 None if !p.online => (tr("Offline"), t.dim),
                 None => (tr("Connecting"), t.dim),
             };
-            let traffic = format!("↑ {}  ↓ {}", bytes(p.total_tx_bytes.unwrap_or(p.tx_bytes)), bytes(p.total_rx_bytes.unwrap_or(p.rx_bytes)));
+            let traffic = format!(
+                "↑ {}  ↓ {}",
+                bytes(p.total_tx_bytes.unwrap_or(p.tx_bytes)),
+                bytes(p.total_rx_bytes.unwrap_or(p.rx_bytes))
+            );
             let badge = match p.rtt_ms {
                 Some(ms) => format!("{ms} ms · {badge}"),
                 None => badge.to_string(),
             };
             let bw = c.measure(&badge, 12.5, Weight::Semibold);
             let tw = c.measure(&traffic, 11.5, Weight::Regular);
-            let graph = if p.rtt_history.is_empty() { 0.0 } else { GRAPH_W + 12.0 };
+            let graph = if p.rtt_history.is_empty() {
+                0.0
+            } else {
+                GRAPH_W + 12.0
+            };
             if graph > 0.0 {
                 rtt_graph(c, t, &p.rtt_history, right - bw - graph, y + 8.0);
             }
-            let name = if p.dns_name.is_empty() { p.hostname.as_str() } else { p.dns_name.trim_end_matches(".retail.internal") };
-            c.text(name, ix, y + 21.0, 13.5, Weight::Semibold, t.text, Some(iw - bw - graph - 12.0));
-            c.text(&badge, right - bw, y + 21.0, 12.5, Weight::Semibold, color, None);
-            c.text(reason_text(p), ix, y + 38.0, 11.5, Weight::Regular, t.dim, Some(iw - tw - 12.0));
-            c.text(&traffic, right - tw, y + 38.0, 11.5, Weight::Regular, t.dim, None);
+            let name = if p.dns_name.is_empty() {
+                p.hostname.as_str()
+            } else {
+                p.dns_name.trim_end_matches(".retail.internal")
+            };
+            c.text(
+                name,
+                ix,
+                y + 21.0,
+                13.5,
+                Weight::Semibold,
+                t.text,
+                Some(iw - bw - graph - 12.0),
+            );
+            c.text(
+                &badge,
+                right - bw,
+                y + 21.0,
+                12.5,
+                Weight::Semibold,
+                color,
+                None,
+            );
+            c.text(
+                reason_text(p),
+                ix,
+                y + 38.0,
+                11.5,
+                Weight::Regular,
+                t.dim,
+                Some(iw - tw - 12.0),
+            );
+            c.text(
+                &traffic,
+                right - tw,
+                y + 38.0,
+                11.5,
+                Weight::Regular,
+                t.dim,
+                None,
+            );
             y += PEER_ROW_H;
         }
         if peers.len() > MAX_PEERS {
@@ -537,7 +789,9 @@ impl Settings {
         let busy = self.is_busy();
         let servers = self.servers().to_vec();
         // The list may have shrunk since it was scrolled
-        self.server_scroll = self.server_scroll.min(servers.len().saturating_sub(MAX_ROWS));
+        self.server_scroll = self
+            .server_scroll
+            .min(servers.len().saturating_sub(MAX_ROWS));
         let first = self.server_scroll;
         let mut y = card_y + 8.0;
         for (i, srv) in servers.iter().enumerate().skip(first).take(MAX_ROWS) {
@@ -547,21 +801,63 @@ impl Settings {
             if !srv.current && !busy && self.hovered(&row) && !self.hovered(&more) {
                 c.fill_rrect(row.x(), row.y(), row.width(), row.height(), 8.0, t.hover);
             }
-            c.circle(x + 20.0, y + ROW_H / 2.0, 4.0, if srv.current { t.accent } else { t.gray });
-            let weight = if srv.current { Weight::Semibold } else { Weight::Regular };
-            c.text(&server_label(&srv.server), x + 34.0, y + 21.0, 13.5, weight, t.text, Some(w - 100.0));
+            c.circle(
+                x + 20.0,
+                y + ROW_H / 2.0,
+                4.0,
+                if srv.current { t.accent } else { t.gray },
+            );
+            let weight = if srv.current {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
+            c.text(
+                &server_label(&srv.server),
+                x + 34.0,
+                y + 21.0,
+                13.5,
+                weight,
+                t.text,
+                Some(w - 100.0),
+            );
             let ip = srv.ip.map(|ip| ip.to_string()).unwrap_or_default();
-            let sub = if srv.current { format!("{ip} · {}", tr("Current")) } else { ip };
-            c.text(&sub, x + 34.0, y + 38.0, 11.5, Weight::Regular, t.dim, Some(w - 100.0));
+            let sub = if srv.current {
+                format!("{ip} · {}", tr("Current"))
+            } else {
+                ip
+            };
+            c.text(
+                &sub,
+                x + 34.0,
+                y + 38.0,
+                11.5,
+                Weight::Regular,
+                t.dim,
+                Some(w - 100.0),
+            );
             if open || self.hovered(&more) {
-                c.fill_rrect(more.x(), more.y(), more.width(), more.height(), 6.0, t.hover);
+                c.fill_rrect(
+                    more.x(),
+                    more.y(),
+                    more.width(),
+                    more.height(),
+                    6.0,
+                    t.hover,
+                );
             }
             let dy = y + ROW_H / 2.0;
             for k in -1..=1 {
-                c.circle(more.x() + more.width() / 2.0 + k as f32 * 5.0, dy, 1.6, t.dim);
+                c.circle(
+                    more.x() + more.width() / 2.0 + k as f32 * 5.0,
+                    dy,
+                    1.6,
+                    t.dim,
+                );
             }
             if !srv.current && !busy {
-                self.regions.push((row, SettingsAction::SwitchServer(srv.server.clone())));
+                self.regions
+                    .push((row, SettingsAction::SwitchServer(srv.server.clone())));
             }
             self.regions.push((more, SettingsAction::ServerMenu(i)));
             y += ROW_H;
@@ -578,47 +874,111 @@ impl Settings {
         let ix = x + 16.0;
         let add = format!("+  {}", tr("Add server"));
         let aw = c.measure(&add, 13.0, Weight::Semibold) + 32.0;
-        self.button(c, t, &add, ix, y, aw, Style::Secondary, !busy, SettingsAction::AddServer);
+        self.button(
+            c,
+            t,
+            &add,
+            ix,
+            y,
+            aw,
+            Style::Secondary,
+            !busy,
+            SettingsAction::AddServer,
+        );
         if self.logged_in() {
             let done = tr("Done");
             let dw = c.measure(done, 13.0, Weight::Semibold).max(56.0) + 32.0;
-            self.button(c, t, done, x + w - 16.0 - dw, y, dw, Style::Secondary, true, SettingsAction::Cancel);
+            self.button(
+                c,
+                t,
+                done,
+                x + w - 16.0 - dw,
+                y,
+                dw,
+                Style::Secondary,
+                true,
+                SettingsAction::Cancel,
+            );
         }
     }
 
     /// The ⋯ menu of a saved server, under its button
     fn server_popover(&mut self, c: &mut Canvas, t: &Theme, i: usize) {
-        let Some(srv) = self.servers().get(i).cloned() else { return };
+        let Some(srv) = self.servers().get(i).cloned() else {
+            return;
+        };
         let card_y = 76.0 + 14.0;
-        let label = if srv.current { tr("Log out and remove") } else { tr("Remove from list") };
+        let label = if srv.current {
+            tr("Log out and remove")
+        } else {
+            tr("Remove from list")
+        };
         let w = c.measure(label, 13.0, Weight::Regular) + 40.0;
         let row = i.saturating_sub(self.server_scroll) as f32;
-        let (x, y) = (WIDTH - PAD - 12.0 - w, card_y + 8.0 + (row + 1.0) * ROW_H - 6.0);
+        let (x, y) = (
+            WIDTH - PAD - 12.0 - w,
+            card_y + 8.0 + (row + 1.0) * ROW_H - 6.0,
+        );
         let h = 36.0 + 8.0;
-        c.fill_rrect(x - 1.0, y + 1.0, w + 2.0, h + 3.0, 11.0, with_alpha(Color::BLACK, if self.dark { 0.45 } else { 0.12 }));
+        c.fill_rrect(
+            x - 1.0,
+            y + 1.0,
+            w + 2.0,
+            h + 3.0,
+            11.0,
+            with_alpha(Color::BLACK, if self.dark { 0.45 } else { 0.12 }),
+        );
         c.fill_rrect(x, y, w, h, 10.0, if self.dark { t.surface } else { t.bg });
         c.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, h - 1.0, 10.0, t.border);
         let r = Rect::from_xywh(x + 4.0, y + 4.0, w - 8.0, 36.0).unwrap();
         if self.hovered(&r) {
             c.fill_rrect(r.x(), r.y(), r.width(), r.height(), 7.0, t.hover);
         }
-        c.text(label, x + 16.0, y + 27.0, 13.0, Weight::Regular, t.red, None);
-        self.regions.push((Rect::from_xywh(x, y, w, h).unwrap(), SettingsAction::ServerMenu(i)));
-        self.regions.push((r, SettingsAction::ForgetServer(srv.server)));
+        c.text(
+            label,
+            x + 16.0,
+            y + 27.0,
+            13.0,
+            Weight::Regular,
+            t.red,
+            None,
+        );
+        self.regions.push((
+            Rect::from_xywh(x, y, w, h).unwrap(),
+            SettingsAction::ServerMenu(i),
+        ));
+        self.regions
+            .push((r, SettingsAction::ForgetServer(srv.server)));
     }
 
     /// The closed picker: the current language and a chevron
     fn dropdown(&mut self, c: &mut Canvas, t: &Theme, y: f32) {
         let (x, w) = (PAD, WIDTH - 2.0 * PAD);
         let r = Rect::from_xywh(x, y, w, 40.0).unwrap();
-        let bg = if self.hovered(&r) || self.lang_open { t.hover } else { t.surface };
+        let bg = if self.hovered(&r) || self.lang_open {
+            t.hover
+        } else {
+            t.surface
+        };
         c.fill_rrect(x, y, w, 40.0, 10.0, bg);
         if self.lang_open {
             c.stroke_rrect_w(x + 0.75, y + 0.75, w - 1.5, 38.5, 10.0, 1.5, t.accent);
         }
-        c.text(self.lang.label(), x + 16.0, y + 25.0, 13.5, Weight::Regular, t.text, Some(w - 56.0));
+        c.text(
+            self.lang.label(),
+            x + 16.0,
+            y + 25.0,
+            13.5,
+            Weight::Regular,
+            t.text,
+            Some(w - 56.0),
+        );
         let (cx, cy) = (x + w - 22.0, y + 20.0);
-        let (dx, dy) = if self.lang_open { (5.0, -2.5) } else { (5.0, 2.5) };
+        let (dx, dy) = if self.lang_open {
+            (5.0, -2.5)
+        } else {
+            (5.0, 2.5)
+        };
         c.line((cx - dx, cy - dy), (cx, cy + dy), 1.6, t.dim);
         c.line((cx, cy + dy), (cx + dx, cy - dy), 1.6, t.dim);
         self.regions.push((r, SettingsAction::LangMenu));
@@ -632,11 +992,21 @@ impl Settings {
         let h = LangPref::ALL.len() as f32 * ITEM_H + 8.0;
         let y = picker_y - 6.0 - h;
         // A soft shadow, then the card
-        c.fill_rrect(x - 1.0, y + 1.0, w + 2.0, h + 3.0, 12.0, with_alpha(Color::BLACK, if self.dark { 0.45 } else { 0.12 }));
+        c.fill_rrect(
+            x - 1.0,
+            y + 1.0,
+            w + 2.0,
+            h + 3.0,
+            12.0,
+            with_alpha(Color::BLACK, if self.dark { 0.45 } else { 0.12 }),
+        );
         c.fill_rrect(x, y, w, h, 11.0, if self.dark { t.surface } else { t.bg });
         c.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, h - 1.0, 11.0, t.border);
         // The whole card catches clicks, so a click between items doesn't fall through
-        self.regions.push((Rect::from_xywh(x, y, w, h).unwrap(), SettingsAction::LangMenu));
+        self.regions.push((
+            Rect::from_xywh(x, y, w, h).unwrap(),
+            SettingsAction::LangMenu,
+        ));
         for (i, pref) in LangPref::ALL.into_iter().enumerate() {
             let iy = y + 4.0 + i as f32 * ITEM_H;
             let r = Rect::from_xywh(x + 4.0, iy, w - 8.0, ITEM_H).unwrap();
@@ -644,8 +1014,20 @@ impl Settings {
                 c.fill_rrect(x + 4.0, iy, w - 8.0, ITEM_H, 7.0, t.hover);
             }
             let selected = pref == self.lang;
-            let weight = if selected { Weight::Semibold } else { Weight::Regular };
-            c.text(pref.label(), x + 16.0, iy + 22.0, 13.5, weight, t.text, Some(w - 60.0));
+            let weight = if selected {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
+            c.text(
+                pref.label(),
+                x + 16.0,
+                iy + 22.0,
+                13.5,
+                weight,
+                t.text,
+                Some(w - 60.0),
+            );
             if selected {
                 let (cx, cy) = (x + w - 26.0, iy + ITEM_H / 2.0);
                 c.line((cx - 5.0, cy), (cx - 1.5, cy + 3.5), 1.8, t.accent);
@@ -664,51 +1046,155 @@ impl Settings {
         let latest = u.latest.clone().unwrap_or_default();
         let staged = u.installing.then_some(u.stage).flatten();
         let (line, sub, color) = if !u.supported {
-            (tr("Updates are not available here").to_string(), tr("There are no official builds for this system.").to_string(), t.dim)
+            (
+                tr("Updates are not available here").to_string(),
+                tr("There are no official builds for this system.").to_string(),
+                t.dim,
+            )
         } else if let Some(stage) = staged {
-            (trf("Installing retail {version}…", &[("version", &latest)]), crate::ui::stage_text(stage, u.done_bytes, u.total_bytes), t.text)
+            (
+                trf("Installing retail {version}…", &[("version", &latest)]),
+                crate::ui::stage_text(stage, u.done_bytes, u.total_bytes),
+                t.text,
+            )
         } else if u.installing {
-            (trf("Installing retail {version}…", &[("version", &latest)]), tr("retail restarts when it is done.").to_string(), t.text)
+            (
+                trf("Installing retail {version}…", &[("version", &latest)]),
+                tr("retail restarts when it is done.").to_string(),
+                t.text,
+            )
         } else if u.available {
-            (trf("retail {version} is available", &[("version", &latest)]), trf("You have {version}.", &[("version", &u.current)]), t.accent)
+            (
+                trf("retail {version} is available", &[("version", &latest)]),
+                trf("You have {version}.", &[("version", &u.current)]),
+                t.accent,
+            )
         } else if let Some(e) = &u.error {
-            (tr("Could not check for updates").to_string(), e.clone(), t.red)
+            (
+                tr("Could not check for updates").to_string(),
+                e.clone(),
+                t.red,
+            )
         } else if u.latest.is_some() {
-            (tr("Up to date").to_string(), trf("You have the newest version, {version}.", &[("version", &u.current)]), t.text)
+            (
+                tr("Up to date").to_string(),
+                trf(
+                    "You have the newest version, {version}.",
+                    &[("version", &u.current)],
+                ),
+                t.text,
+            )
         } else {
-            (tr("Not checked yet").to_string(), tr("retail looks for new versions every few hours.").to_string(), t.text)
+            (
+                tr("Not checked yet").to_string(),
+                tr("retail looks for new versions every few hours.").to_string(),
+                t.text,
+            )
         };
         let busy = self.is_checking() || u.installing;
         let (label, style, action) = if u.available {
-            (tr("Update now"), Style::Primary, SettingsAction::InstallUpdate)
+            (
+                tr("Update now"),
+                Style::Primary,
+                SettingsAction::InstallUpdate,
+            )
         } else if self.is_checking() {
-            (tr("Checking…"), Style::Secondary, SettingsAction::CheckUpdate)
+            (
+                tr("Checking…"),
+                Style::Secondary,
+                SettingsAction::CheckUpdate,
+            )
         } else {
-            (tr("Check now"), Style::Secondary, SettingsAction::CheckUpdate)
+            (
+                tr("Check now"),
+                Style::Secondary,
+                SettingsAction::CheckUpdate,
+            )
         };
         let bw = c.measure(label, 13.0, Weight::Semibold) + 28.0;
-        c.text(&line, ix, y + 27.0, 13.5, Weight::Regular, color, Some(w - 48.0 - bw));
-        c.text(&sub, ix, y + 45.0, 11.5, Weight::Regular, t.dim, Some(w - 48.0 - bw));
+        c.text(
+            &line,
+            ix,
+            y + 27.0,
+            13.5,
+            Weight::Regular,
+            color,
+            Some(w - 48.0 - bw),
+        );
+        c.text(
+            &sub,
+            ix,
+            y + 45.0,
+            11.5,
+            Weight::Regular,
+            t.dim,
+            Some(w - 48.0 - bw),
+        );
         if let Some(stage) = staged {
-            crate::ui::progress_bar(c, t, ix, y + 53.0, w - 48.0 - bw, crate::ui::stage_fraction(stage, u.done_bytes, u.total_bytes));
+            crate::ui::progress_bar(
+                c,
+                t,
+                ix,
+                y + 53.0,
+                w - 48.0 - bw,
+                crate::ui::stage_fraction(stage, u.done_bytes, u.total_bytes),
+            );
         }
         if u.supported {
-            self.button(c, t, label, x + w - 16.0 - bw, y + 15.0, bw, style, !busy, action);
+            self.button(
+                c,
+                t,
+                label,
+                x + w - 16.0 - bw,
+                y + 15.0,
+                bw,
+                style,
+                !busy,
+                action,
+            );
         }
 
         let y = y + 64.0;
         c.hline(ix, x + w - 16.0, y, t.border);
-        c.text(tr("Install updates automatically"), ix, y + 26.0, 13.5, Weight::Regular, t.text, Some(w - 100.0));
-        c.text(tr("Otherwise retail lets you know when one is out."), ix, y + 44.0, 11.5, Weight::Regular, t.dim, Some(w - 100.0));
+        c.text(
+            tr("Install updates automatically"),
+            ix,
+            y + 26.0,
+            13.5,
+            Weight::Regular,
+            t.text,
+            Some(w - 100.0),
+        );
+        c.text(
+            tr("Otherwise retail lets you know when one is out."),
+            ix,
+            y + 44.0,
+            11.5,
+            Weight::Regular,
+            t.dim,
+            Some(w - 100.0),
+        );
         let on = s.prefs.auto_update;
         let (tw, th) = (42.0, 24.0);
         let (tx, ty) = (x + w - 16.0 - tw, y + 18.0);
         let r = Rect::from_xywh(tx - 6.0, ty - 6.0, tw + 12.0, th + 12.0).unwrap();
         let track = if on { t.accent } else { t.gray };
-        let track = if self.hovered(&r) { shade(track, if self.dark { 1.12 } else { 0.92 }) } else { track };
-        let track = if u.supported { track } else { with_alpha(track, 0.5) };
+        let track = if self.hovered(&r) {
+            shade(track, if self.dark { 1.12 } else { 0.92 })
+        } else {
+            track
+        };
+        let track = if u.supported {
+            track
+        } else {
+            with_alpha(track, 0.5)
+        };
         c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
-        let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
+        let kx = if on {
+            tx + tw - th / 2.0
+        } else {
+            tx + th / 2.0
+        };
         c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
         if u.supported {
             self.regions.push((r, SettingsAction::AutoUpdate(!on)));
@@ -719,7 +1205,15 @@ impl Settings {
         let (x, w) = (PAD, WIDTH - 2.0 * PAD);
         c.fill_rrect(x, y, w, NETWORK_H, 12.0, t.surface);
         let ix = x + 16.0;
-        c.text(tr("Offer as exit node"), ix, y + 32.0, 13.5, Weight::Regular, t.text, None);
+        c.text(
+            tr("Offer as exit node"),
+            ix,
+            y + 32.0,
+            13.5,
+            Weight::Regular,
+            t.text,
+            None,
+        );
         c.text(
             tr("Other devices can reach the internet through this one."),
             ix,
@@ -734,47 +1228,119 @@ impl Settings {
         let (tx, ty) = (x + w - 16.0 - tw, y + 22.0);
         let r = Rect::from_xywh(tx - 6.0, ty - 6.0, tw + 12.0, th + 12.0).unwrap();
         let track = if on { t.accent } else { t.gray };
-        let track = if self.hovered(&r) { shade(track, if self.dark { 1.12 } else { 0.92 }) } else { track };
+        let track = if self.hovered(&r) {
+            shade(track, if self.dark { 1.12 } else { 0.92 })
+        } else {
+            track
+        };
         c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
-        let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
+        let kx = if on {
+            tx + tw - th / 2.0
+        } else {
+            tx + th / 2.0
+        };
         c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
         self.regions.push((r, SettingsAction::AdvertiseExit(!on)));
 
         let y = y + 76.0;
         c.hline(ix, x + w - 16.0, y, t.border);
-        c.text(tr("Open a router port"), ix, y + 26.0, 13.5, Weight::Regular, t.text, Some(w - 100.0));
+        c.text(
+            tr("Open a router port"),
+            ix,
+            y + 26.0,
+            13.5,
+            Weight::Regular,
+            t.text,
+            Some(w - 100.0),
+        );
         let on = s.prefs.open_router_port;
         let (sub, color) = match s.router_port.as_ref().filter(|_| on) {
-            Some(PortState::Opened { method, port }) => {
-                (trf("Opened with {method} · UDP {port}", &[("method", method), ("port", port)]), t.text)
-            }
-            Some(PortState::Unavailable { port }) => {
-                (trf("Refused: turn on UPnP or forward UDP {port}", &[("port", port)]), t.amber)
-            }
-            None => (tr("Devices elsewhere connect directly, not via the relay.").to_string(), t.dim),
+            Some(PortState::Opened { method, port }) => (
+                trf(
+                    "Opened with {method} · UDP {port}",
+                    &[("method", method), ("port", port)],
+                ),
+                t.text,
+            ),
+            Some(PortState::Unavailable { port }) => (
+                trf(
+                    "Refused: turn on UPnP or forward UDP {port}",
+                    &[("port", port)],
+                ),
+                t.amber,
+            ),
+            None => (
+                tr("Devices elsewhere connect directly, not via the relay.").to_string(),
+                t.dim,
+            ),
         };
-        c.text(&sub, ix, y + 44.0, 11.5, Weight::Regular, color, Some(w - 100.0));
+        c.text(
+            &sub,
+            ix,
+            y + 44.0,
+            11.5,
+            Weight::Regular,
+            color,
+            Some(w - 100.0),
+        );
         let (tw, th) = (42.0, 24.0);
         let (tx, ty) = (x + w - 16.0 - tw, y + 18.0);
         let r = Rect::from_xywh(tx - 6.0, ty - 6.0, tw + 12.0, th + 12.0).unwrap();
         let track = if on { t.accent } else { t.gray };
-        let track = if self.hovered(&r) { shade(track, if self.dark { 1.12 } else { 0.92 }) } else { track };
+        let track = if self.hovered(&r) {
+            shade(track, if self.dark { 1.12 } else { 0.92 })
+        } else {
+            track
+        };
         c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
-        let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
+        let kx = if on {
+            tx + tw - th / 2.0
+        } else {
+            tx + th / 2.0
+        };
         c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
         self.regions.push((r, SettingsAction::OpenRouterPort(!on)));
 
         let y = y + 64.0;
         c.hline(ix, x + w - 16.0, y, t.border);
-        c.text(tr("Upload limit"), ix, y + 26.0, 13.5, Weight::Regular, t.text, Some(w - 140.0));
+        c.text(
+            tr("Upload limit"),
+            ix,
+            y + 26.0,
+            13.5,
+            Weight::Regular,
+            t.text,
+            Some(w - 140.0),
+        );
         let sub = tr("Keeps games quick during downloads.");
-        c.text(sub, ix, y + 44.0, 11.5, Weight::Regular, t.dim, Some(w - 140.0));
+        c.text(
+            sub,
+            ix,
+            y + 44.0,
+            11.5,
+            Weight::Regular,
+            t.dim,
+            Some(w - 140.0),
+        );
         let now = s.prefs.upload_limit_mbit.unwrap_or(0);
-        let label = if now == 0 { tr("None").to_string() } else { format!("{now} Mbit/s") };
+        let label = if now == 0 {
+            tr("None").to_string()
+        } else {
+            format!("{now} Mbit/s")
+        };
         let next = UPLOAD_STEPS.iter().copied().find(|&m| m > now).unwrap_or(0);
         let bw = c.measure(&label, 13.0, Weight::Semibold).max(64.0) + 28.0;
-        self.button(c, t, &label, x + w - 16.0 - bw, y + 14.0, bw, Style::Secondary, true, SettingsAction::UploadLimit(next));
-
+        self.button(
+            c,
+            t,
+            &label,
+            x + w - 16.0 - bw,
+            y + 14.0,
+            bw,
+            Style::Secondary,
+            true,
+            SettingsAction::UploadLimit(next),
+        );
     }
 
     fn account(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, x: f32, y: f32, w: f32) {
@@ -789,7 +1355,17 @@ impl Settings {
         let by = y + 2.0 * 50.0 + 10.0;
         let change = tr("Change server");
         let change_w = c.measure(change, 13.0, Weight::Semibold).max(104.0) + 32.0;
-        self.button(c, t, change, x, by, change_w, Style::Secondary, true, SettingsAction::StartChange);
+        self.button(
+            c,
+            t,
+            change,
+            x,
+            by,
+            change_w,
+            Style::Secondary,
+            true,
+            SettingsAction::StartChange,
+        );
         let (label, style) = if self.logout_armed() {
             (tr("Click again to log out"), Style::Danger)
         } else if self.is_busy() {
@@ -798,7 +1374,17 @@ impl Settings {
             (tr("Log out"), Style::Secondary)
         };
         let lw = c.measure(label, 13.0, Weight::Semibold) + 32.0;
-        self.button(c, t, label, x + w - lw, by, lw, style, !self.is_busy(), SettingsAction::Logout);
+        self.button(
+            c,
+            t,
+            label,
+            x + w - lw,
+            by,
+            lw,
+            style,
+            !self.is_busy(),
+            SettingsAction::Logout,
+        );
     }
 
     fn form(&mut self, c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32) {
@@ -825,13 +1411,38 @@ impl Settings {
             }
         }
         let busy = self.is_busy();
-        let label = if busy { tr("Connecting…") } else { tr("Connect") };
+        let label = if busy {
+            tr("Connecting…")
+        } else {
+            tr("Connect")
+        };
         let first = self.inputs[SERVER].trimmed();
-        let ready = first.starts_with("retail1.") || (!first.is_empty() && !self.inputs[AUTH_KEY].trimmed().is_empty());
+        let ready = first.starts_with("retail1.")
+            || (!first.is_empty() && !self.inputs[AUTH_KEY].trimmed().is_empty());
         let cw = c.measure(label, 13.0, Weight::Semibold).max(56.0) + 48.0;
-        self.button(c, t, label, x, fy + 4.0, cw, Style::Primary, ready && !busy, SettingsAction::Connect);
+        self.button(
+            c,
+            t,
+            label,
+            x,
+            fy + 4.0,
+            cw,
+            Style::Primary,
+            ready && !busy,
+            SettingsAction::Connect,
+        );
         if self.logged_in() || !self.servers().is_empty() {
-            self.button(c, t, tr("Cancel"), x + cw + 12.0, fy + 4.0, 96.0, Style::Secondary, !busy, SettingsAction::Cancel);
+            self.button(
+                c,
+                t,
+                tr("Cancel"),
+                x + cw + 12.0,
+                fy + 4.0,
+                96.0,
+                Style::Secondary,
+                !busy,
+                SettingsAction::Cancel,
+            );
         }
     }
 
@@ -840,9 +1451,21 @@ impl Settings {
         let r = Rect::from_xywh(x, y, w, FIELD_H).unwrap();
         c.fill_rrect(x, y, w, FIELD_H, 8.0, t.bg);
         if focused {
-            c.stroke_rrect_w(x + 0.75, y + 0.75, w - 1.5, FIELD_H - 1.5, 8.0, 1.5, t.accent);
+            c.stroke_rrect_w(
+                x + 0.75,
+                y + 0.75,
+                w - 1.5,
+                FIELD_H - 1.5,
+                8.0,
+                1.5,
+                t.accent,
+            );
         } else {
-            let border = if self.hovered(&r) { shade(t.border, if self.dark { 1.4 } else { 0.85 }) } else { t.border };
+            let border = if self.hovered(&r) {
+                shade(t.border, if self.dark { 1.4 } else { 0.85 })
+            } else {
+                t.border
+            };
             c.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, FIELD_H - 1.0, 8.0, border);
         }
         self.regions.push((r, SettingsAction::Focus(i)));
@@ -854,7 +1477,15 @@ impl Settings {
         let baseline = y + FIELD_H / 2.0 + 5.0;
         let avail = w - 24.0;
         if shown.is_empty() {
-            c.text(tr(input.placeholder), tx, baseline, px, Weight::Regular, with_alpha(t.dim, 0.7), Some(avail));
+            c.text(
+                tr(input.placeholder),
+                tx,
+                baseline,
+                px,
+                Weight::Regular,
+                with_alpha(t.dim, 0.7),
+                Some(avail),
+            );
         } else {
             // Keep the caret in view by sliding long text to the left
             let before: String = shown.chars().take(caret).collect();
@@ -862,7 +1493,14 @@ impl Settings {
             let shift = (caret_x - avail + 2.0).max(0.0);
             if input.is_all_selected() {
                 let sw = c.measure(&shown, px, Weight::Regular).min(avail);
-                c.fill_rrect(tx - 2.0, y + 8.0, sw + 4.0, FIELD_H - 16.0, 3.0, with_alpha(t.accent, 0.28));
+                c.fill_rrect(
+                    tx - 2.0,
+                    y + 8.0,
+                    sw + 4.0,
+                    FIELD_H - 16.0,
+                    3.0,
+                    with_alpha(t.accent, 0.28),
+                );
             }
             let mut dropped = 0;
             let mut skipped_w = 0.0;
@@ -874,9 +1512,20 @@ impl Settings {
                 dropped += 1;
             }
             let visible: String = shown.chars().skip(dropped).collect();
-            c.text(&visible, tx, baseline, px, Weight::Regular, t.text, Some(avail));
+            c.text(
+                &visible,
+                tx,
+                baseline,
+                px,
+                Weight::Regular,
+                t.text,
+                Some(avail),
+            );
             if focused {
-                let caret_vis: String = visible.chars().take(caret.saturating_sub(dropped)).collect();
+                let caret_vis: String = visible
+                    .chars()
+                    .take(caret.saturating_sub(dropped))
+                    .collect();
                 let cx = tx + c.measure(&caret_vis, px, Weight::Regular);
                 c.fill_rect(cx, y + 9.0, 1.5, FIELD_H - 18.0, t.text);
             }
@@ -906,21 +1555,50 @@ impl Settings {
             Style::Danger => (t.red, Color::WHITE, None),
             Style::Secondary => (t.bg, t.text, Some(t.border)),
         };
-        let bg = if hover { shade(bg, if self.dark || style != Style::Secondary { 1.1 } else { 0.96 }) } else { bg };
-        let (bg, fg) = if enabled { (bg, fg) } else { (with_alpha(bg, 0.5), with_alpha(fg, 0.6)) };
+        let bg = if hover {
+            shade(
+                bg,
+                if self.dark || style != Style::Secondary {
+                    1.1
+                } else {
+                    0.96
+                },
+            )
+        } else {
+            bg
+        };
+        let (bg, fg) = if enabled {
+            (bg, fg)
+        } else {
+            (with_alpha(bg, 0.5), with_alpha(fg, 0.6))
+        };
         c.fill_rrect(x, y, w, BUTTON_H, 8.0, bg);
         if let Some(b) = border {
             c.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, BUTTON_H - 1.0, 8.0, b);
         }
         let lw = c.measure(label, 13.0, Weight::Semibold);
-        c.text(label, x + (w - lw) / 2.0, y + BUTTON_H / 2.0 + 4.5, 13.0, Weight::Semibold, fg, None);
+        c.text(
+            label,
+            x + (w - lw) / 2.0,
+            y + BUTTON_H / 2.0 + 4.5,
+            13.0,
+            Weight::Semibold,
+            fg,
+            None,
+        );
         if enabled {
             self.regions.push((r, action));
         }
     }
 
     /// A row of choices: (selected, label, action) each
-    fn segmented(&mut self, c: &mut Canvas, t: &Theme, y: f32, options: &[(bool, &str, SettingsAction)]) {
+    fn segmented(
+        &mut self,
+        c: &mut Canvas,
+        t: &Theme,
+        y: f32,
+        options: &[(bool, &str, SettingsAction)],
+    ) {
         let w = WIDTH - 2.0 * PAD;
         c.fill_rrect(PAD, y, w, 40.0, 10.0, t.surface);
         let seg = (w - 8.0) / options.len() as f32;
@@ -929,14 +1607,33 @@ impl Settings {
             let r = Rect::from_xywh(sx, y + 4.0, seg, 32.0).unwrap();
             let selected = *selected;
             if selected {
-                c.fill_rrect(sx, y + 4.0, seg, 32.0, 7.0, if self.dark { t.hover } else { t.bg });
+                c.fill_rrect(
+                    sx,
+                    y + 4.0,
+                    seg,
+                    32.0,
+                    7.0,
+                    if self.dark { t.hover } else { t.bg },
+                );
             } else if self.hovered(&r) {
                 c.fill_rrect(sx, y + 4.0, seg, 32.0, 7.0, with_alpha(t.hover, 0.6));
             }
-            let weight = if selected { Weight::Semibold } else { Weight::Regular };
+            let weight = if selected {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
             let lw = c.measure(label, 13.0, weight);
             let color = if selected { t.text } else { t.dim };
-            c.text(label, sx + (seg - lw) / 2.0, y + 25.0, 13.0, weight, color, None);
+            c.text(
+                label,
+                sx + (seg - lw) / 2.0,
+                y + 25.0,
+                13.0,
+                weight,
+                color,
+                None,
+            );
             self.regions.push((r, action.clone()));
         }
     }
@@ -944,7 +1641,10 @@ impl Settings {
 
 /// A server URL as people say it: no scheme, no default port
 pub fn server_label(url: &str) -> String {
-    let s = url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+    let s = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
     s.strip_suffix(":443").unwrap_or(s).to_string()
 }
 
@@ -964,7 +1664,7 @@ fn reason_text(p: &PeerStatus) -> &'static str {
     }
 }
 
-fn bytes(n: u64) -> String {
+pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -972,7 +1672,11 @@ fn bytes(n: u64) -> String {
         v /= 1024.0;
         u += 1;
     }
-    if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[u]) }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
 }
 
 fn theme_label(p: ThemePref) -> &'static str {
@@ -1025,7 +1729,13 @@ fn rtt_graph(c: &mut Canvas, t: &Theme, history: &[u16], x: f32, y: f32) {
         }
         // Square root, so 20 ms and 300 ms both read
         let h = (f32::from(ms.min(400)) / 400.0).sqrt() * (GRAPH_H - 2.0) + 2.0;
-        let color = if ms < 80 { t.accent } else if ms < 200 { t.amber } else { t.red };
+        let color = if ms < 80 {
+            t.accent
+        } else if ms < 200 {
+            t.amber
+        } else {
+            t.red
+        };
         c.fill_rect(bx, y + GRAPH_H - h, 1.0, h, color);
     }
 }

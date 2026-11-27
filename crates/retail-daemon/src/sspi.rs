@@ -40,14 +40,23 @@ mod imp {
     use anyhow::{Result, bail};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::Authentication::Identity::{
-        AcquireCredentialsHandleW, CompleteAuthToken, DeleteSecurityContext, FreeContextBuffer, FreeCredentialsHandle,
-        ISC_REQ_ALLOCATE_MEMORY, ISC_REQ_CONNECTION, InitializeSecurityContextW, SECBUFFER_TOKEN, SECBUFFER_VERSION,
-        SECPKG_CRED_OUTBOUND, SECURITY_NATIVE_DREP, SecBuffer, SecBufferDesc,
+        AcquireCredentialsHandleW, CompleteAuthToken, DeleteSecurityContext, FreeContextBuffer,
+        FreeCredentialsHandle, ISC_REQ_ALLOCATE_MEMORY, ISC_REQ_CONNECTION,
+        InitializeSecurityContextW, SECBUFFER_TOKEN, SECBUFFER_VERSION, SECPKG_CRED_OUTBOUND,
+        SECURITY_NATIVE_DREP, SecBuffer, SecBufferDesc,
     };
     use windows_sys::Win32::Security::Credentials::SecHandle;
-    use windows_sys::Win32::Security::{GetLengthSid, GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TOKEN_USER, TokenUser};
-    use windows_sys::Win32::System::Registry::{HKEY, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW, RegOpenCurrentUser};
-    use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TOKEN_USER,
+        TokenUser,
+    };
+    use windows_sys::Win32::System::Registry::{
+        HKEY, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW,
+        RegOpenCurrentUser,
+    };
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+    };
 
     const SEC_E_OK: i32 = 0;
     const SEC_I_CONTINUE_NEEDED: i32 = 0x90312;
@@ -68,7 +77,14 @@ mod imp {
         let mut len = 0u32;
         // SAFETY: the buffer is u64-aligned and its real size is passed
         unsafe {
-            if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut len) == 0 {
+            if GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut len,
+            ) == 0
+            {
                 return None;
             }
             let user = &*(buf.as_ptr() as *const TOKEN_USER);
@@ -82,10 +98,14 @@ mod imp {
     /// (a service running as SYSTEM), and gives their SID. With `owner`, only
     /// as that user: `None` when someone else, or nobody, is at the console,
     /// rather than this process's own identity.
-    fn as_console_user<T>(owner: Option<&[u8]>, f: impl FnOnce() -> T) -> Option<(T, Option<Vec<u8>>)> {
+    fn as_console_user<T>(
+        owner: Option<&[u8]>,
+        f: impl FnOnce() -> T,
+    ) -> Option<(T, Option<Vec<u8>>)> {
         let mut token: HANDLE = std::ptr::null_mut();
         let session = unsafe { WTSGetActiveConsoleSessionId() };
-        let borrowed = session != u32::MAX && unsafe { WTSQueryUserToken(session, &mut token) } != 0;
+        let borrowed =
+            session != u32::MAX && unsafe { WTSQueryUserToken(session, &mut token) } != 0;
         if !borrowed {
             return owner.is_none().then(|| (f(), None));
         }
@@ -115,13 +135,30 @@ mod imp {
             let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
             let mut enable = 0u32;
             let mut size = 4u32;
-            let enabled = RegGetValueW(root, key.as_ptr(), wide("ProxyEnable").as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), (&mut enable as *mut u32).cast(), &mut size) == 0
+            let enabled = RegGetValueW(
+                root,
+                key.as_ptr(),
+                wide("ProxyEnable").as_ptr(),
+                RRF_RT_REG_DWORD,
+                std::ptr::null_mut(),
+                (&mut enable as *mut u32).cast(),
+                &mut size,
+            ) == 0
                 && enable != 0;
             let mut out = None;
             if enabled {
                 let mut buf = vec![0u16; 2048];
                 let mut bytes = (buf.len() * 2) as u32;
-                if RegGetValueW(root, key.as_ptr(), wide("ProxyServer").as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes) == 0 {
+                if RegGetValueW(
+                    root,
+                    key.as_ptr(),
+                    wide("ProxyServer").as_ptr(),
+                    RRF_RT_REG_SZ,
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr().cast(),
+                    &mut bytes,
+                ) == 0
+                {
                     let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
                     out = Some(String::from_utf16_lossy(&buf[..n]));
                 }
@@ -149,7 +186,11 @@ mod imp {
         /// Kerberos needs as `HTTP/host`. `owner`: the SID of the user who
         /// chose the proxy, who alone may sign in to it.
         pub fn new(scheme: &str, host: &str, owner: Option<Vec<u8>>) -> Result<Self> {
-            let scheme: &'static str = if scheme.eq_ignore_ascii_case("ntlm") { "NTLM" } else { "Negotiate" };
+            let scheme: &'static str = if scheme.eq_ignore_ascii_case("ntlm") {
+                "NTLM"
+            } else {
+                "Negotiate"
+            };
             let package = wide(scheme);
             let mut cred = SecHandle::default();
             let mut expiry = 0i64;
@@ -167,11 +208,19 @@ mod imp {
                 )
             })
             .map(|(s, _)| s);
-            let Some(status) = status else { bail!("the user who chose this proxy is not at the console") };
+            let Some(status) = status else {
+                bail!("the user who chose this proxy is not at the console")
+            };
             if status != SEC_E_OK {
                 bail!("Windows sign-in unavailable ({scheme}, 0x{status:08x})");
             }
-            Ok(Negotiator { scheme, cred, ctx: None, target: wide(&format!("HTTP/{host}")), owner })
+            Ok(Negotiator {
+                scheme,
+                cred,
+                ctx: None,
+                target: wide(&format!("HTTP/{host}")),
+                owner,
+            })
         }
 
         pub fn scheme(&self) -> &'static str {
@@ -185,21 +234,39 @@ mod imp {
                 BufferType: SECBUFFER_TOKEN,
                 pvBuffer: input.map_or(std::ptr::null_mut(), |i| i.as_ptr() as *mut _),
             };
-            let in_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: 1, pBuffers: &mut in_buf };
-            let mut out_buf = SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_TOKEN, pvBuffer: std::ptr::null_mut() };
-            let mut out_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: 1, pBuffers: &mut out_buf };
+            let in_desc = SecBufferDesc {
+                ulVersion: SECBUFFER_VERSION,
+                cBuffers: 1,
+                pBuffers: &mut in_buf,
+            };
+            let mut out_buf = SecBuffer {
+                cbBuffer: 0,
+                BufferType: SECBUFFER_TOKEN,
+                pvBuffer: std::ptr::null_mut(),
+            };
+            let mut out_desc = SecBufferDesc {
+                ulVersion: SECBUFFER_VERSION,
+                cBuffers: 1,
+                pBuffers: &mut out_buf,
+            };
             let mut new_ctx = self.ctx.unwrap_or_default();
             let mut attrs = 0u32;
             let mut expiry = 0i64;
             let status = as_console_user(self.owner.as_deref(), || unsafe {
                 InitializeSecurityContextW(
                     &self.cred,
-                    self.ctx.as_ref().map_or(std::ptr::null(), |c| c as *const _),
+                    self.ctx
+                        .as_ref()
+                        .map_or(std::ptr::null(), |c| c as *const _),
                     self.target.as_ptr(),
                     ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONNECTION,
                     0,
                     SECURITY_NATIVE_DREP,
-                    if input.is_some() { &in_desc } else { std::ptr::null() },
+                    if input.is_some() {
+                        &in_desc
+                    } else {
+                        std::ptr::null()
+                    },
                     0,
                     &mut new_ctx,
                     &mut out_desc,
@@ -208,8 +275,16 @@ mod imp {
                 )
             })
             .map(|(s, _)| s);
-            let Some(status) = status else { bail!("the user who chose this proxy is not at the console") };
-            if !matches!(status, SEC_E_OK | SEC_I_CONTINUE_NEEDED | SEC_I_COMPLETE_NEEDED | SEC_I_COMPLETE_AND_CONTINUE) {
+            let Some(status) = status else {
+                bail!("the user who chose this proxy is not at the console")
+            };
+            if !matches!(
+                status,
+                SEC_E_OK
+                    | SEC_I_CONTINUE_NEEDED
+                    | SEC_I_COMPLETE_NEEDED
+                    | SEC_I_COMPLETE_AND_CONTINUE
+            ) {
                 bail!("Windows sign-in failed ({}, 0x{status:08x})", self.scheme);
             }
             self.ctx = Some(new_ctx);
@@ -219,7 +294,13 @@ mod imp {
             let token = if out_buf.pvBuffer.is_null() {
                 Vec::new()
             } else {
-                let t = unsafe { std::slice::from_raw_parts(out_buf.pvBuffer as *const u8, out_buf.cbBuffer as usize) }.to_vec();
+                let t = unsafe {
+                    std::slice::from_raw_parts(
+                        out_buf.pvBuffer as *const u8,
+                        out_buf.cbBuffer as usize,
+                    )
+                }
+                .to_vec();
                 unsafe { FreeContextBuffer(out_buf.pvBuffer) };
                 t
             };
@@ -249,7 +330,8 @@ mod imp {
         /// proxy would check it
         #[test]
         fn ntlm_round_trip() {
-            let mut client = Negotiator::new("NTLM", "localhost", None).expect("client credentials");
+            let mut client =
+                Negotiator::new("NTLM", "localhost", None).expect("client credentials");
             let package = wide("NTLM");
             let mut server_cred = SecHandle::default();
             let mut expiry = 0i64;
@@ -270,16 +352,34 @@ mod imp {
             let mut server_ctx: Option<SecHandle> = None;
             let mut token = client.step(None).unwrap();
             for _ in 0..3 {
-                let mut in_buf = SecBuffer { cbBuffer: token.len() as u32, BufferType: SECBUFFER_TOKEN, pvBuffer: token.as_mut_ptr() as _ };
-                let in_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: 1, pBuffers: &mut in_buf };
-                let mut out_buf = SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_TOKEN, pvBuffer: std::ptr::null_mut() };
-                let mut out_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: 1, pBuffers: &mut out_buf };
+                let mut in_buf = SecBuffer {
+                    cbBuffer: token.len() as u32,
+                    BufferType: SECBUFFER_TOKEN,
+                    pvBuffer: token.as_mut_ptr() as _,
+                };
+                let in_desc = SecBufferDesc {
+                    ulVersion: SECBUFFER_VERSION,
+                    cBuffers: 1,
+                    pBuffers: &mut in_buf,
+                };
+                let mut out_buf = SecBuffer {
+                    cbBuffer: 0,
+                    BufferType: SECBUFFER_TOKEN,
+                    pvBuffer: std::ptr::null_mut(),
+                };
+                let mut out_desc = SecBufferDesc {
+                    ulVersion: SECBUFFER_VERSION,
+                    cBuffers: 1,
+                    pBuffers: &mut out_buf,
+                };
                 let mut new_ctx = server_ctx.unwrap_or_default();
                 let mut attrs = 0u32;
                 let status = unsafe {
                     AcceptSecurityContext(
                         &server_cred,
-                        server_ctx.as_ref().map_or(std::ptr::null(), |c| c as *const _),
+                        server_ctx
+                            .as_ref()
+                            .map_or(std::ptr::null(), |c| c as *const _),
                         &in_desc,
                         ASC_REQ_ALLOCATE_MEMORY | ASC_REQ_CONNECTION,
                         SECURITY_NATIVE_DREP,
@@ -297,9 +397,17 @@ mod imp {
                     }
                     return;
                 }
-                assert_eq!(status, SEC_I_CONTINUE_NEEDED, "server status 0x{status:08x}");
-                let challenge =
-                    unsafe { std::slice::from_raw_parts(out_buf.pvBuffer as *const u8, out_buf.cbBuffer as usize) }.to_vec();
+                assert_eq!(
+                    status, SEC_I_CONTINUE_NEEDED,
+                    "server status 0x{status:08x}"
+                );
+                let challenge = unsafe {
+                    std::slice::from_raw_parts(
+                        out_buf.pvBuffer as *const u8,
+                        out_buf.cbBuffer as usize,
+                    )
+                }
+                .to_vec();
                 unsafe { FreeContextBuffer(out_buf.pvBuffer) };
                 token = client.step(Some(&challenge)).unwrap();
             }

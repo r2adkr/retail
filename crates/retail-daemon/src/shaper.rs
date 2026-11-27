@@ -24,7 +24,13 @@ struct Bucket {
 
 impl Default for Limiter {
     fn default() -> Self {
-        Limiter { rate: AtomicU64::new(0), bucket: Mutex::new(Bucket { tokens: 0.0, last: Instant::now() }) }
+        Limiter {
+            rate: AtomicU64::new(0),
+            bucket: Mutex::new(Bucket {
+                tokens: 0.0,
+                last: Instant::now(),
+            }),
+        }
     }
 }
 
@@ -34,7 +40,10 @@ impl Limiter {
         let rate = u64::from(mbit.unwrap_or(0)) * 1_000_000 / 8;
         self.rate.store(rate, Ordering::Relaxed);
         let mut b = self.bucket.lock().unwrap();
-        *b = Bucket { tokens: burst(rate), last: Instant::now() };
+        *b = Bucket {
+            tokens: burst(rate),
+            last: Instant::now(),
+        };
     }
 
     pub fn on(&self) -> bool {
@@ -57,7 +66,11 @@ impl Limiter {
         b.last = now;
         b.tokens = (b.tokens + dt * rate as f64).min(burst);
         let len = len as f64;
-        let floor = if len <= SMALL as f64 { -burst / 2.0 } else { 0.0 };
+        let floor = if len <= SMALL as f64 {
+            -burst / 2.0
+        } else {
+            0.0
+        };
         if b.tokens - len >= floor {
             b.tokens -= len;
             true
@@ -91,7 +104,10 @@ mod tests {
             }
         }
         let limit = 10_000_000.0 + burst(10_000_000);
-        assert!(sent as f64 <= limit && sent as f64 > 0.9 * 10_000_000.0, "{sent}");
+        assert!(
+            sent as f64 <= limit && sent as f64 > 0.9 * 10_000_000.0,
+            "{sent}"
+        );
         // Bulk is refused now, a game's packet is not
         let later = t0 + Duration::from_secs(1);
         assert!((0..10).filter(|_| l.allow_at(1500, later)).count() <= 1);

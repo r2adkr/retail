@@ -5,8 +5,11 @@ use clap::{Parser, Subcommand};
 use retail_proto::LOCAL_API_ADDR;
 use retail_proto::acl::{AclPolicy, AclRule};
 use retail_proto::api::{
-    AclRequest, ApiError, BackendState, BackupRequest, BackupResponse, ExpiryRequest, HelperDeviceRequest, RemoveRequest, RenewRequest, RestoreRequest, RoutesRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
-    PathReason, PortState, StatusResponse, TagsRequest, UpRequest,
+    AclRequest, ApiError, BackendState, BackupRequest, BackupResponse, ExpiryRequest,
+    HelperDeviceRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse,
+    PathReason, PortState, PrefsRequest, RemoveRequest, RenewRequest, RestoreRequest,
+    RoutesRequest, ServerSelect, ServerStartRequest, ServerStatus, StatusResponse, TagsRequest,
+    UpRequest,
 };
 
 #[derive(Parser)]
@@ -246,14 +249,10 @@ enum ServerCmd {
     },
     /// Save the server's data (devices, invites, rules, keys) to a
     /// passphrase-encrypted file, to move or restore the server
-    Backup {
-        file: String,
-    },
+    Backup { file: String },
     /// Replace this device's server data with a backup's (the server must be
     /// stopped); then `retail server start`
-    Restore {
-        file: String,
-    },
+    Restore { file: String },
     /// Revoke an invite (a named one stops working at once)
     Revoke { id: i64 },
     /// Access between devices: show the rules, or change them
@@ -312,7 +311,10 @@ struct Client {
 }
 
 impl Client {
-    async fn call<T: serde::de::DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> Result<T> {
+    async fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<T> {
         let mut req = req.header("X-Retail-Local", "1");
         if let Some(token) = retail_proto::local::read_token() {
             req = req.header(retail_proto::local::TOKEN_HEADER, token);
@@ -323,21 +325,34 @@ impl Client {
             .with_context(|| format!("cannot reach retaild at {} (is it running?)", self.base))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let msg = resp.json::<ApiError>().await.map(|e| e.error).unwrap_or_default();
+            let msg = resp
+                .json::<ApiError>()
+                .await
+                .map(|e| e.error)
+                .unwrap_or_default();
             bail!("{msg} ({status})");
         }
         Ok(resp.json().await?)
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        self.call(self.http.get(format!("{}{path}", self.base))).await
+        self.call(self.http.get(format!("{}{path}", self.base)))
+            .await
     }
 
     /// Changes carry invite codes, passwords and backups, so they go only to
     /// the real daemon, not a program that took its port while it was down.
     /// From an administrator/root, they carry the administrator token too.
-    async fn post<T: serde::Serialize, R: serde::de::DeserializeOwned>(&self, path: &str, body: Option<&T>) -> Result<R> {
-        if let Ok(addr) = self.base.trim_start_matches("http://").parse::<std::net::SocketAddr>() {
+    async fn post<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Option<&T>,
+    ) -> Result<R> {
+        if let Ok(addr) = self
+            .base
+            .trim_start_matches("http://")
+            .parse::<std::net::SocketAddr>()
+        {
             retail_proto::local::check_listener(addr).map_err(anyhow::Error::msg)?;
         }
         let mut req = self.http.post(format!("{}{path}", self.base));
@@ -360,8 +375,18 @@ async fn main() -> Result<()> {
     };
 
     match cli.cmd {
-        Cmd::Up { server, invite, auth_key, hostname } => {
-            let req = UpRequest { server: server.unwrap_or_default(), auth_key, hostname, invite };
+        Cmd::Up {
+            server,
+            invite,
+            auth_key,
+            hostname,
+        } => {
+            let req = UpRequest {
+                server: server.unwrap_or_default(),
+                auth_key,
+                hostname,
+                invite,
+            };
             let st: StatusResponse = client.post("/up", Some(&req)).await?;
             print_status(&st);
         }
@@ -378,17 +403,30 @@ async fn main() -> Result<()> {
             }
             for s in &st.servers {
                 let ip = s.ip.map(|ip| ip.to_string()).unwrap_or_default();
-                println!("{} {:<40} {ip}", if s.current { "*" } else { " " }, s.server);
+                println!(
+                    "{} {:<40} {ip}",
+                    if s.current { "*" } else { " " },
+                    s.server
+                );
             }
         }
         Cmd::Switch { server } => {
             let server = saved_server(&client, &server).await?;
-            let st: StatusResponse = client.post("/servers/switch", Some(&ServerSelect { server })).await?;
+            let st: StatusResponse = client
+                .post("/servers/switch", Some(&ServerSelect { server }))
+                .await?;
             print_status(&st);
         }
         Cmd::Forget { server } => {
             let server = saved_server(&client, &server).await?;
-            client.post::<_, StatusResponse>("/servers/forget", Some(&ServerSelect { server: server.clone() })).await?;
+            client
+                .post::<_, StatusResponse>(
+                    "/servers/forget",
+                    Some(&ServerSelect {
+                        server: server.clone(),
+                    }),
+                )
+                .await?;
             println!("forgot {server}");
         }
         Cmd::Status { json } => {
@@ -404,9 +442,16 @@ async fn main() -> Result<()> {
             None => bail!("not logged in"),
         },
         Cmd::Wake { device } => {
-            let req = retail_proto::api::WakeRequest { peer: device.clone() };
-            let r = client.post::<_, retail_proto::api::WakeResponse>("/wake", Some(&req)).await?;
-            println!("sent a wake-up to {device} (from {}); it may take a minute to come online", r.sent_by.join(", "));
+            let req = retail_proto::api::WakeRequest {
+                peer: device.clone(),
+            };
+            let r = client
+                .post::<_, retail_proto::api::WakeResponse>("/wake", Some(&req))
+                .await?;
+            println!(
+                "sent a wake-up to {device} (from {}); it may take a minute to come online",
+                r.sent_by.join(", ")
+            );
         }
         Cmd::Update { check } => {
             let st: StatusResponse = client.post::<(), _>("/update/check", None).await?;
@@ -418,28 +463,67 @@ async fn main() -> Result<()> {
                         println!("installing retail {latest}; retaild restarts when it is done");
                     }
                 }
-                (Some(latest), true) => println!("retail {latest} is available (this is {}); `retail update` installs it", u.current),
+                (Some(latest), true) => println!(
+                    "retail {latest} is available (this is {}); `retail update` installs it",
+                    u.current
+                ),
                 _ => println!("retail {} is the newest version", u.current),
             }
         }
-        Cmd::Set { exit_node, advertise_exit_node, memory_limit, proxy, auto_update, advertise_routes, open_router_port, upload_limit } => {
-            let advertise_routes = advertise_routes.map(|r| if r.trim() == "none" { Vec::new() } else { vec![r] });
+        Cmd::Set {
+            exit_node,
+            advertise_exit_node,
+            memory_limit,
+            proxy,
+            auto_update,
+            advertise_routes,
+            open_router_port,
+            upload_limit,
+        } => {
+            let advertise_routes = advertise_routes.map(|r| {
+                if r.trim() == "none" {
+                    Vec::new()
+                } else {
+                    vec![r]
+                }
+            });
             let memory_limit_mb = match memory_limit.as_deref() {
                 None => None,
                 Some("auto") | Some("0") => Some(0),
-                Some(v) => Some(v.parse::<u32>().context("--memory-limit takes a number of MiB or `auto`")?),
+                Some(v) => Some(
+                    v.parse::<u32>()
+                        .context("--memory-limit takes a number of MiB or `auto`")?,
+                ),
             };
             let upload_limit_mbit = match upload_limit.as_deref() {
                 None => None,
                 Some("off") | Some("none") | Some("0") => Some(0),
-                Some(v) => Some(v.parse::<u32>().context("--upload-limit takes a number of Mbit/s or `off`")?),
+                Some(v) => Some(
+                    v.parse::<u32>()
+                        .context("--upload-limit takes a number of Mbit/s or `off`")?,
+                ),
             };
-            let named_proxy = proxy.as_deref().is_some_and(|p| !matches!(p.trim(), "" | "auto" | "off" | "none" | "direct"));
-            let req = PrefsRequest { exit_node, advertise_exit_node, memory_limit_mb, proxy, auto_update, advertise_routes, open_router_port, upload_limit_mbit };
-            let st = client.post::<_, StatusResponse>("/prefs", Some(&req)).await?;
+            let named_proxy = proxy
+                .as_deref()
+                .is_some_and(|p| !matches!(p.trim(), "" | "auto" | "off" | "none" | "direct"));
+            let req = PrefsRequest {
+                exit_node,
+                advertise_exit_node,
+                memory_limit_mb,
+                proxy,
+                auto_update,
+                advertise_routes,
+                open_router_port,
+                upload_limit_mbit,
+            };
+            let st = client
+                .post::<_, StatusResponse>("/prefs", Some(&req))
+                .await?;
             print_status(&st);
             if cfg!(windows) && named_proxy && !st.prefs.proxy_sign_in {
-                eprintln!("note: set from an administrator terminal, the proxy may also be given your Windows sign-in (NTLM/Kerberos)");
+                eprintln!(
+                    "note: set from an administrator terminal, the proxy may also be given your Windows sign-in (NTLM/Kerberos)"
+                );
             }
         }
         Cmd::ExitNodes => {
@@ -450,14 +534,22 @@ async fn main() -> Result<()> {
             }
             for p in exits {
                 let used = st.prefs.exit_node == Some(p.node_key);
-                println!("{:<16} {:<20} {}{}", p.ip.to_string(), p.hostname, if p.online { "online" } else { "offline" }, if used { "  (in use)" } else { "" });
+                println!(
+                    "{:<16} {:<20} {}{}",
+                    p.ip.to_string(),
+                    p.hostname,
+                    if p.online { "online" } else { "offline" },
+                    if used { "  (in use)" } else { "" }
+                );
             }
         }
         Cmd::Server { cmd } => server(&client, cmd).await?,
         Cmd::Helper { cmd } => {
             let st: HelperStatus = match cmd {
                 HelperCmd::Start { port, public } => {
-                    client.post("/helper/start", Some(&HelperStartRequest { port, public })).await?
+                    client
+                        .post("/helper/start", Some(&HelperStartRequest { port, public }))
+                        .await?
                 }
                 HelperCmd::Stop => client.post::<(), _>("/helper/stop", None).await?,
                 HelperCmd::Status => client.post::<(), _>("/helper/status", None).await?,
@@ -466,7 +558,14 @@ async fn main() -> Result<()> {
                 println!("helper:  not running (retail helper start)");
             } else {
                 println!("helper:  running on port {}", st.port.unwrap_or(0));
-                println!("server:  {}", if st.linked { "linked" } else { "not linked yet" });
+                println!(
+                    "server:  {}",
+                    if st.linked {
+                        "linked"
+                    } else {
+                        "not linked yet"
+                    }
+                );
                 if let Some(code) = &st.code {
                     println!("code:    {code}");
                     println!("         on the server's host: retail server start --helper {code}");
@@ -482,14 +581,32 @@ async fn main() -> Result<()> {
 
 async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
     let st: ServerStatus = match cmd {
-        ServerCmd::Start { port, domain, no_join, insecure_http, reality, front, helper, tunnel } => {
+        ServerCmd::Start {
+            port,
+            domain,
+            no_join,
+            insecure_http,
+            reality,
+            front,
+            helper,
+            tunnel,
+        } => {
             let fronts = match front.as_slice() {
                 [] => None,
                 [off] if off == "off" => Some(Vec::new()),
                 _ => Some(front),
             };
             let tunnel = tunnel.then_some(true);
-            let req = ServerStartRequest { join: !no_join, port, domain, insecure_http, reality, fronts, helper, tunnel };
+            let req = ServerStartRequest {
+                join: !no_join,
+                port,
+                domain,
+                insecure_http,
+                reality,
+                fronts,
+                helper,
+                tunnel,
+            };
             client.post("/server/start", Some(&req)).await?
         }
         ServerCmd::Stop => client.post::<(), _>("/server/stop", None).await?,
@@ -501,8 +618,16 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
             }
             st
         }
-        ServerCmd::Invite { reusable, hours, name } => {
-            let req = InviteRequest { reusable, ttl_hours: hours, name };
+        ServerCmd::Invite {
+            reusable,
+            hours,
+            name,
+        } => {
+            let req = InviteRequest {
+                reusable,
+                ttl_hours: hours,
+                name,
+            };
             let inv: InviteResponse = client.post("/server/invite", Some(&req)).await?;
             println!("{}", inv.code);
             eprintln!("On the other device: retail up --invite <code>  (or paste it in Settings)");
@@ -510,52 +635,94 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
         }
         ServerCmd::Web { print } => {
             let r: serde_json::Value = client.post::<(), _>("/web/login", None).await?;
-            let url = r["url"].as_str().context("no link in the answer")?.to_string();
+            let url = r["url"]
+                .as_str()
+                .context("no link in the answer")?
+                .to_string();
             anyhow::ensure!(
                 retail_proto::local::is_local_web_link(&url),
                 "the answer on the local API port is not a link to this device's web page; is retaild the program listening there?"
             );
             // The browser gets a private page that posts the sign-in, so the
             // link is not on its command line for other users to see
-            let opened = !print && retail_proto::local::sign_in_page(&url).is_ok_and(|page| open_browser(&page.display().to_string()));
+            let opened = !print
+                && retail_proto::local::sign_in_page(&url)
+                    .is_ok_and(|page| open_browser(&page.display().to_string()));
             if !opened {
                 println!("{url}");
-                eprintln!("Open the link above in a browser on this device (valid once, for 2 minutes).");
+                eprintln!(
+                    "Open the link above in a browser on this device (valid once, for 2 minutes)."
+                );
             }
             return Ok(());
         }
         ServerCmd::Code { id } => {
-            let inv: InviteResponse = client.post::<(), _>(&format!("/server/invites/{id}/code"), None).await?;
+            let inv: InviteResponse = client
+                .post::<(), _>(&format!("/server/invites/{id}/code"), None)
+                .await?;
             println!("{}", inv.code);
             return Ok(());
         }
-        ServerCmd::Remove { device, revoke_invite } => {
+        ServerCmd::Remove {
+            device,
+            revoke_invite,
+        } => {
             let current: ServerStatus = client.get("/server").await?;
             let id = find_device(&current, &device)?;
-            client.post(&format!("/server/nodes/{id}/delete"), Some(&RemoveRequest { revoke_invite })).await?
+            client
+                .post(
+                    &format!("/server/nodes/{id}/delete"),
+                    Some(&RemoveRequest { revoke_invite }),
+                )
+                .await?
         }
-        ServerCmd::Routes { device, networks, off } => {
+        ServerCmd::Routes {
+            device,
+            networks,
+            off,
+        } => {
             let current: ServerStatus = client.get("/server").await?;
             let id = find_device(&current, &device)?;
-            let node = current.nodes.iter().find(|n| n.id == id).context("no such device")?;
+            let node = current
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .context("no such device")?;
             let routes = if off {
                 Vec::new()
             } else if networks.is_empty() {
                 if node.advertised_routes.is_empty() {
-                    bail!("{} offers no networks (on it: retail set --advertise-routes 192.168.1.0/24)", node.hostname);
+                    bail!(
+                        "{} offers no networks (on it: retail set --advertise-routes 192.168.1.0/24)",
+                        node.hostname
+                    );
                 }
                 let mut all = node.approved_routes.clone();
-                all.extend(node.advertised_routes.iter().filter(|r| !node.approved_routes.contains(r)));
+                all.extend(
+                    node.advertised_routes
+                        .iter()
+                        .filter(|r| !node.approved_routes.contains(r)),
+                );
                 all
             } else {
                 retail_proto::route::parse_routes(&networks).map_err(anyhow::Error::msg)?
             };
-            client.post(&format!("/server/nodes/{id}/routes"), Some(&RoutesRequest { routes })).await?
+            client
+                .post(
+                    &format!("/server/nodes/{id}/routes"),
+                    Some(&RoutesRequest { routes }),
+                )
+                .await?
         }
         ServerCmd::Renew { device, never } => {
             let current: ServerStatus = client.get("/server").await?;
             let id = find_device(&current, &device)?;
-            client.post(&format!("/server/nodes/{id}/renew"), Some(&RenewRequest { never })).await?
+            client
+                .post(
+                    &format!("/server/nodes/{id}/renew"),
+                    Some(&RenewRequest { never }),
+                )
+                .await?
         }
         ServerCmd::Expiry { keys, inactive } => {
             let current: ServerStatus = client.get("/server").await?;
@@ -583,34 +750,68 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
                 bail!("{file} exists already; choose another name");
             }
             let passphrase = passphrase(true)?;
-            let r: BackupResponse = client.post("/server/backup", Some(&BackupRequest { passphrase })).await?;
+            let r: BackupResponse = client
+                .post("/server/backup", Some(&BackupRequest { passphrase }))
+                .await?;
             write_private(&file, r.backup.as_bytes())?;
             println!("saved the server's backup to {file}");
-            eprintln!("Keep the file and its passphrase safe: together they let anyone pose as this server.");
+            eprintln!(
+                "Keep the file and its passphrase safe: together they let anyone pose as this server."
+            );
             return Ok(());
         }
         ServerCmd::Restore { file } => {
-            let backup = std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
+            let backup =
+                std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?;
             let passphrase = passphrase(false)?;
-            client.post::<_, ServerStatus>("/server/restore", Some(&RestoreRequest { backup, passphrase })).await?;
+            client
+                .post::<_, ServerStatus>(
+                    "/server/restore",
+                    Some(&RestoreRequest { backup, passphrase }),
+                )
+                .await?;
             println!("restored the server's data; start it with `retail server start`");
-            eprintln!("Stop the old server for good if it still runs: two servers with the same keys confuse the devices.");
-            eprintln!("If its address changed and has no domain, give each device a new invite: it keeps its address and name.");
+            eprintln!(
+                "Stop the old server for good if it still runs: two servers with the same keys confuse the devices."
+            );
+            eprintln!(
+                "If its address changed and has no domain, give each device a new invite: it keeps its address and name."
+            );
             return Ok(());
         }
-        ServerCmd::Revoke { id } => client.post::<(), _>(&format!("/server/invites/{id}/revoke"), None).await?,
+        ServerCmd::Revoke { id } => {
+            client
+                .post::<(), _>(&format!("/server/invites/{id}/revoke"), None)
+                .await?
+        }
         ServerCmd::Tag { device, tags } => {
             let current: ServerStatus = client.get("/server").await?;
             let id = find_device(&current, &device)?;
-            client.post(&format!("/server/nodes/{id}/tags"), Some(&TagsRequest { tags })).await?
+            client
+                .post(
+                    &format!("/server/nodes/{id}/tags"),
+                    Some(&TagsRequest { tags }),
+                )
+                .await?
         }
         ServerCmd::Tunnel { state } => {
-            client.post("/server/tunnel", Some(&retail_proto::api::TunnelRequest { on: state == "on" })).await?
+            client
+                .post(
+                    "/server/tunnel",
+                    Some(&retail_proto::api::TunnelRequest { on: state == "on" }),
+                )
+                .await?
         }
         ServerCmd::HelperDevice { device } => {
             let current: ServerStatus = client.get("/server").await?;
-            let id = if device == "off" { None } else { Some(find_device(&current, &device)?) };
-            client.post("/server/helper-device", Some(&HelperDeviceRequest { id })).await?
+            let id = if device == "off" {
+                None
+            } else {
+                Some(find_device(&current, &device)?)
+            };
+            client
+                .post("/server/helper-device", Some(&HelperDeviceRequest { id }))
+                .await?
         }
         ServerCmd::Acl { cmd } => {
             let current: ServerStatus = client.get("/server").await?;
@@ -628,7 +829,10 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
                     } else {
                         std::fs::read_to_string(&file).with_context(|| format!("reading {file}"))?
                     };
-                    Some(serde_json::from_str::<AclPolicy>(&text).context("not an access policy (JSON with \"rules\")")?)
+                    Some(
+                        serde_json::from_str::<AclPolicy>(&text)
+                            .context("not an access policy (JSON with \"rules\")")?,
+                    )
                 }
                 Some(AclCmd::Allow { from, to, ports }) => {
                     let mut acl = current.acl.clone().unwrap_or_default();
@@ -641,7 +845,10 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
                     Some(acl)
                 }
                 Some(AclCmd::Remove { n }) => {
-                    let mut acl = current.acl.clone().context("access control is off: there are no rules")?;
+                    let mut acl = current
+                        .acl
+                        .clone()
+                        .context("access control is off: there are no rules")?;
                     if n == 0 || n > acl.rules.len() {
                         anyhow::bail!("there is no rule {n}");
                     }
@@ -649,7 +856,9 @@ async fn server(client: &Client, cmd: ServerCmd) -> Result<()> {
                     Some(acl)
                 }
             };
-            let st: ServerStatus = client.post("/server/acl", Some(&AclRequest { acl })).await?;
+            let st: ServerStatus = client
+                .post("/server/acl", Some(&AclRequest { acl }))
+                .await?;
             print_acl(&st);
             return Ok(());
         }
@@ -681,13 +890,16 @@ fn read_hidden(prompt: &str) -> Result<String> {
     use std::io::Write;
     eprint!("{prompt}");
     std::io::stderr().flush()?;
-    enable_raw_mode().context("no terminal to type a passphrase in (set RETAIL_BACKUP_PASSPHRASE)")?;
+    enable_raw_mode()
+        .context("no terminal to type a passphrase in (set RETAIL_BACKUP_PASSPHRASE)")?;
     let mut s = String::new();
     let result = loop {
         match read() {
             Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => match k.code {
                 KeyCode::Enter => break Ok(()),
-                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break Err(anyhow::anyhow!("cancelled")),
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break Err(anyhow::anyhow!("cancelled"));
+                }
                 KeyCode::Char(c) => s.push(c),
                 KeyCode::Backspace => {
                     s.pop();
@@ -721,8 +933,14 @@ fn write_private(path: &str, bytes: &[u8]) -> Result<()> {
 
 fn print_expiry(st: &ServerStatus) {
     let days = |d: Option<u32>| d.map_or("never".to_string(), |d| format!("{d} days"));
-    println!("keys:     expire after {} (`retail server renew DEVICE` renews one)", days(st.key_expiry_days));
-    println!("inactive: devices not seen for {} are removed", days(st.remove_inactive_days));
+    println!(
+        "keys:     expire after {} (`retail server renew DEVICE` renews one)",
+        days(st.key_expiry_days)
+    );
+    println!(
+        "inactive: devices not seen for {} are removed",
+        days(st.remove_inactive_days)
+    );
 }
 
 /// A device by name (`laptop` or `laptop.retail.internal`), mesh IP or id
@@ -730,7 +948,13 @@ fn find_device(st: &ServerStatus, device: &str) -> Result<i64> {
     let d = device.trim().to_ascii_lowercase();
     st.nodes
         .iter()
-        .find(|n| n.hostname == d || n.dns_name == d || n.dns_name.split('.').next() == Some(d.as_str()) || n.ip.to_string() == d || n.id.to_string() == d)
+        .find(|n| {
+            n.hostname == d
+                || n.dns_name == d
+                || n.dns_name.split('.').next() == Some(d.as_str())
+                || n.ip.to_string() == d
+                || n.id.to_string() == d
+        })
         .map(|n| n.id)
         .with_context(|| format!("no device {device} (see `retail server status`)"))
 }
@@ -747,11 +971,20 @@ fn selector(st: &ServerStatus, s: &str) -> Result<String> {
 
 fn print_acl(st: &ServerStatus) {
     let Some(acl) = &st.acl else {
-        println!("access:  open, every device reaches every other (`retail server acl allow` adds a rule)");
+        println!(
+            "access:  open, every device reaches every other (`retail server acl allow` adds a rule)"
+        );
         return;
     };
-    let name = |sel: &String| match sel.strip_prefix("id:").and_then(|id| id.parse::<i64>().ok()) {
-        Some(id) => st.nodes.iter().find(|n| n.id == id).map_or(sel.clone(), |n| n.hostname.clone()),
+    let name = |sel: &String| match sel
+        .strip_prefix("id:")
+        .and_then(|id| id.parse::<i64>().ok())
+    {
+        Some(id) => st
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map_or(sel.clone(), |n| n.hostname.clone()),
         None => sel.clone(),
     };
     println!("access:  only what these rules allow (replies always return)");
@@ -759,7 +992,11 @@ fn print_acl(st: &ServerStatus) {
         println!("         no rules: devices reach nothing");
     }
     for (i, r) in acl.rules.iter().enumerate() {
-        let ports = if r.ports.is_empty() { "all ports".to_string() } else { r.ports.join(", ") };
+        let ports = if r.ports.is_empty() {
+            "all ports".to_string()
+        } else {
+            r.ports.join(", ")
+        };
         println!(
             "{:>4}.  {} -> {}  ({ports})",
             i + 1,
@@ -767,7 +1004,12 @@ fn print_acl(st: &ServerStatus) {
             r.to.iter().map(name).collect::<Vec<_>>().join(", ")
         );
     }
-    let tagged: Vec<String> = st.nodes.iter().filter(|n| !n.tags.is_empty()).map(|n| format!("{}: {}", n.hostname, n.tags.join(", "))).collect();
+    let tagged: Vec<String> = st
+        .nodes
+        .iter()
+        .filter(|n| !n.tags.is_empty())
+        .map(|n| format!("{}: {}", n.hostname, n.tags.join(", ")))
+        .collect();
     if !tagged.is_empty() {
         println!("tags:    {}", tagged.join("; "));
     }
@@ -796,11 +1038,29 @@ fn print_server(st: &ServerStatus) {
         println!("reality: on, looks like {r}");
     }
     if let Some(h) = &st.helper {
-        println!("helper:  {h} ({})", if st.helper_linked { "linked" } else { "not linked" });
+        println!(
+            "helper:  {h} ({})",
+            if st.helper_linked {
+                "linked"
+            } else {
+                "not linked"
+            }
+        );
     }
     if let Some(id) = st.helper_device {
-        let name = st.nodes.iter().find(|n| n.id == id).map_or_else(|| format!("#{id}"), |n| n.hostname.clone());
-        println!("helper:  device {name} ({})", if st.helper_device_linked { "linked" } else { "not linked yet" });
+        let name = st
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map_or_else(|| format!("#{id}"), |n| n.hostname.clone());
+        println!(
+            "helper:  device {name} ({})",
+            if st.helper_device_linked {
+                "linked"
+            } else {
+                "not linked yet"
+            }
+        );
     }
     if st.acl.is_some() {
         println!("access:  limited by rules (`retail server acl`)");
@@ -830,19 +1090,51 @@ fn print_server(st: &ServerStatus) {
         for n in &st.nodes {
             let status = if n.online { "online" } else { "offline" };
             let exit = if n.exit_node { " exit node" } else { "" };
-            let tags = if n.tags.is_empty() { String::new() } else { format!(" [{}]", n.tags.join(", ")) };
-            let name = if n.dns_name.is_empty() { &n.hostname } else { &n.dns_name };
+            let tags = if n.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", n.tags.join(", "))
+            };
+            let name = if n.dns_name.is_empty() {
+                &n.hostname
+            } else {
+                &n.dns_name
+            };
             let key = match (n.expired, n.expires_at) {
                 (true, _) => " KEY EXPIRED".to_string(),
                 (false, Some(at)) => format!(" key {}d", (at - now_unix()).max(0) / 86_400),
                 _ => String::new(),
             };
-            let live: Vec<String> = n.advertised_routes.iter().filter(|r| n.approved_routes.contains(r)).map(ToString::to_string).collect();
-            let waiting: Vec<String> = n.advertised_routes.iter().filter(|r| !n.approved_routes.contains(r)).map(ToString::to_string).collect();
-            let routes = if live.is_empty() { String::new() } else { format!(" routes {}", live.join(",")) };
-            println!("{:<5} {:<16} {:<30} {:<8} {status}{exit}{routes}{key}{tags}", n.id, n.ip.to_string(), name, n.os);
+            let live: Vec<String> = n
+                .advertised_routes
+                .iter()
+                .filter(|r| n.approved_routes.contains(r))
+                .map(ToString::to_string)
+                .collect();
+            let waiting: Vec<String> = n
+                .advertised_routes
+                .iter()
+                .filter(|r| !n.approved_routes.contains(r))
+                .map(ToString::to_string)
+                .collect();
+            let routes = if live.is_empty() {
+                String::new()
+            } else {
+                format!(" routes {}", live.join(","))
+            };
+            println!(
+                "{:<5} {:<16} {:<30} {:<8} {status}{exit}{routes}{key}{tags}",
+                n.id,
+                n.ip.to_string(),
+                name,
+                n.os
+            );
             if !waiting.is_empty() {
-                println!("      offers {} (approve: retail server routes {})", waiting.join(", "), n.hostname);
+                println!(
+                    "      offers {} (approve: retail server routes {})",
+                    waiting.join(", "),
+                    n.hostname
+                );
             }
         }
     }
@@ -851,14 +1143,33 @@ fn print_server(st: &ServerStatus) {
         println!();
         println!("{:<5} {:<20} {:<6} EXPIRES", "ID", "NAMED INVITE", "USES");
         for i in named {
-            let expires = if i.expires_at == i64::MAX { "never".to_string() } else { format!("in {}h", (i.expires_at - now_unix()).max(0) / 3600) };
-            println!("{:<5} {:<20} {:<6} {expires}", i.id, i.name.as_deref().unwrap_or(""), i.uses);
+            let expires = if i.expires_at == i64::MAX {
+                "never".to_string()
+            } else {
+                format!("in {}h", (i.expires_at - now_unix()).max(0) / 3600)
+            };
+            println!(
+                "{:<5} {:<20} {:<6} {expires}",
+                i.id,
+                i.name.as_deref().unwrap_or(""),
+                i.uses
+            );
         }
     }
-    let open: Vec<_> = st.invites.iter().filter(|i| i.name.is_none() && (!i.used || i.reusable)).collect();
+    let open: Vec<_> = st
+        .invites
+        .iter()
+        .filter(|i| i.name.is_none() && (!i.used || i.reusable))
+        .collect();
     if !open.is_empty() {
         println!();
-        println!("invites: {}", open.iter().map(|i| format!("#{}{}", i.id, if i.reusable { " (reusable)" } else { "" })).collect::<Vec<_>>().join(", "));
+        println!(
+            "invites: {}",
+            open.iter()
+                .map(|i| format!("#{}{}", i.id, if i.reusable { " (reusable)" } else { "" }))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 }
 
@@ -870,7 +1181,11 @@ fn human_bytes(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[i]) }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 /// `45s`, `12m`, `3h 5m`, `2d 4h`
@@ -889,11 +1204,19 @@ async fn saved_server(client: &Client, name: &str) -> Result<String> {
     if st.servers.iter().any(|s| s.server == name) {
         return Ok(name.to_string());
     }
-    let matches: Vec<&str> = st.servers.iter().map(|s| s.server.as_str()).filter(|s| s.contains(name)).collect();
+    let matches: Vec<&str> = st
+        .servers
+        .iter()
+        .map(|s| s.server.as_str())
+        .filter(|s| s.contains(name))
+        .collect();
     match matches[..] {
         [one] => Ok(one.to_string()),
         [] => anyhow::bail!("no saved server matches {name} (see `retail servers`)"),
-        _ => anyhow::bail!("{name} matches several saved servers: {}", matches.join(", ")),
+        _ => anyhow::bail!(
+            "{name} matches several saved servers: {}",
+            matches.join(", ")
+        ),
     }
 }
 
@@ -917,7 +1240,11 @@ fn print_status(st: &StatusResponse) {
         }
     }
     if let Some(n) = &st.self_node {
-        let name = if n.dns_name.is_empty() { &n.hostname } else { &n.dns_name };
+        let name = if n.dns_name.is_empty() {
+            &n.hostname
+        } else {
+            &n.dns_name
+        };
         println!("self:    {} {} key {}", n.ip, name, n.node_key.short());
         if !n.endpoints.is_empty() {
             let eps: Vec<String> = n.endpoints.iter().map(ToString::to_string).collect();
@@ -926,20 +1253,39 @@ fn print_status(st: &StatusResponse) {
     }
     if let Some(key) = st.prefs.exit_node {
         match st.peers.iter().find(|p| p.node_key == key) {
-            Some(p) if p.online && p.exit_node => println!("exit:    {} {} (all internet traffic goes through it)", p.ip, p.hostname),
-            Some(p) => println!("exit:    {} {} is OFFLINE: internet traffic is blocked until it returns", p.ip, p.hostname),
-            None => println!("exit:    {} is not in the network: internet traffic is blocked (`retail set --exit-node none`)", key.short()),
+            Some(p) if p.online && p.exit_node => println!(
+                "exit:    {} {} (all internet traffic goes through it)",
+                p.ip, p.hostname
+            ),
+            Some(p) => println!(
+                "exit:    {} {} is OFFLINE: internet traffic is blocked until it returns",
+                p.ip, p.hostname
+            ),
+            None => println!(
+                "exit:    {} is not in the network: internet traffic is blocked (`retail set --exit-node none`)",
+                key.short()
+            ),
         }
     }
     if st.prefs.advertise_exit_node {
         println!("offer:   this device is an exit node for the others");
     }
     if !st.prefs.advertise_routes.is_empty() {
-        let nets: Vec<String> = st.prefs.advertise_routes.iter().map(ToString::to_string).collect();
-        println!("routes:  offers {} (the server's administrator approves them)", nets.join(", "));
+        let nets: Vec<String> = st
+            .prefs
+            .advertise_routes
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        println!(
+            "routes:  offers {} (the server's administrator approves them)",
+            nets.join(", ")
+        );
     }
     if st.key_expired {
-        println!("key:     EXPIRED: this device is cut off until the server's administrator renews it");
+        println!(
+            "key:     EXPIRED: this device is cut off until the server's administrator renews it"
+        );
     } else if let Some(at) = st.key_expires_at {
         let days = (at - now_unix()).max(0) / 86_400;
         if days < 14 {
@@ -963,25 +1309,41 @@ fn print_status(st: &StatusResponse) {
         println!("updates: installed automatically");
     }
     match &st.router_port {
-        Some(PortState::Opened { method, port }) => println!("router:  UDP {port} opened with {method}"),
+        Some(PortState::Opened { method, port }) => {
+            println!("router:  UDP {port} opened with {method}")
+        }
         Some(PortState::Unavailable { port }) => {
-            println!("router:  did not open UDP {port} (turn on UPnP on the router, or forward UDP {port} to this device)")
+            println!(
+                "router:  did not open UDP {port} (turn on UPnP on the router, or forward UDP {port} to this device)"
+            )
         }
         None => {}
     }
     if let Some(mbit) = st.prefs.upload_limit_mbit {
         println!("upload:  limited to {mbit} Mbit/s");
     }
-    let limit = st.prefs.memory_limit_mb.map_or_else(|| "automatic".to_string(), |mb| format!("{mb} MiB"));
+    let limit = st
+        .prefs
+        .memory_limit_mb
+        .map_or_else(|| "automatic".to_string(), |mb| format!("{mb} MiB"));
     match st.memory_peak {
         Some(peak) => println!("memory:  peak {}, limit {limit}", human_bytes(peak)),
         None => println!("memory:  limit {limit}"),
     }
     if let Some(u) = st.usage_total {
         let days = (now_unix() - u.since).max(0) / 86_400;
-        println!("usage:   sent {}, received {} in total ({days} days)", human_bytes(u.tx_bytes), human_bytes(u.rx_bytes));
-        let now = st.connected_secs.map_or_else(String::new, |s| format!(", this connection {}", human_secs(s)));
-        println!("time:    connected {} in total{now}", human_secs(u.connected_secs));
+        println!(
+            "usage:   sent {}, received {} in total ({days} days)",
+            human_bytes(u.tx_bytes),
+            human_bytes(u.rx_bytes)
+        );
+        let now = st.connected_secs.map_or_else(String::new, |s| {
+            format!(", this connection {}", human_secs(s))
+        });
+        println!(
+            "time:    connected {} in total{now}",
+            human_secs(u.connected_secs)
+        );
     }
     if let Some(e) = &st.last_error {
         println!("error:   {e}");
@@ -990,7 +1352,10 @@ fn print_status(st: &StatusResponse) {
         return;
     }
     println!();
-    println!("{:<16} {:<20} {:<8} {:<44} {:<12} TX / RX", "IP", "HOSTNAME", "CONTROL", "PATH", "HANDSHAKE");
+    println!(
+        "{:<16} {:<20} {:<8} {:<44} {:<12} TX / RX",
+        "IP", "HOSTNAME", "CONTROL", "PATH", "HANDSHAKE"
+    );
     for p in &st.peers {
         let path = match (&p.path, p.endpoint) {
             (Some(path), _) => path.clone(),
@@ -1009,10 +1374,26 @@ fn print_status(st: &StatusResponse) {
             "{:<16} {:<20} {:<8} {:<44} {:<12} {} / {}",
             p.ip.to_string(),
             {
-                let name = if p.dns_name.is_empty() { p.hostname.clone() } else { p.dns_name.trim_end_matches(".retail.internal").to_string() };
-                let name = if p.restricted { format!("{name} [limited]") } else { name };
-                let name = if p.routes.is_empty() { name } else { format!("{name} [routes]") };
-                if p.exit_node { format!("{name} [exit]") } else { name }
+                let name = if p.dns_name.is_empty() {
+                    p.hostname.clone()
+                } else {
+                    p.dns_name.trim_end_matches(".retail.internal").to_string()
+                };
+                let name = if p.restricted {
+                    format!("{name} [limited]")
+                } else {
+                    name
+                };
+                let name = if p.routes.is_empty() {
+                    name
+                } else {
+                    format!("{name} [routes]")
+                };
+                if p.exit_node {
+                    format!("{name} [exit]")
+                } else {
+                    name
+                }
             },
             if p.online { "online" } else { "offline" },
             path,
@@ -1038,7 +1419,9 @@ fn reason_text(r: PathReason) -> &'static str {
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Opens `url` in the default browser
@@ -1056,5 +1439,8 @@ fn open_browser(url: &str) -> bool {
         c.arg(url);
         c
     };
-    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok()
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }

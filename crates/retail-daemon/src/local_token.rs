@@ -38,17 +38,27 @@ fn write_private(path: &Path, token: &str) -> Result<()> {
     // entries are still on it
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0);
-    let mut f = options.open(path).with_context(|| format!("writing {}", path.display()))?;
+    let mut f = options
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
     #[cfg(windows)]
     {
         let ok = std::process::Command::new("icacls")
             .arg(path)
-            .args(["/inheritance:r", "/grant:r", "*S-1-5-18:F", "/grant:r", "*S-1-5-32-544:F", "/Q"])
+            .args([
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:F",
+                "/grant:r",
+                "*S-1-5-32-544:F",
+                "/Q",
+            ])
             .output()
             .is_ok_and(|o| o.status.success());
         anyhow::ensure!(ok, "could not restrict access to {}", path.display());
     }
-    f.write_all(token.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(token.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 pub fn write_new() -> Result<String> {
@@ -69,7 +79,11 @@ pub fn write_new() -> Result<String> {
 fn restrict(dir: &Path, file: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     // Root plus the control group when it exists, otherwise root only
-    let group = if cfg!(target_os = "macos") { "admin" } else { "retail" };
+    let group = if cfg!(target_os = "macos") {
+        "admin"
+    } else {
+        "retail"
+    };
     let mut gid = group_id(group);
     for (p, mode) in [(dir, 0o750), (file, 0o640)] {
         if !p.exists() {
@@ -94,7 +108,9 @@ fn group_id(name: &str) -> Option<u32> {
     let groups = std::fs::read_to_string("/etc/group").ok()?;
     groups.lines().find_map(|l| {
         let mut f = l.split(':');
-        (f.next()? == name).then(|| f.nth(1)?.parse().ok()).flatten()
+        (f.next()? == name)
+            .then(|| f.nth(1)?.parse().ok())
+            .flatten()
     })
 }
 
@@ -123,7 +139,11 @@ fn restrict(dir: &Path, file: &Path) -> Result<()> {
     // The token takes the folder's entries (the administrator token, written
     // later, gets its own)
     if file.exists() {
-        let ok = std::process::Command::new("icacls").arg(file).args(["/reset", "/Q"]).output().is_ok_and(|o| o.status.success());
+        let ok = std::process::Command::new("icacls")
+            .arg(file)
+            .args(["/reset", "/Q"])
+            .output()
+            .is_ok_and(|o| o.status.success());
         anyhow::ensure!(ok, "could not set access to {}", file.display());
     }
     Ok(())
@@ -147,7 +167,13 @@ mod tests {
         {
             use std::os::windows::fs::OpenOptionsExt;
             let _ = std::fs::remove_file(&path);
-            let held = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(1).open(&path).unwrap();
+            let held = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .share_mode(1)
+                .open(&path)
+                .unwrap();
             assert!(write_private(&path, "secret").is_err());
             drop(held);
         }

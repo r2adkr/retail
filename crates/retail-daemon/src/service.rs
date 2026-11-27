@@ -58,7 +58,10 @@ fn remove_system_changes(state_dir: Option<&Path>) {
     // Router mappings a killed daemon left open: no next start would close them
     let dir = state.clone();
     let _ = std::thread::spawn(move || {
-        if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             rt.block_on(crate::portmap::init(&dir));
         }
     })
@@ -72,7 +75,9 @@ fn remove_system_changes(state_dir: Option<&Path>) {
             "Get-DnsClientNrptRule | Where-Object Comment -eq 'retail' | Remove-DnsClientNrptRule -Force",
             "Remove-NetNat -Name retail-exit -Confirm:$false -ErrorAction SilentlyContinue",
         ] {
-            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).output();
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output();
         }
         crate::firewall::remove_inbound();
     }
@@ -107,16 +112,30 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             }
             #[cfg(target_os = "macos")]
             if dir == default_dir() {
-                retail_proto::programs::unlink(&dir, Path::new(retail_proto::programs::MACOS_LINKS));
+                retail_proto::programs::unlink(
+                    &dir,
+                    Path::new(retail_proto::programs::MACOS_LINKS),
+                );
             }
             if cfg!(windows) {
                 let _ = std::fs::remove_file(dir.join("wintun.dll"));
                 let _ = std::fs::remove_dir(&dir);
             }
-            println!("retaild is removed. Its state stays in {}.", state_dir.map_or_else(crate::state::default_state_dir, Path::to_path_buf).display());
+            println!(
+                "retaild is removed. Its state stays in {}.",
+                state_dir
+                    .map_or_else(crate::state::default_state_dir, Path::to_path_buf)
+                    .display()
+            );
             Ok(())
         }
-        Cmd::Install { server, port, domain, dir, no_service } => {
+        Cmd::Install {
+            server,
+            port,
+            domain,
+            dir,
+            no_service,
+        } => {
             if !no_service {
                 require_admin()?;
             }
@@ -126,7 +145,8 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             let here = me.parent().context("retaild has no folder")?.to_path_buf();
             #[cfg(target_os = "macos")]
             if !custom {
-                retail_proto::programs::make_root_only(&dir).with_context(|| format!("creating {}", dir.display()))?;
+                retail_proto::programs::make_root_only(&dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
             }
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             if !no_service {
@@ -138,10 +158,17 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
                 files.push("wintun.dll".into());
             }
             for f in &files {
-                let src = if *f == exe("retaild") { me.clone() } else { here.join(f) };
+                let src = if *f == exe("retaild") {
+                    me.clone()
+                } else {
+                    here.join(f)
+                };
                 if same || !src.is_file() {
                     if !src.is_file() && *f != exe("retaild") {
-                        eprintln!("note: {f} is not next to retaild; install it to {} yourself", dir.display());
+                        eprintln!(
+                            "note: {f} is not next to retaild; install it to {} yourself",
+                            dir.display()
+                        );
                     }
                     continue;
                 }
@@ -149,7 +176,8 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             }
             #[cfg(target_os = "macos")]
             if !custom {
-                retail_proto::programs::link(&dir, Path::new(retail_proto::programs::MACOS_LINKS)).context("linking the programs")?;
+                retail_proto::programs::link(&dir, Path::new(retail_proto::programs::MACOS_LINKS))
+                    .context("linking the programs")?;
             }
             let _ = custom;
             let daemon = dir.join(exe("retaild"));
@@ -159,19 +187,30 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
                     cmd.arg("--state-dir").arg(s);
                 }
                 cmd.arg("--api").arg(api.to_string());
-                cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                cmd.stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
                 cmd.spawn().context("starting retaild")?;
             } else {
                 register(&daemon)?;
             }
             wait_for(api)?;
-            println!("retaild is installed in {} and starts at boot.", dir.display());
+            println!(
+                "retaild is installed in {} and starts at boot.",
+                dir.display()
+            );
             if !server {
                 println!("Join a network with: retail up --invite <code>");
                 return Ok(());
             }
-            let req = retail_proto::api::ServerStartRequest { join: false, port, domain, ..Default::default() };
-            let st: retail_proto::api::ServerStatus = call(api, "/server/start", &serde_json::to_string(&req)?)?;
+            let req = retail_proto::api::ServerStartRequest {
+                join: false,
+                port,
+                domain,
+                ..Default::default()
+            };
+            let st: retail_proto::api::ServerStatus =
+                call(api, "/server/start", &serde_json::to_string(&req)?)?;
             let inv: retail_proto::api::InviteResponse = call(api, "/server/invite", "{}")?;
             println!();
             println!("The server is running and starts again at boot.");
@@ -181,7 +220,10 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
                 (None, false) => println!("  address:  {}", st.lan.join(", ")),
                 (None, true) => println!("  address:  not known yet (`retail server status`)"),
             }
-            println!("  firewall: allow TCP {} and UDP 3478 in", st.port.unwrap_or(443));
+            println!(
+                "  firewall: allow TCP {} and UDP 3478 in",
+                st.port.unwrap_or(443)
+            );
             if let Some(w) = &st.warning {
                 println!("  note:     {w}");
             }
@@ -189,21 +231,32 @@ pub fn run(cmd: Cmd, state_dir: Option<&Path>, api: SocketAddr) -> Result<()> {
             println!("Invite for the first device (one-time, 24 hours):");
             println!("  {}", inv.code);
             println!();
-            println!("Manage it here with `retail server …` (status, invite --name, acl, tag, helper-device),");
+            println!(
+                "Manage it here with `retail server …` (status, invite --name, acl, tag, helper-device),"
+            );
             println!("or open the web admin page from your computer:");
-            println!("  ssh -L 41180:127.0.0.1:41180 <this machine>, then `retail server web --print` here");
+            println!(
+                "  ssh -L 41180:127.0.0.1:41180 <this machine>, then `retail server web --print` here"
+            );
             Ok(())
         }
     }
 }
 
 fn exe(name: &str) -> String {
-    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
 }
 
 fn default_dir() -> PathBuf {
     if cfg!(windows) {
-        PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into())).join("retail")
+        PathBuf::from(
+            std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into()),
+        )
+        .join("retail")
     } else if cfg!(target_os = "macos") {
         PathBuf::from(retail_proto::programs::MACOS_DIR)
     } else {
@@ -234,7 +287,10 @@ fn require_admin() -> Result<()> {
     #[cfg(unix)]
     let admin = unsafe { libc::geteuid() } == 0;
     #[cfg(windows)]
-    let admin = std::process::Command::new("net").arg("session").output().is_ok_and(|o| o.status.success());
+    let admin = std::process::Command::new("net")
+        .arg("session")
+        .output()
+        .is_ok_and(|o| o.status.success());
     if !admin {
         bail!("run this as administrator (Windows) or root (sudo)");
     }
@@ -249,17 +305,21 @@ fn wait_for(api: SocketAddr) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    bail!("retaild did not start (see its log: journalctl -u retaild, or the Task Scheduler history)")
+    bail!(
+        "retaild did not start (see its log: journalctl -u retaild, or the Task Scheduler history)"
+    )
 }
 
 /// A POST to the local API with the token
 fn call<T: serde::de::DeserializeOwned>(api: SocketAddr, path: &str, body: &str) -> Result<T> {
     // The daemon writes its token just after it starts listening
     let token = (0..50)
-        .find_map(|_| retail_proto::local::read_token().or_else(|| {
-            std::thread::sleep(Duration::from_millis(100));
-            None
-        }))
+        .find_map(|_| {
+            retail_proto::local::read_token().or_else(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                None
+            })
+        })
         .context("no local API token")?;
     let mut s = TcpStream::connect_timeout(&api, Duration::from_secs(2))?;
     s.set_read_timeout(Some(Duration::from_secs(60)))?;
@@ -271,21 +331,36 @@ fn call<T: serde::de::DeserializeOwned>(api: SocketAddr, path: &str, body: &str)
     )?;
     let mut raw = Vec::new();
     s.take(1 << 20).read_to_end(&mut raw)?;
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").context("malformed answer")?;
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("malformed answer")?;
     let head = String::from_utf8_lossy(&raw[..split]);
-    let ok = head.split_whitespace().nth(1).is_some_and(|c| c.starts_with('2'));
+    let ok = head
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|c| c.starts_with('2'));
     let body = &raw[split + 4..];
     if !ok {
-        let e = serde_json::from_slice::<retail_proto::api::ApiError>(body).map(|e| e.error).unwrap_or_else(|_| head.lines().next().unwrap_or("").to_string());
+        let e = serde_json::from_slice::<retail_proto::api::ApiError>(body)
+            .map(|e| e.error)
+            .unwrap_or_else(|_| head.lines().next().unwrap_or("").to_string());
         bail!("{path}: {e}");
     }
     Ok(serde_json::from_slice(body)?)
 }
 
 fn run_quiet(program: &str, args: &[&str]) -> Result<()> {
-    let out = std::process::Command::new(program).args(args).output().with_context(|| program.to_string())?;
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| program.to_string())?;
     if !out.status.success() {
-        bail!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "{program} {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -299,19 +374,26 @@ const TASK: &str = "retail\\retaild";
 /// token, so only an administrator can stop it this way.
 #[cfg(windows)]
 fn request_stop(api: SocketAddr) {
-    let Some(admin) = retail_proto::local::read_admin_token() else { return };
+    let Some(admin) = retail_proto::local::read_admin_token() else {
+        return;
+    };
     let token = retail_proto::local::read_token().unwrap_or_default();
     if retail_proto::local::check_listener(api).is_err() {
         return;
     }
-    let Ok(mut s) = TcpStream::connect_timeout(&api, Duration::from_millis(500)) else { return };
+    let Ok(mut s) = TcpStream::connect_timeout(&api, Duration::from_millis(500)) else {
+        return;
+    };
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let req = format!(
         "POST /shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Retail-Local: 1\r\nX-Retail-Token: {token}\r\nX-Retail-Admin: {admin}\r\n\
          Connection: close\r\nContent-Length: 0\r\n\r\n"
     );
     let mut head = [0u8; 10];
-    if s.write_all(req.as_bytes()).is_err() || s.read_exact(&mut head).is_err() || !head.starts_with(b"HTTP/1.1 2") {
+    if s.write_all(req.as_bytes()).is_err()
+        || s.read_exact(&mut head).is_err()
+        || !head.starts_with(b"HTTP/1.1 2")
+    {
         return;
     }
     drop(s);
@@ -389,7 +471,9 @@ fn create_task(daemon: &Path) -> Result<()> {
 /// `s` as XML text: a folder may be named `R&D`
 #[cfg(windows)]
 fn xml_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A daemon started by an older task definition (from 1.0.1 or before, which
@@ -397,23 +481,41 @@ fn xml_text(s: &str) -> String {
 /// carry on.
 #[cfg(windows)]
 pub fn update_task() {
-    let Ok(me) = std::env::current_exe() else { return };
-    let Ok(out) = std::process::Command::new("schtasks").args(["/Query", "/TN", TASK, "/XML"]).output() else { return };
+    let Ok(me) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(out) = std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", TASK, "/XML"])
+        .output()
+    else {
+        return;
+    };
     // UTF-16 or the console's code page, by Windows version
-    let raw = out.stdout.strip_prefix(&[0xFF, 0xFE]).unwrap_or(&out.stdout);
+    let raw = out
+        .stdout
+        .strip_prefix(&[0xFF, 0xFE])
+        .unwrap_or(&out.stdout);
     let xml = if raw.len() >= 2 && raw.iter().skip(1).step_by(2).take(64).all(|b| *b == 0) {
-        let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(raw).into_owned()
     };
     // Not installed as the task (a test, a copy elsewhere), or current
-    let ours = xml.contains(&format!("<Command>{}</Command>", xml_text(&me.display().to_string())));
+    let ours = xml.contains(&format!(
+        "<Command>{}</Command>",
+        xml_text(&me.display().to_string())
+    ));
     if !out.status.success() || !ours || xml.contains(TASK_MARK) {
         return;
     }
     match create_task(&me) {
-        Ok(()) => tracing::info!("boot task updated: it now also starts retaild when it is not running"),
+        Ok(()) => {
+            tracing::info!("boot task updated: it now also starts retaild when it is not running")
+        }
         Err(e) => tracing::warn!("updating the boot task: {e:#}"),
     }
 }
@@ -427,7 +529,16 @@ pub fn stop(api: SocketAddr) {
     request_stop(api);
     let _ = run_quiet("schtasks", &["/End", "/TN", TASK]);
     // Not this process (`retaild service stop` itself)
-    let _ = run_quiet("taskkill", &["/F", "/FI", &format!("PID ne {}", std::process::id()), "/IM", "retaild.exe"]);
+    let _ = run_quiet(
+        "taskkill",
+        &[
+            "/F",
+            "/FI",
+            &format!("PID ne {}", std::process::id()),
+            "/IM",
+            "retaild.exe",
+        ],
+    );
     std::thread::sleep(Duration::from_millis(500));
 }
 
@@ -439,11 +550,19 @@ pub fn unregister() {
 #[cfg(target_os = "linux")]
 pub fn register(daemon: &Path) -> Result<()> {
     if run_quiet("systemctl", &["--version"]).is_err() {
-        bail!("systemd was not found; start {} yourself (as root), for example from your init system", daemon.display());
+        bail!(
+            "systemd was not found; start {} yourself (as root), for example from your init system",
+            daemon.display()
+        );
     }
-    let dir = daemon.parent().map(|d| d.display().to_string()).unwrap_or_else(|| "/usr/local/bin".into());
-    let unit = include_str!("../../../packaging/systemd/retaild.service").replace("/usr/local/bin", &dir);
-    std::fs::write("/etc/systemd/system/retaild.service", unit).context("writing the systemd unit")?;
+    let dir = daemon
+        .parent()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "/usr/local/bin".into());
+    let unit =
+        include_str!("../../../packaging/systemd/retaild.service").replace("/usr/local/bin", &dir);
+    std::fs::write("/etc/systemd/system/retaild.service", unit)
+        .context("writing the systemd unit")?;
     run_quiet("systemctl", &["daemon-reload"])?;
     run_quiet("systemctl", &["enable", "--now", "retaild"])?;
     run_quiet("systemctl", &["restart", "retaild"])
@@ -502,33 +621,38 @@ pub fn register(daemon: &Path) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub fn leave_shared_folder() {
     use retail_proto::programs::{MACOS_DIR, MACOS_LINKS, NAMES, link, make_root_only};
-    let Ok(me) = std::env::current_exe() else { return };
+    let Ok(me) = std::env::current_exe() else {
+        return;
+    };
     let (old, new) = (Path::new(MACOS_LINKS), Path::new(MACOS_DIR));
-    let registered = std::fs::read_to_string(PLIST).is_ok_and(|p| p.contains("<string>/usr/local/bin/retaild</string>"));
+    let registered = std::fs::read_to_string(PLIST)
+        .is_ok_and(|p| p.contains("<string>/usr/local/bin/retaild</string>"));
     if me.parent() != Some(old) || !registered {
         return;
     }
     tracing::info!("moving the programs from {MACOS_LINKS} to {MACOS_DIR}");
-    let moved = make_root_only(new).map_err(anyhow::Error::from).and_then(|()| {
-        for name in NAMES {
-            let from = old.join(name);
-            if from.is_file() {
-                copy(&from, &new.join(name)).with_context(|| format!("copying {name}"))?;
+    let moved = make_root_only(new)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| {
+            for name in NAMES {
+                let from = old.join(name);
+                if from.is_file() {
+                    copy(&from, &new.join(name)).with_context(|| format!("copying {name}"))?;
+                }
             }
-        }
-        link(new, old).context("linking the programs")?;
-        use std::os::unix::process::CommandExt;
-        // In a process group of its own, which the job's end leaves running
-        std::process::Command::new(new.join("retaild"))
-            .args(["service", "register"])
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("registering the moved retaild")?;
-        Ok(())
-    });
+            link(new, old).context("linking the programs")?;
+            use std::os::unix::process::CommandExt;
+            // In a process group of its own, which the job's end leaves running
+            std::process::Command::new(new.join("retaild"))
+                .args(["service", "register"])
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .context("registering the moved retaild")?;
+            Ok(())
+        });
     match moved {
         // launchd ends this process when it takes the new registration
         Ok(()) => std::thread::sleep(Duration::from_secs(30)),

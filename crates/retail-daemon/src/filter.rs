@@ -111,7 +111,15 @@ fn parse(p: &[u8]) -> Option<Header> {
     let src = Ipv4Addr::new(p[12], p[13], p[14], p[15]);
     let dst = Ipv4Addr::new(p[16], p[17], p[18], p[19]);
     let frag_offset = u16::from_be_bytes([p[6], p[7]]) & 0x1fff;
-    let mut h = Header { proto, src, dst, sport: 0, dport: 0, icmp_type: 0, later_fragment: frag_offset != 0 };
+    let mut h = Header {
+        proto,
+        src,
+        dst,
+        sport: 0,
+        dport: 0,
+        icmp_type: 0,
+        later_fragment: frag_offset != 0,
+    };
     if h.later_fragment {
         return Some(h);
     }
@@ -153,7 +161,10 @@ impl Filter {
     /// Notes a packet we send to the peer, so its replies come in
     pub fn outbound(&self, p: &[u8]) {
         let Some(h) = parse(p) else { return };
-        if h.later_fragment || !matches!(h.proto, TCP | UDP | ICMP) || (h.proto == ICMP && h.icmp_type != 8) {
+        if h.later_fragment
+            || !matches!(h.proto, TCP | UDP | ICMP)
+            || (h.proto == ICMP && h.icmp_type != 8)
+        {
             return;
         }
         let key = FlowKey(h.proto, h.dst, h.dport, h.sport);
@@ -193,14 +204,24 @@ impl Filter {
         let port = if h.proto == ICMP { 0 } else { h.dport };
         // Echo requests are new traffic; echo replies and ICMP errors answer ours
         let new = h.proto != ICMP || h.icmp_type == 8;
-        if new && self.ports.read().unwrap().iter().any(|r| r.matches(h.proto, port)) {
+        if new
+            && self
+                .ports
+                .read()
+                .unwrap()
+                .iter()
+                .any(|r| r.matches(h.proto, port))
+        {
             return true;
         }
         match h.proto {
             TCP | UDP => self.reply(FlowKey(h.proto, h.src, h.sport, h.dport)),
             ICMP if h.icmp_type == 0 => self.reply(FlowKey(ICMP, h.src, h.sport, h.dport)),
             // Destination unreachable, time exceeded: about our traffic
-            ICMP => matches!(h.icmp_type, 3 | 11) && self.flows.lock().unwrap().keys().any(|k| k.1 == h.src),
+            ICMP => {
+                matches!(h.icmp_type, 3 | 11)
+                    && self.flows.lock().unwrap().keys().any(|k| k.1 == h.src)
+            }
             _ => false,
         }
     }
@@ -276,14 +297,25 @@ mod tests {
         p
     }
 
-    const PLAIN: Here<'static> = Here { ip: ME, exit: false, routes: &[] };
-    const EXIT: Here<'static> = Here { ip: ME, exit: true, routes: &[] };
+    const PLAIN: Here<'static> = Here {
+        ip: ME,
+        exit: false,
+        routes: &[],
+    };
+    const EXIT: Here<'static> = Here {
+        ip: ME,
+        exit: true,
+        routes: &[],
+    };
 
     #[test]
     fn unrestricted_peers_reach_this_device_only() {
         let f = Filter::default();
         assert!(f.inbound(&packet(TCP, PEER, ME, 1000, 22), &PLAIN));
-        assert!(f.inbound(&packet(UDP, PEER, Ipv4Addr::new(224, 0, 0, 251), 5353, 5353), &PLAIN));
+        assert!(f.inbound(
+            &packet(UDP, PEER, Ipv4Addr::new(224, 0, 0, 251), 5353, 5353),
+            &PLAIN
+        ));
         // Services bound to loopback stay local, exit node or not
         for here in [&PLAIN, &EXIT] {
             assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::LOCALHOST, 1000, 41112), here));
@@ -295,12 +327,22 @@ mod tests {
         let internet = packet(TCP, PEER, Ipv4Addr::new(8, 8, 8, 8), 40000, 80);
         assert!(!f.inbound(&internet, &PLAIN));
         assert!(f.inbound(&internet, &EXIT));
-        assert!(!f.inbound(&lan, &EXIT), "an exit node keeps its private networks to itself");
+        assert!(
+            !f.inbound(&lan, &EXIT),
+            "an exit node keeps its private networks to itself"
+        );
         // A routed network is reachable
         let routes: [Ipv4Net; 1] = ["10.99.0.0/24".parse().unwrap()];
-        let router = Here { ip: ME, exit: false, routes: &routes };
+        let router = Here {
+            ip: ME,
+            exit: false,
+            routes: &routes,
+        };
         assert!(f.inbound(&lan, &router));
-        assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::new(10, 98, 0, 7), 1000, 22), &router));
+        assert!(!f.inbound(
+            &packet(TCP, PEER, Ipv4Addr::new(10, 98, 0, 7), 1000, 22),
+            &router
+        ));
     }
 
     #[test]
@@ -308,10 +350,25 @@ mod tests {
         assert!(EXIT.forwarded(Ipv4Addr::new(8, 8, 8, 8)));
         assert!(!PLAIN.forwarded(Ipv4Addr::new(8, 8, 8, 8)));
         // Even under a route that should never have been approved
-        let routes: [Ipv4Net; 2] = ["10.99.0.0/24".parse().unwrap(), "128.0.0.0/1".parse().unwrap()];
-        let router = Here { ip: ME, exit: true, routes: &routes };
+        let routes: [Ipv4Net; 2] = [
+            "10.99.0.0/24".parse().unwrap(),
+            "128.0.0.0/1".parse().unwrap(),
+        ];
+        let router = Here {
+            ip: ME,
+            exit: true,
+            routes: &routes,
+        };
         assert!(router.forwarded(Ipv4Addr::new(10, 99, 0, 7)));
-        for dst in [[127, 0, 0, 1], [0, 0, 0, 0], [169, 254, 169, 254], [224, 0, 0, 1], [255, 255, 255, 255], [100, 64, 0, 9], [240, 0, 0, 1]] {
+        for dst in [
+            [127, 0, 0, 1],
+            [0, 0, 0, 0],
+            [169, 254, 169, 254],
+            [224, 0, 0, 1],
+            [255, 255, 255, 255],
+            [100, 64, 0, 9],
+            [240, 0, 0, 1],
+        ] {
             assert!(!router.forwarded(Ipv4Addr::from(dst)), "{dst:?}");
         }
         // An exit node keeps its private networks to itself
@@ -323,7 +380,9 @@ mod tests {
     #[test]
     fn allowed_ports_and_replies_only() {
         let f = Filter::default();
-        f.set(&Accept::Ports { ports: vec![PortRule::parse("tcp:443").unwrap()] });
+        f.set(&Accept::Ports {
+            ports: vec![PortRule::parse("tcp:443").unwrap()],
+        });
         assert!(f.inbound(&packet(TCP, PEER, ME, 40000, 443), &PLAIN));
         assert!(!f.inbound(&packet(TCP, PEER, ME, 40000, 22), &PLAIN));
         assert!(!f.inbound(&packet(UDP, PEER, ME, 40000, 443), &PLAIN));
@@ -331,7 +390,10 @@ mod tests {
         f.outbound(&packet(TCP, ME, PEER, 50000, 22));
         assert!(f.inbound(&packet(TCP, PEER, ME, 22, 50000), &PLAIN));
         assert!(!f.inbound(&packet(TCP, PEER, ME, 22, 50001), &PLAIN));
-        assert!(!f.inbound(&packet(TCP, Ipv4Addr::new(100, 64, 0, 3), ME, 22, 50000), &PLAIN));
+        assert!(!f.inbound(
+            &packet(TCP, Ipv4Addr::new(100, 64, 0, 3), ME, 22, 50000),
+            &PLAIN
+        ));
         // Pings: ours get answered, theirs are not let in
         f.outbound(&icmp(8, ME, PEER, 7));
         assert!(f.inbound(&icmp(0, PEER, ME, 7), &PLAIN));
@@ -340,15 +402,33 @@ mod tests {
         // Internet traffic through us as an exit node is not ours to filter
         let internet = packet(TCP, PEER, Ipv4Addr::new(8, 8, 8, 8), 40000, 80);
         assert!(f.inbound(&internet, &EXIT));
-        assert!(!f.inbound(&internet, &PLAIN), "not an exit node: no internet traffic either");
+        assert!(
+            !f.inbound(&internet, &PLAIN),
+            "not an exit node: no internet traffic either"
+        );
         // Broadcast and other mesh addresses are not let in on the side
-        for dst in [Ipv4Addr::new(192, 168, 1, 10), Ipv4Addr::new(255, 255, 255, 255), Ipv4Addr::new(224, 0, 0, 251), Ipv4Addr::new(100, 64, 0, 9)] {
-            assert!(!f.inbound(&packet(UDP, PEER, dst, 40000, 5353), &EXIT), "{dst}");
+        for dst in [
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(255, 255, 255, 255),
+            Ipv4Addr::new(224, 0, 0, 251),
+            Ipv4Addr::new(100, 64, 0, 9),
+        ] {
+            assert!(
+                !f.inbound(&packet(UDP, PEER, dst, 40000, 5353), &EXIT),
+                "{dst}"
+            );
         }
         // Routed networks only for peers with full access
         let routes: [Ipv4Net; 1] = ["10.99.0.0/24".parse().unwrap()];
-        let router = Here { ip: ME, exit: false, routes: &routes };
-        assert!(!f.inbound(&packet(TCP, PEER, Ipv4Addr::new(10, 99, 0, 7), 40000, 443), &router));
+        let router = Here {
+            ip: ME,
+            exit: false,
+            routes: &routes,
+        };
+        assert!(!f.inbound(
+            &packet(TCP, PEER, Ipv4Addr::new(10, 99, 0, 7), 40000, 443),
+            &router
+        ));
         // Garbage and later fragments are dropped
         assert!(!f.inbound(&[0x45, 0, 0], &PLAIN));
         let mut frag = packet(TCP, PEER, ME, 40000, 443);

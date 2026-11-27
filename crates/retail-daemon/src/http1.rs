@@ -21,11 +21,18 @@ pub struct Response {
 
 impl Response {
     pub fn headers_named(&self, name: &str) -> Vec<String> {
-        self.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()).collect()
+        self.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+            .collect()
     }
 
     fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -52,20 +59,39 @@ pub async fn read_response(mut io: BoxIo, tunnel: bool) -> Result<(BoxIo, Respon
     let status_line = lines.next().unwrap_or_default();
     let mut words = status_line.split_whitespace();
     let version = words.next().unwrap_or_default();
-    let status: u16 = words.next().and_then(|s| s.parse().ok()).context("malformed HTTP status line")?;
+    let status: u16 = words
+        .next()
+        .and_then(|s| s.parse().ok())
+        .context("malformed HTTP status line")?;
     let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect();
-    let mut resp = Response { status, headers, ..Default::default() };
-    let connection = resp.header("connection").or(resp.header("proxy-connection")).unwrap_or("").to_ascii_lowercase();
-    resp.close = connection.contains("close") || (version == "HTTP/1.0" && !connection.contains("keep-alive"));
+    let mut resp = Response {
+        status,
+        headers,
+        ..Default::default()
+    };
+    let connection = resp
+        .header("connection")
+        .or(resp.header("proxy-connection"))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    resp.close = connection.contains("close")
+        || (version == "HTTP/1.0" && !connection.contains("keep-alive"));
     let mut rest = buf.split_off(split + 4);
 
-    let no_body = (tunnel && (200..300).contains(&status)) || status / 100 == 1 || status == 204 || status == 304;
+    let no_body = (tunnel && (200..300).contains(&status))
+        || status / 100 == 1
+        || status == 204
+        || status == 304;
     if !no_body {
-        let chunked = resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
-        let length = resp.header("content-length").and_then(|v| v.parse::<usize>().ok());
+        let chunked = resp
+            .header("transfer-encoding")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+        let length = resp
+            .header("content-length")
+            .and_then(|v| v.parse::<usize>().ok());
         if chunked {
             let (body, left) = read_chunked(&mut io, rest).await?;
             resp.body = body;
@@ -87,12 +113,19 @@ pub async fn read_response(mut io: BoxIo, tunnel: bool) -> Result<(BoxIo, Respon
             rest = left;
         } else {
             // Delimited by the end of the connection
-            (&mut io).take(MAX_BODY as u64).read_to_end(&mut rest).await?;
+            (&mut io)
+                .take(MAX_BODY as u64)
+                .read_to_end(&mut rest)
+                .await?;
             resp.body = std::mem::take(&mut rest);
             resp.close = true;
         }
     }
-    let io: BoxIo = if rest.is_empty() { io } else { Box::new(Prefixed::new(rest, io)) };
+    let io: BoxIo = if rest.is_empty() {
+        io
+    } else {
+        Box::new(Prefixed::new(rest, io))
+    };
     Ok((io, resp))
 }
 
@@ -124,7 +157,12 @@ async fn read_chunked(io: &mut BoxIo, mut data: Vec<u8>) -> Result<(Vec<u8>, Vec
     let mut trailers = 0;
     loop {
         let eol = line(&mut data, io).await?;
-        let size_str = std::str::from_utf8(&data[..eol])?.split(';').next().unwrap_or("").trim().to_string();
+        let size_str = std::str::from_utf8(&data[..eol])?
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let size = usize::from_str_radix(&size_str, 16).context("malformed chunk size")?;
         data.drain(..eol + 2);
         if size == 0 {
@@ -169,9 +207,15 @@ mod tests {
     async fn keep_alive_and_chunked() {
         let io = feed(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcHTTP/1.1 407 X\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nde\r\n0\r\n\r\n").await;
         let (io, r) = read_response(io, false).await.unwrap();
-        assert_eq!((r.status, r.body.as_slice(), r.close), (200, &b"abc"[..], false));
+        assert_eq!(
+            (r.status, r.body.as_slice(), r.close),
+            (200, &b"abc"[..], false)
+        );
         let (_, r) = read_response(io, false).await.unwrap();
-        assert_eq!((r.status, r.body.as_slice(), r.close), (407, &b"de"[..], true));
+        assert_eq!(
+            (r.status, r.body.as_slice(), r.close),
+            (407, &b"de"[..], true)
+        );
     }
 
     #[tokio::test]
@@ -192,7 +236,9 @@ mod tests {
         // A size line that never ends
         let (a, mut b) = tokio::io::duplex(4096);
         tokio::spawn(async move {
-            let _ = b.write_all(b"HTTP/1.1 407 X\r\nTransfer-Encoding: chunked\r\n\r\n").await;
+            let _ = b
+                .write_all(b"HTTP/1.1 407 X\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await;
             let _ = b.write_all(&[b'1'; 64 * 1024]).await;
         });
         let err = read_response(Box::new(a), true).await.err().unwrap();

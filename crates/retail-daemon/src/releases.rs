@@ -53,8 +53,14 @@ pub async fn latest_version() -> Result<String> {
         Some(repo) => format!("{repo}/releases/latest/download/VERSION"),
         None => format!("{base}/latest/VERSION"),
     };
-    let body = tokio::time::timeout(Duration::from_secs(60), get(&url, None)).await.context("checking took too long")??.1;
-    let v = String::from_utf8_lossy(&body).trim().trim_start_matches('v').to_string();
+    let body = tokio::time::timeout(Duration::from_secs(60), get(&url, None))
+        .await
+        .context("checking took too long")??
+        .1;
+    let v = String::from_utf8_lossy(&body)
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
     if parse_version(&v).is_none() {
         bail!("the release's VERSION is not a version: {v:?}");
     }
@@ -75,7 +81,12 @@ pub fn newer(latest: &str, current: &str) -> bool {
 
 /// Fetches the installer of `variant` from release `version`, checks it, and
 /// writes `files` from it into `dir`
-pub async fn fetch_version(version: &str, variant: &str, files: &[String], dir: &Path) -> Result<()> {
+pub async fn fetch_version(
+    version: &str,
+    variant: &str,
+    files: &[String],
+    dir: &Path,
+) -> Result<()> {
     fetch_version_with(version, variant, files, dir, &|_, _| {}, || {}).await
 }
 
@@ -96,7 +107,9 @@ pub async fn fetch_version_with(
     let release = format!("{base}/v{version}");
     let name = installer_asset(variant);
     tokio::time::timeout(TIMEOUT, async {
-        let sums = get(&format!("{release}/SHA256SUMS"), None).await.context("reading the release's checksums")?;
+        let sums = get(&format!("{release}/SHA256SUMS"), None)
+            .await
+            .context("reading the release's checksums")?;
         let sums = String::from_utf8_lossy(&sums.1);
         let want = sums
             .lines()
@@ -107,14 +120,18 @@ pub async fn fetch_version_with(
             .with_context(|| format!("release v{version} has no {name}"))?;
         tokio::fs::create_dir_all(dir).await?;
         let download = dir.join(format!("{name}.download"));
-        let got = get_with(&format!("{release}/{name}"), Some(&download), progress).await.with_context(|| format!("downloading {name}"))?.0;
+        let got = get_with(&format!("{release}/{name}"), Some(&download), progress)
+            .await
+            .with_context(|| format!("downloading {name}"))?
+            .0;
         checking();
         if got != want {
             let _ = tokio::fs::remove_file(&download).await;
             bail!("{name} does not match the release checksum");
         }
         let (dir2, files2, download2) = (dir.to_path_buf(), files.to_vec(), download.clone());
-        let unpacked = tokio::task::spawn_blocking(move || unpack(&download2, &dir2, &files2)).await?;
+        let unpacked =
+            tokio::task::spawn_blocking(move || unpack(&download2, &dir2, &files2)).await?;
         let _ = tokio::fs::remove_file(&download).await;
         unpacked.with_context(|| format!("taking the programs out of {name}"))?;
         tracing::info!(%name, "official release fetched");
@@ -127,11 +144,16 @@ pub async fn fetch_version_with(
 /// Writes `files` out of the installer at `path`: in front of a disk image
 /// (macOS), in a Debian package (Linux), or the file itself (Windows)
 fn unpack(path: &Path, dir: &Path, files: &[String]) -> Result<()> {
-    use retail_proto::package::{DEB_INSTALLER, Window, deb_entry, dmg_prefix, extract, read_manifest};
+    use retail_proto::package::{
+        DEB_INSTALLER, Window, deb_entry, dmg_prefix, extract, read_manifest,
+    };
     let mut f = std::fs::File::open(path)?;
     let name = path.to_string_lossy();
     let (start, len) = if name.ends_with(".dmg.download") {
-        (0, dmg_prefix(&mut f).context("the disk image carries no installer")?)
+        (
+            0,
+            dmg_prefix(&mut f).context("the disk image carries no installer")?,
+        )
     } else if name.ends_with(".deb.download") {
         deb_entry(&mut f, DEB_INSTALLER).context("the package carries no installer")?
     } else {
@@ -153,7 +175,11 @@ pub(crate) async fn get(url: &str, to: Option<&Path>) -> Result<(String, Vec<u8>
 }
 
 /// `get`, telling `progress` the bytes so far and in all (when known)
-pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u64, Option<u64>) + Sync)) -> Result<(String, Vec<u8>)> {
+pub(crate) async fn get_with(
+    url: &str,
+    to: Option<&Path>,
+    progress: &(dyn Fn(u64, Option<u64>) + Sync),
+) -> Result<(String, Vec<u8>)> {
     let mut url = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let u = crate::http::parse_url(&url)?;
@@ -162,8 +188,13 @@ pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u6
         }
         let io = open(u.host, u.port).await?;
         let name = rustls::pki_types::ServerName::try_from(u.host.to_string())?;
-        let mut tls = tokio_rustls::TlsConnector::from(crate::http::tls_config()).connect(name, io).await?;
-        let path = url.split_once("://").and_then(|(_, r)| r.find('/').map(|i| &r[i..])).unwrap_or("/");
+        let mut tls = tokio_rustls::TlsConnector::from(crate::http::tls_config())
+            .connect(name, io)
+            .await?;
+        let path = url
+            .split_once("://")
+            .and_then(|(_, r)| r.find('/').map(|i| &r[i..]))
+            .unwrap_or("/");
         let req = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: retaild/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
             u.authority_string(),
@@ -171,11 +202,17 @@ pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u6
         );
         tls.write_all(req.as_bytes()).await?;
         let (head, rest) = read_head(&mut tls).await?;
-        let status: u16 = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).context("malformed answer")?;
+        let status: u16 = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .context("malformed answer")?;
         let header = |k: &str| {
             head.lines().skip(1).find_map(|l| {
                 let (n, v) = l.split_once(':')?;
-                n.trim().eq_ignore_ascii_case(k).then(|| v.trim().to_string())
+                n.trim()
+                    .eq_ignore_ascii_case(k)
+                    .then(|| v.trim().to_string())
             })
         };
         if (300..400).contains(&status) {
@@ -217,7 +254,11 @@ pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u6
             }
             let n = tls.read(&mut buf).await.or_else(|e| {
                 // Servers often close without a TLS close_notify after `Connection: close`
-                if e.kind() == std::io::ErrorKind::UnexpectedEof { Ok(0) } else { Err(e) }
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
             })?;
             if n == 0 {
                 break;
@@ -230,7 +271,12 @@ pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u6
         if length.is_some_and(|n| n != total) {
             bail!("download cut short");
         }
-        let hex = hash.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let hex = hash
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         return Ok((hex, body));
     }
     bail!("too many redirects")
@@ -238,7 +284,11 @@ pub(crate) async fn get_with(url: &str, to: Option<&Path>, progress: &(dyn Fn(u6
 
 /// Directly, or through the first proxy that works
 async fn open(host: &str, port: u16) -> Result<retail_control::BoxIo> {
-    let direct = tokio::time::timeout(Duration::from_secs(10), crate::happy::connect_many(host, port, &[])).await;
+    let direct = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::happy::connect_many(host, port, &[]),
+    )
+    .await;
     if let Ok(Ok(tcp)) = direct {
         return Ok(Box::new(tcp));
     }
@@ -276,7 +326,10 @@ mod tests {
     #[test]
     fn installer_names() {
         assert_eq!(installer_asset("linux-x86_64"), "retail-linux-x86_64.deb");
-        assert_eq!(installer_asset("windows-x86_64"), "retail-windows-x86_64.exe");
+        assert_eq!(
+            installer_asset("windows-x86_64"),
+            "retail-windows-x86_64.exe"
+        );
         assert_eq!(installer_asset("macos-aarch64"), "retail-macos.dmg");
         assert_eq!(installer_asset("macos-x86_64"), "retail-macos.dmg");
     }

@@ -10,10 +10,10 @@
 use anyhow::{Context, Result, bail, ensure};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use rand::RngCore;
+use retail_control::BoxIo;
 use retail_control::reality as shared;
 use ring::{aead, digest, hkdf, hmac, signature};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use retail_control::BoxIo;
 
 type OwnedReadHalf = tokio::io::ReadHalf<BoxIo>;
 type OwnedWriteHalf = tokio::io::WriteHalf<BoxIo>;
@@ -21,7 +21,9 @@ type OwnedWriteHalf = tokio::io::WriteHalf<BoxIo>;
 const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
 const MAX_RECORD: usize = 16384;
 /// DER of an Ed25519 SubjectPublicKeyInfo up to the 32-byte key
-const ED25519_SPKI: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+const ED25519_SPKI: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
@@ -63,7 +65,10 @@ fn expects(step: Step, kind: u8) -> bool {
 /// Returns a stream carrying the plaintext
 pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
     let (rd, mut wr) = tokio::io::split(io);
-    let mut records = Records { rd, buf: Vec::new() };
+    let mut records = Records {
+        rd,
+        buf: Vec::new(),
+    };
 
     // The session id is sealed with the zeroed-id hello as AAD, then written into it
     let eph = StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -71,7 +76,11 @@ pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
     let mut random = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let (mut hello, sid_at) = client_hello(&random, &share, &p.server_name);
-    let auth = shared::auth_key(eph.diffie_hellman(&PublicKey::from(p.public_key)).as_bytes(), &random);
+    let auth = shared::auth_key(
+        eph.diffie_hellman(&PublicKey::from(p.public_key))
+            .as_bytes(),
+        &random,
+    );
     let plain = shared::session_plaintext(shared::now_secs(), p.short_id);
     let sid = shared::seal_session_id(&auth, &random, &hello, &plain);
     hello[sid_at..sid_at + 32].copy_from_slice(&sid);
@@ -83,7 +92,10 @@ pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
     transcript.update(&hello);
 
     let (kind, sh) = records.next().await?;
-    ensure!(kind == 22, "the server did not answer with a handshake (record type {kind})");
+    ensure!(
+        kind == 22,
+        "the server did not answer with a handshake (record type {kind})"
+    );
     let server_share = parse_server_hello(&sh)?;
     transcript.update(&sh);
     let ecdhe = eph.diffie_hellman(&PublicKey::from(server_share));
@@ -109,7 +121,11 @@ pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
     loop {
         while let Some(len) = whole_message(&msgs) {
             let msg: Vec<u8> = msgs.drain(..len).collect();
-            ensure!(expects(step, msg[0]), "unexpected handshake message {} while waiting for {step:?}", msg[0]);
+            ensure!(
+                expects(step, msg[0]),
+                "unexpected handshake message {} while waiting for {step:?}",
+                msg[0]
+            );
             match step {
                 Step::EncryptedExtensions => {
                     transcript.update(&msg);
@@ -128,7 +144,10 @@ pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
                 }
                 Step::Finished => {
                     let expected = finished(&s_hs, transcript.clone().finish().as_ref());
-                    ensure!(msg.len() == 36 && msg[4..] == expected[..], "server Finished does not verify");
+                    ensure!(
+                        msg.len() == 36 && msg[4..] == expected[..],
+                        "server Finished does not verify"
+                    );
                     transcript.update(&msg);
                     return finish(records, wr, server_keys, &c_hs, &master, transcript).await;
                 }
@@ -139,7 +158,10 @@ pub async fn connect(io: BoxIo, p: &Params) -> Result<DuplexStream> {
             20 => continue, // ChangeCipherSpec (middlebox compatibility)
             23 => {
                 let (inner, data) = server_keys.open(&payload)?;
-                ensure!(inner == 22, "expected handshake data, got content type {inner}");
+                ensure!(
+                    inner == 22,
+                    "expected handshake data, got content type {inner}"
+                );
                 msgs.extend_from_slice(&data);
             }
             21 => bail!("the server refused the handshake"),
@@ -182,7 +204,7 @@ async fn finish(
                         let (inner, data) = server.open(&payload)?;
                         match inner {
                             23 => to_app.write_all(&data).await?,
-                            22 => {} // NewSessionTicket and the like
+                            22 => {}                    // NewSessionTicket and the like
                             _ => return anyhow::Ok(()), // Alert, so closed
                         }
                     }
@@ -268,9 +290,16 @@ fn client_hello(random: &[u8; 32], share: &[u8; 32], server_name: &str) -> (Vec<
     add(10, &[0, 8, g[0], g[1], 0, 0x1d, 0, 0x17, 0, 0x18]); // supported_groups
     add(11, &[1, 0]); // ec_point_formats
     add(35, &[]); // session_ticket
-    add(16, &[0, 12, 2, b'h', b'2', 8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1']); // ALPN
+    add(
+        16,
+        &[
+            0, 12, 2, b'h', b'2', 8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1',
+        ],
+    ); // ALPN
     add(5, &[1, 0, 0, 0, 0]); // status_request
-    let sigs: [u16; 8] = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0807];
+    let sigs: [u16; 8] = [
+        0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0807,
+    ];
     let mut sa = ((sigs.len() * 2) as u16).to_be_bytes().to_vec();
     for s in sigs {
         sa.extend_from_slice(&s.to_be_bytes());
@@ -289,7 +318,10 @@ fn client_hello(random: &[u8; 32], share: &[u8; 32], server_name: &str) -> (Vec<
     add(27, &[2, 0, 2]); // compress_certificate: brotli
     // The second GREASE extension must differ from the first or the server
     // rejects the hello as a duplicate (Chrome does the same)
-    add(u16::from_be_bytes(grease(seed[1].wrapping_add(1 + seed[0] % 15))), &[0]);
+    add(
+        u16::from_be_bytes(grease(seed[1].wrapping_add(1 + seed[0] % 15))),
+        &[0],
+    );
     body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
     body.extend_from_slice(&ext);
 
@@ -305,13 +337,22 @@ fn parse_server_hello(m: &[u8]) -> Result<[u8; 32]> {
     r.take(2)?;
     let random = r.take(32)?;
     // SHA-256("HelloRetryRequest")
-    ensure!(random[..8] != [0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11], "the server asked to retry the handshake");
+    ensure!(
+        random[..8] != [0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11],
+        "the server asked to retry the handshake"
+    );
     let sid = r.u8()? as usize;
     r.take(sid)?;
-    ensure!(r.u16()? == TLS_AES_128_GCM_SHA256, "unexpected cipher suite");
+    ensure!(
+        r.u16()? == TLS_AES_128_GCM_SHA256,
+        "unexpected cipher suite"
+    );
     r.take(1)?;
     let ext_len = r.u16()? as usize;
-    let mut e = Cursor { b: r.take(ext_len)?, at: 0 };
+    let mut e = Cursor {
+        b: r.take(ext_len)?,
+        at: 0,
+    };
     let (mut tls13, mut key) = (false, None);
     while e.at < e.b.len() {
         let kind = e.u16()?;
@@ -319,7 +360,9 @@ fn parse_server_hello(m: &[u8]) -> Result<[u8; 32]> {
         let data = e.take(n)?;
         match kind {
             43 => tls13 = data == [3, 4],
-            51 if data.len() == 36 && data[..4] == [0, 0x1d, 0, 32] => key = data[4..].try_into().ok(),
+            51 if data.len() == 36 && data[..4] == [0, 0x1d, 0, 32] => {
+                key = data[4..].try_into().ok()
+            }
             _ => {}
         }
     }
@@ -330,22 +373,37 @@ fn parse_server_hello(m: &[u8]) -> Result<[u8; 32]> {
 /// The certificate must be Ed25519 with HMAC(auth key, public key) as its
 /// signature. Returns the public key.
 fn check_certificate(msg: &[u8], auth: &[u8; 32]) -> Result<[u8; 32]> {
-    let mut r = Cursor { b: &msg[4..], at: 0 };
+    let mut r = Cursor {
+        b: &msg[4..],
+        at: 0,
+    };
     let ctx = r.u8()? as usize;
     r.take(ctx)?;
     r.take(3)?;
     let len = r.u24()?;
     let der = r.take(len)?;
-    let at = der.windows(ED25519_SPKI.len()).position(|w| w == ED25519_SPKI).context("not an Ed25519 certificate")?;
-    let key: [u8; 32] = der.get(at + 12..at + 44).context("truncated certificate")?.try_into()?;
+    let at = der
+        .windows(ED25519_SPKI.len())
+        .position(|w| w == ED25519_SPKI)
+        .context("not an Ed25519 certificate")?;
+    let key: [u8; 32] = der
+        .get(at + 12..at + 44)
+        .context("truncated certificate")?
+        .try_into()?;
     ensure!(der.len() > 64, "truncated certificate");
     let mac = shared::cert_hmac(auth, &key);
-    ensure!(der[der.len() - 64..] == mac[..], "the server is not the REALITY server it claims to be");
+    ensure!(
+        der[der.len() - 64..] == mac[..],
+        "the server is not the REALITY server it claims to be"
+    );
     Ok(key)
 }
 
 fn verify_certificate_verify(msg: &[u8], key: &[u8; 32], transcript_hash: &[u8]) -> Result<()> {
-    let mut r = Cursor { b: &msg[4..], at: 0 };
+    let mut r = Cursor {
+        b: &msg[4..],
+        at: 0,
+    };
     ensure!(r.u16()? == 0x0807, "unexpected signature scheme");
     let n = r.u16()? as usize;
     let sig = r.take(n)?;
@@ -368,7 +426,10 @@ fn whole_message(buf: &[u8]) -> Option<usize> {
 fn extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
     // HKDF-Extract is HMAC(salt, ikm)
     let key = hmac::Key::new(hmac::HMAC_SHA256, salt);
-    hmac::sign(&key, ikm).as_ref().try_into().expect("32-byte HMAC-SHA256")
+    hmac::sign(&key, ikm)
+        .as_ref()
+        .try_into()
+        .expect("32-byte HMAC-SHA256")
 }
 
 struct Len(usize);
@@ -387,17 +448,24 @@ fn expand_label_n(secret: &[u8], label: &str, context: &[u8], n: usize) -> Vec<u
     info.extend_from_slice(context);
     let prk = hkdf::Prk::new_less_safe(hkdf::HKDF_SHA256, secret);
     let mut out = vec![0u8; n];
-    prk.expand(&[&info], Len(n)).and_then(|okm| okm.fill(&mut out)).expect("valid HKDF length");
+    prk.expand(&[&info], Len(n))
+        .and_then(|okm| okm.fill(&mut out))
+        .expect("valid HKDF length");
     out
 }
 
 fn expand_label(secret: &[u8], label: &str, context: &[u8]) -> [u8; 32] {
-    expand_label_n(secret, label, context, 32).try_into().expect("32 bytes")
+    expand_label_n(secret, label, context, 32)
+        .try_into()
+        .expect("32 bytes")
 }
 
 fn finished(secret: &[u8; 32], transcript_hash: &[u8]) -> [u8; 32] {
     let key = hmac::Key::new(hmac::HMAC_SHA256, &expand_label(secret, "finished", b""));
-    hmac::sign(&key, transcript_hash).as_ref().try_into().expect("32 bytes")
+    hmac::sign(&key, transcript_hash)
+        .as_ref()
+        .try_into()
+        .expect("32 bytes")
 }
 
 /// One direction's AEAD state
@@ -410,8 +478,16 @@ struct Keys {
 impl Keys {
     fn new(secret: &[u8; 32]) -> Self {
         let key = expand_label_n(secret, "key", b"", 16);
-        let iv: [u8; 12] = expand_label_n(secret, "iv", b"", 12).try_into().expect("12 bytes");
-        Keys { key: aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &key).expect("16-byte key")), iv, seq: 0 }
+        let iv: [u8; 12] = expand_label_n(secret, "iv", b"", 12)
+            .try_into()
+            .expect("12 bytes");
+        Keys {
+            key: aead::LessSafeKey::new(
+                aead::UnboundKey::new(&aead::AES_128_GCM, &key).expect("16-byte key"),
+            ),
+            iv,
+            seq: 0,
+        }
     }
 
     fn nonce(&mut self) -> aead::Nonce {
@@ -448,7 +524,10 @@ impl Keys {
             .key
             .open_in_place(nonce, aead::Aad::from(header), &mut buf)
             .map_err(|_| anyhow::anyhow!("record does not decrypt"))?;
-        let end = plain.iter().rposition(|&b| b != 0).context("empty record")?;
+        let end = plain
+            .iter()
+            .rposition(|&b| b != 0)
+            .context("empty record")?;
         Ok((plain[end], plain[..end].to_vec()))
     }
 }
@@ -461,7 +540,10 @@ struct Records {
 impl Records {
     async fn next(&mut self) -> Result<(u8, Vec<u8>)> {
         let mut header = [0u8; 5];
-        self.rd.read_exact(&mut header).await.context("connection closed")?;
+        self.rd
+            .read_exact(&mut header)
+            .await
+            .context("connection closed")?;
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         ensure!(len <= MAX_RECORD + 256, "record too large");
         self.buf.resize(len, 0);
@@ -477,7 +559,10 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let s = self.b.get(self.at..self.at + n).context("truncated message")?;
+        let s = self
+            .b
+            .get(self.at..self.at + n)
+            .context("truncated message")?;
         self.at += n;
         Ok(s)
     }
@@ -564,17 +649,30 @@ mod tests {
         .unwrap();
         let addr = format!("127.0.0.1:{}", server.port());
         let public = PublicKey::from(&StaticSecret::from(server_secret)).to_bytes();
-        let params = Params { public_key: public, short_id: [4u8; 8], server_name: "www.example.com".into() };
+        let params = Params {
+            public_key: public,
+            short_id: [4u8; 8],
+            server_name: "www.example.com".into(),
+        };
 
         let tcp: BoxIo = Box::new(tokio::net::TcpStream::connect(&addr).await.unwrap());
         let mut s = connect(tcp, &params).await.expect("REALITY handshake");
-        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut resp = Vec::new();
         s.read_to_end(&mut resp).await.unwrap();
-        assert!(String::from_utf8_lossy(&resp).ends_with("ok"), "{}", String::from_utf8_lossy(&resp));
+        assert!(
+            String::from_utf8_lossy(&resp).ends_with("ok"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
 
         // A client with the wrong server key is treated as a probe
-        let wrong = Params { public_key: [1u8; 32], ..params.clone() };
+        let wrong = Params {
+            public_key: [1u8; 32],
+            ..params.clone()
+        };
         let tcp: BoxIo = Box::new(tokio::net::TcpStream::connect(&addr).await.unwrap());
         assert!(connect(tcp, &wrong).await.is_err());
 
@@ -586,7 +684,11 @@ mod tests {
         rec.extend_from_slice(&hello);
         probe.write_all(&rec).await.unwrap();
         let mut got = Vec::new();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), probe.read_to_end(&mut got)).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            probe.read_to_end(&mut got),
+        )
+        .await;
         assert_eq!(got, b"real website");
 
         server.stop().await;

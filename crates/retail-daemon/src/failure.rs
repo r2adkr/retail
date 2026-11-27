@@ -23,12 +23,18 @@ impl std::fmt::Display for Tagged {
 impl StdError for Tagged {}
 
 pub fn tagged(reason: FailReason, msg: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(Tagged { reason, msg: msg.into() })
+    anyhow::Error::new(Tagged {
+        reason,
+        msg: msg.into(),
+    })
 }
 
 /// A failed name lookup, kept inside the `io::Error` it travels in
 pub fn name_lookup(host: &str, e: impl std::fmt::Display) -> io::Error {
-    io::Error::other(Tagged { reason: FailReason::Dns, msg: format!("looking up {host}: {e}") })
+    io::Error::other(Tagged {
+        reason: FailReason::Dns,
+        msg: format!("looking up {host}: {e}"),
+    })
 }
 
 /// How much a reason tells: an answer from the server beats one from
@@ -49,17 +55,28 @@ fn rank(r: FailReason) -> u8 {
 }
 
 pub fn classify(e: &anyhow::Error) -> FailReason {
-    e.chain().map(one).max_by_key(|r| rank(*r)).unwrap_or(FailReason::Other)
+    e.chain()
+        .map(one)
+        .max_by_key(|r| rank(*r))
+        .unwrap_or(FailReason::Other)
 }
 
 /// The more telling of two errors
 pub fn better(a: anyhow::Error, b: anyhow::Error) -> anyhow::Error {
-    if rank(classify(&b)) > rank(classify(&a)) { b } else { a }
+    if rank(classify(&b)) > rank(classify(&a)) {
+        b
+    } else {
+        a
+    }
 }
 
 /// The more telling of two I/O errors
 pub fn better_io(a: io::Error, b: io::Error) -> io::Error {
-    if rank(of_io(&b)) > rank(of_io(&a)) { b } else { a }
+    if rank(of_io(&b)) > rank(of_io(&a)) {
+        b
+    } else {
+        a
+    }
 }
 
 fn one(cause: &(dyn StdError + 'static)) -> FailReason {
@@ -76,7 +93,9 @@ fn one(cause: &(dyn StdError + 'static)) -> FailReason {
         Some(tungstenite::Error::Http(resp)) => of_status(resp.status().as_u16()),
         Some(tungstenite::Error::Io(e)) => of_io(e),
         Some(tungstenite::Error::Tls(_)) => FailReason::Intercepted,
-        Some(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => FailReason::Reset,
+        Some(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+            FailReason::Reset
+        }
         _ => FailReason::Other,
     }
 }
@@ -105,7 +124,9 @@ fn of_io(e: &io::Error) -> FailReason {
         TimedOut | WouldBlock => FailReason::Timeout,
         ConnectionRefused => FailReason::Refused,
         ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof => FailReason::Reset,
-        HostUnreachable | NetworkUnreachable | NetworkDown | AddrNotAvailable => FailReason::Unreachable,
+        HostUnreachable | NetworkUnreachable | NetworkDown | AddrNotAvailable => {
+            FailReason::Unreachable
+        }
         _ => FailReason::Other,
     }
 }
@@ -117,17 +138,39 @@ mod tests {
 
     #[test]
     fn reads_kinds_not_words() {
-        let refused = anyhow::Error::from(io::Error::from(io::ErrorKind::ConnectionRefused)).context("HTTPS");
+        let refused =
+            anyhow::Error::from(io::Error::from(io::ErrorKind::ConnectionRefused)).context("HTTPS");
         assert_eq!(classify(&refused), FailReason::Refused);
-        let tls = anyhow::Error::from(io::Error::new(io::ErrorKind::InvalidData, rustls::Error::DecryptError)).context("HTTPS");
+        let tls = anyhow::Error::from(io::Error::new(
+            io::ErrorKind::InvalidData,
+            rustls::Error::DecryptError,
+        ))
+        .context("HTTPS");
         assert_eq!(classify(&tls), FailReason::Intercepted);
-        let dns = anyhow::Error::from(name_lookup("vpn.example.com", "nodename nor servname provided"));
+        let dns = anyhow::Error::from(name_lookup(
+            "vpn.example.com",
+            "nodename nor servname provided",
+        ));
         assert_eq!(classify(&dns), FailReason::Dns);
         let proxy: anyhow::Result<()> = Err(tagged(FailReason::ProxyAuth, "proxy wants a sign-in"));
-        assert_eq!(classify(&proxy.context("via proxy").unwrap_err()), FailReason::ProxyAuth);
-        let resp = tungstenite::http::Response::builder().status(401).body(None).unwrap();
-        assert_eq!(classify(&anyhow::Error::from(tungstenite::Error::Http(Box::new(resp)))), FailReason::Rejected);
-        assert_eq!(classify(&anyhow::anyhow!("something odd")), FailReason::Other);
+        assert_eq!(
+            classify(&proxy.context("via proxy").unwrap_err()),
+            FailReason::ProxyAuth
+        );
+        let resp = tungstenite::http::Response::builder()
+            .status(401)
+            .body(None)
+            .unwrap();
+        assert_eq!(
+            classify(&anyhow::Error::from(tungstenite::Error::Http(Box::new(
+                resp
+            )))),
+            FailReason::Rejected
+        );
+        assert_eq!(
+            classify(&anyhow::anyhow!("something odd")),
+            FailReason::Other
+        );
     }
 
     #[test]

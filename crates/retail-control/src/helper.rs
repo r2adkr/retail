@@ -98,11 +98,13 @@ pub struct Helper {
 
 impl Helper {
     pub async fn start(cfg: HelperConfig) -> Result<Helper> {
-        std::fs::create_dir_all(&cfg.data_dir).with_context(|| format!("creating {}", cfg.data_dir.display()))?;
+        std::fs::create_dir_all(&cfg.data_dir)
+            .with_context(|| format!("creating {}", cfg.data_dir.display()))?;
         let (tls, pin) = crate::tls::self_signed(&cfg.data_dir.join("tls"))?;
         let secret = load_secret(&cfg.data_dir.join("helper-secret"))?;
         let mut listeners = vec![tokio::net::TcpListener::from_std(
-            crate::net::bind_tcp(cfg.listen).with_context(|| format!("binding tcp/{}", cfg.listen))?,
+            crate::net::bind_tcp(cfg.listen)
+                .with_context(|| format!("binding tcp/{}", cfg.listen))?,
         )?];
         for addr in &cfg.extra_listen {
             match crate::net::bind_tcp(*addr).and_then(tokio::net::TcpListener::from_std) {
@@ -111,7 +113,8 @@ impl Helper {
             }
         }
         let port = listeners[0].local_addr()?.port();
-        let stun = crate::net::bind_udp(cfg.stun_listen).with_context(|| format!("binding udp/{}", cfg.stun_listen))?;
+        let stun = crate::net::bind_udp(cfg.stun_listen)
+            .with_context(|| format!("binding udp/{}", cfg.stun_listen))?;
         let shared = Arc::new(Shared::default());
         let acceptor = tokio_rustls::TlsAcceptor::from(tls);
         let mut tasks = Vec::new();
@@ -125,7 +128,8 @@ impl Helper {
                     };
                     let _ = tcp.set_nodelay(true);
                     retail_proto::relay::tune(&tcp);
-                    let (shared, acceptor, secret) = (shared.clone(), acceptor.clone(), secret.clone());
+                    let (shared, acceptor, secret) =
+                        (shared.clone(), acceptor.clone(), secret.clone());
                     tokio::spawn(async move {
                         if let Err(e) = handle(tcp, peer, &shared, &acceptor, &secret).await {
                             tracing::debug!(%peer, "helper: {e:#}");
@@ -140,7 +144,13 @@ impl Helper {
             }
         }));
         tracing::info!("helper: listening on tcp/{port}");
-        Ok(Helper { pin, secret, port, shared, tasks })
+        Ok(Helper {
+            pin,
+            secret,
+            port,
+            shared,
+            tasks,
+        })
     }
 
     pub fn pin(&self) -> [u8; 32] {
@@ -200,13 +210,21 @@ async fn handle(
     let (prefix, hello) = tokio::time::timeout(PICKUP, crate::tls::read_client_hello(&mut tcp))
         .await
         .context("no data")??;
-    let sni = hello.as_deref().and_then(crate::reality::parse_client_hello).and_then(|h| h.server_name);
+    let sni = hello
+        .as_deref()
+        .and_then(crate::reality::parse_client_hello)
+        .and_then(|h| h.server_name);
     let io = crate::tls::Prefixed::new(prefix, Box::new(tcp));
     if sni.as_deref() == Some(LINK_NAME) {
         // The link name is public, so until the secret is shown this is anyone:
         // bound how many may wait and for how long
-        let slot = LinkSlot::take(shared, crate::net::same_network(peer.ip())).context("too many unauthenticated link connections")?;
-        let tls = crate::tls::small_buffer(tokio::time::timeout(PICKUP, acceptor.accept(io)).await.context("link handshake timed out")??);
+        let slot = LinkSlot::take(shared, crate::net::same_network(peer.ip()))
+            .context("too many unauthenticated link connections")?;
+        let tls = crate::tls::small_buffer(
+            tokio::time::timeout(PICKUP, acceptor.accept(io))
+                .await
+                .context("link handshake timed out")??,
+        );
         return link(tls, shared, secret, slot).await;
     }
     // Anyone else is a client of the server
@@ -218,7 +236,9 @@ async fn handle(
     {
         let ip = crate::net::same_network(peer.ip());
         let mut pending = shared.pending.lock().unwrap();
-        if pending.len() >= MAX_PENDING || pending.values().filter(|(_, from)| *from == ip).count() >= MAX_PENDING_PER_IP {
+        if pending.len() >= MAX_PENDING
+            || pending.values().filter(|(_, from)| *from == ip).count() >= MAX_PENDING_PER_IP
+        {
             anyhow::bail!("too many clients waiting");
         }
         pending.insert(id, (tx, ip));
@@ -252,7 +272,10 @@ where
     drop(slot);
     match kind {
         "WORK" => {
-            let id: u64 = words.next().and_then(|w| w.parse().ok()).context("malformed WORK")?;
+            let id: u64 = words
+                .next()
+                .and_then(|w| w.parse().ok())
+                .context("malformed WORK")?;
             let waiting = shared.pending.lock().unwrap().remove(&id);
             if let Some((tx, _)) = waiting {
                 // Bytes the server sent early stay in the reader's buffer
@@ -317,15 +340,27 @@ mod tests {
         let shared = Shared::default();
         let a: std::net::IpAddr = "192.0.2.1".parse().unwrap();
         let b: std::net::IpAddr = "192.0.2.2".parse().unwrap();
-        let held: Vec<_> = (0..MAX_UNAUTHENTICATED_LINKS_PER_IP).map(|_| LinkSlot::take(&shared, a).unwrap()).collect();
-        assert!(LinkSlot::take(&shared, a).is_none(), "one address is capped");
-        assert!(LinkSlot::take(&shared, b).is_some(), "another still gets in");
+        let held: Vec<_> = (0..MAX_UNAUTHENTICATED_LINKS_PER_IP)
+            .map(|_| LinkSlot::take(&shared, a).unwrap())
+            .collect();
+        assert!(
+            LinkSlot::take(&shared, a).is_none(),
+            "one address is capped"
+        );
+        assert!(
+            LinkSlot::take(&shared, b).is_some(),
+            "another still gets in"
+        );
         drop(held);
         assert!(LinkSlot::take(&shared, a).is_some(), "slots come back");
         assert!(shared.unauthenticated_links.lock().unwrap().is_empty());
         // An IPv6 host owns its /64, so new addresses in it share the cap
-        let v6 = |i: u16| crate::net::same_network(std::net::IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, i]));
-        let held: Vec<_> = (0..MAX_UNAUTHENTICATED_LINKS_PER_IP).map(|i| LinkSlot::take(&shared, v6(i as u16)).unwrap()).collect();
+        let v6 = |i: u16| {
+            crate::net::same_network(std::net::IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, i]))
+        };
+        let held: Vec<_> = (0..MAX_UNAUTHENTICATED_LINKS_PER_IP)
+            .map(|i| LinkSlot::take(&shared, v6(i as u16)).unwrap())
+            .collect();
         assert!(LinkSlot::take(&shared, v6(999)).is_none());
         drop(held);
     }
@@ -336,13 +371,21 @@ mod tests {
         let shared = Arc::new(Shared::default());
         let (tx, mut announced) = mpsc::channel(1024);
         *shared.link.lock().unwrap() = Some(tx);
-        let acceptor = tokio_rustls::TlsAcceptor::from(crate::tls::self_signed(&std::env::temp_dir().join(format!("retail-helper-test-{}", std::process::id()))).unwrap().0);
+        let acceptor = tokio_rustls::TlsAcceptor::from(
+            crate::tls::self_signed(
+                &std::env::temp_dir().join(format!("retail-helper-test-{}", std::process::id())),
+            )
+            .unwrap()
+            .0,
+        );
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         let mut clients = Vec::new();
         for _ in 0..MAX_PENDING_PER_IP + 4 {
             let mut c = TcpStream::connect(addr).await.unwrap();
-            tokio::io::AsyncWriteExt::write_all(&mut c, b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut c, b"GET / HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
             clients.push(c);
             let (tcp, peer) = l.accept().await.unwrap();
             let (shared, acceptor) = (shared.clone(), acceptor.clone());

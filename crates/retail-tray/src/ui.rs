@@ -61,6 +61,7 @@ pub enum Action {
     StartDaemon,
     /// Turn on a device that is off (hostname)
     Wake(String),
+    SendFile(std::net::Ipv4Addr, String),
 }
 
 /// The daemon going away during an update, and coming back
@@ -107,14 +108,25 @@ impl DaemonWait {
     /// Title, explanation, and the progress shown instead of the start button
     pub fn text(&self) -> (String, String, Option<f32>) {
         if self.is_starting() {
-            return (tr("Starting retaild…").into(), tr("Waiting for retaild to answer.").into(), Some(0.5));
+            return (
+                tr("Starting retaild…").into(),
+                tr("Waiting for retaild to answer.").into(),
+                Some(0.5),
+            );
         }
         if let Some(t) = self.since.filter(|_| self.restarting()) {
             let s = t.elapsed().as_secs_f32();
             // Most restarts are over within ten seconds; the bar slows down
             // as it nears the end rather than stopping full
             let f = 0.6 + 0.38 * (1.0 - (-s / 12.0).exp());
-            return (tr("Restarting retail…").into(), trf("The update is installed. retail starts again in a moment ({n} s).", &[("n", &(s as u64))]), Some(f));
+            return (
+                tr("Restarting retail…").into(),
+                trf(
+                    "The update is installed. retail starts again in a moment ({n} s).",
+                    &[("n", &(s as u64))],
+                ),
+                Some(f),
+            );
         }
         let hint = if self.since.is_some() {
             tr("retail did not start again after the update. Start it here.")
@@ -137,7 +149,10 @@ pub fn progress_bar(c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32, f: f32) {
 pub fn stage_text(stage: UpdateStage, done: u64, total: Option<u64>) -> String {
     let mb = |b: u64| format!("{:.1}", b as f64 / 1_048_576.0);
     match (stage, total) {
-        (UpdateStage::Downloading, Some(t)) => trf("Downloading {done} / {total} MB", &[("done", &mb(done)), ("total", &mb(t))]),
+        (UpdateStage::Downloading, Some(t)) => trf(
+            "Downloading {done} / {total} MB",
+            &[("done", &mb(done)), ("total", &mb(t))],
+        ),
         (UpdateStage::Downloading, None) => trf("Downloading {done} MB", &[("done", &mb(done))]),
         (UpdateStage::Checking, _) => tr("Checking the download…").into(),
         (UpdateStage::Replacing, _) => tr("Putting the new programs in place…").into(),
@@ -148,7 +163,12 @@ pub fn stage_text(stage: UpdateStage, done: u64, total: Option<u64>) -> String {
 /// How far along the whole installation is: the download is most of it
 pub fn stage_fraction(stage: UpdateStage, done: u64, total: Option<u64>) -> f32 {
     match stage {
-        UpdateStage::Downloading => 0.05 + 0.75 * total.filter(|t| *t > 0).map_or(0.0, |t| done as f32 / t as f32),
+        UpdateStage::Downloading => {
+            0.05 + 0.75
+                * total
+                    .filter(|t| *t > 0)
+                    .map_or(0.0, |t| done as f32 / t as f32)
+        }
         UpdateStage::Checking => 0.85,
         UpdateStage::Replacing => 0.9,
         UpdateStage::Restarting => 0.95,
@@ -204,7 +224,8 @@ impl Ui {
     }
 
     pub fn is_running(&self) -> bool {
-        self.status().is_some_and(|s| s.state == BackendState::Running)
+        self.status()
+            .is_some_and(|s| s.state == BackendState::Running)
     }
 
     fn toggle_state(&self) -> bool {
@@ -235,18 +256,30 @@ impl Ui {
 
     /// The new-release banner under the header
     fn banner_h(&self) -> f32 {
-        if self.status().is_some_and(|s| s.update.available) { BANNER_H } else { 0.0 }
+        if self.status().is_some_and(|s| s.update.available) {
+            BANNER_H
+        } else {
+            0.0
+        }
     }
 
     pub fn needs_timer(&self) -> Option<Instant> {
-        let toast = self.toast.as_ref().map(|(_, at)| *at + Duration::from_millis(1500));
+        let toast = self
+            .toast
+            .as_ref()
+            .map(|(_, at)| *at + Duration::from_millis(1500));
         let pending = self.pending.map(|(_, at)| at + Duration::from_secs(8));
         toast.into_iter().chain(pending).min()
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<Action> {
         // The open menu is drawn last and sits on top, so check it first
-        let hit = self.regions.iter().rev().find(|(r, _)| contains(r, x, y)).map(|(_, a)| a.clone());
+        let hit = self
+            .regions
+            .iter()
+            .rev()
+            .find(|(r, _)| contains(r, x, y))
+            .map(|(_, a)| a.clone());
         match hit {
             None if self.menu.is_some() || self.gear => Some(Action::Dismiss),
             hit => hit,
@@ -267,7 +300,11 @@ impl Ui {
     }
 
     pub fn render(&mut self, fonts: &Fonts, pix: &mut Pixmap, scale: f32) {
-        if self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(1500)) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_millis(1500))
+        {
             self.toast = None;
         }
         let t = Theme::new(self.dark);
@@ -281,7 +318,14 @@ impl Ui {
             c.fill_rect(0.0, 0.0, WIDTH, h, t.bg);
         }
         // Hairline border, visible on both themes and on platforms without a window shadow
-        c.stroke_rrect(0.5, 0.5, WIDTH - 1.0, h - 1.0, (CORNER - 0.5).max(0.0), t.border);
+        c.stroke_rrect(
+            0.5,
+            0.5,
+            WIDTH - 1.0,
+            h - 1.0,
+            (CORNER - 0.5).max(0.0),
+            t.border,
+        );
 
         self.header(&mut c, &t);
         let mut y = HEADER_H;
@@ -303,7 +347,14 @@ impl Ui {
                         progress_bar(&mut c, &t, PAD, below + 4.0, WIDTH - 2.0 * PAD, f);
                     }
                     None => {
-                        self.message(&mut c, &t, y, &title, &hint, Some((tr("Start retaild"), Action::StartDaemon)));
+                        self.message(
+                            &mut c,
+                            &t,
+                            y,
+                            &title,
+                            &hint,
+                            Some((tr("Start retaild"), Action::StartDaemon)),
+                        );
                     }
                 }
             }
@@ -319,7 +370,15 @@ impl Ui {
             }
             View::Status(s) if s.state == BackendState::Stopped => {
                 y = self.device_card(&mut c, &t, &s, y + 4.0);
-                c.text(tr("The connection is off"), PAD, y + 36.0, 14.0, Weight::Semibold, t.text, None);
+                c.text(
+                    tr("The connection is off"),
+                    PAD,
+                    y + 36.0,
+                    14.0,
+                    Weight::Semibold,
+                    t.text,
+                    None,
+                );
                 c.text(
                     tr("Turn on retail to connect to your other devices."),
                     PAD,
@@ -335,10 +394,33 @@ impl Ui {
                 y = self.devices(&mut c, &t, &s, y + 8.0);
                 if let Some((err, hint)) = &error_text(&s) {
                     let h = if hint.is_some() { 52.0 } else { 36.0 };
-                    c.fill_rrect(PAD, y + 4.0, WIDTH - 2.0 * PAD, h, 8.0, with_alpha(t.red, 0.12));
-                    c.text(err, PAD + 12.0, y + 26.0, 12.0, Weight::Regular, t.red, Some(WIDTH - 2.0 * PAD - 24.0));
+                    c.fill_rrect(
+                        PAD,
+                        y + 4.0,
+                        WIDTH - 2.0 * PAD,
+                        h,
+                        8.0,
+                        with_alpha(t.red, 0.12),
+                    );
+                    c.text(
+                        err,
+                        PAD + 12.0,
+                        y + 26.0,
+                        12.0,
+                        Weight::Regular,
+                        t.red,
+                        Some(WIDTH - 2.0 * PAD - 24.0),
+                    );
                     if let Some(hint) = hint {
-                        c.text(hint, PAD + 12.0, y + 43.0, 11.5, Weight::Regular, t.dim, Some(WIDTH - 2.0 * PAD - 24.0));
+                        c.text(
+                            hint,
+                            PAD + 12.0,
+                            y + 43.0,
+                            11.5,
+                            Weight::Regular,
+                            t.dim,
+                            Some(WIDTH - 2.0 * PAD - 24.0),
+                        );
                     }
                 }
             }
@@ -348,21 +430,56 @@ impl Ui {
 
     fn banner(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, y: f32) {
         let (x, w) = (PAD, WIDTH - 2.0 * PAD);
-        c.fill_rrect(x, y + 14.0, w, 40.0, 10.0, with_alpha(t.accent, if self.dark { 0.22 } else { 0.1 }));
+        c.fill_rrect(
+            x,
+            y + 14.0,
+            w,
+            40.0,
+            10.0,
+            with_alpha(t.accent, if self.dark { 0.22 } else { 0.1 }),
+        );
         let latest = s.update.latest.clone().unwrap_or_default();
         if s.update.installing {
             let text = trf("Installing retail {version}…", &[("version", &latest)]);
-            c.text(&text, x + 12.0, y + 39.0, 12.5, Weight::Semibold, t.text, Some(w - 24.0));
+            c.text(
+                &text,
+                x + 12.0,
+                y + 39.0,
+                12.5,
+                Weight::Semibold,
+                t.text,
+                Some(w - 24.0),
+            );
             return;
         }
         let label = tr("Update");
         let bw = c.measure(label, 12.5, Weight::Semibold) + 24.0;
         let text = trf("retail {version} is available", &[("version", &latest)]);
-        c.text(&text, x + 12.0, y + 39.0, 12.5, Weight::Semibold, t.text, Some(w - 36.0 - bw));
+        c.text(
+            &text,
+            x + 12.0,
+            y + 39.0,
+            12.5,
+            Weight::Semibold,
+            t.text,
+            Some(w - 36.0 - bw),
+        );
         let r = Rect::from_xywh(x + w - 8.0 - bw, y + 20.0, bw, 28.0).unwrap();
-        let bg = if self.hovered(&r) { shade(t.accent, 1.1) } else { t.accent };
+        let bg = if self.hovered(&r) {
+            shade(t.accent, 1.1)
+        } else {
+            t.accent
+        };
         c.fill_rrect(r.x(), r.y(), r.width(), r.height(), 7.0, bg);
-        c.text(label, r.x() + 12.0, r.y() + 18.5, 12.5, Weight::Semibold, Color::WHITE, None);
+        c.text(
+            label,
+            r.x() + 12.0,
+            r.y() + 18.5,
+            12.5,
+            Weight::Semibold,
+            Color::WHITE,
+            None,
+        );
         self.regions.push((r, Action::Update));
     }
 
@@ -370,7 +487,11 @@ impl Ui {
         let (lx, ly) = (PAD, 22.0);
         let logo = if self.is_running() { t.accent } else { t.gray };
         c.fill_rrect(lx, ly, 28.0, 28.0, 8.0, logo);
-        let nodes = [(lx + 8.0, ly + 9.0), (lx + 20.0, ly + 9.0), (lx + 14.0, ly + 20.0)];
+        let nodes = [
+            (lx + 8.0, ly + 9.0),
+            (lx + 20.0, ly + 9.0),
+            (lx + 14.0, ly + 20.0),
+        ];
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
             c.line(nodes[a], nodes[b], 1.6, t.knob);
         }
@@ -378,7 +499,15 @@ impl Ui {
             c.circle(x, y, 2.8, t.knob);
         }
 
-        c.text("retail", lx + 40.0, 35.0, 16.0, Weight::Semibold, t.text, None);
+        c.text(
+            "retail",
+            lx + 40.0,
+            35.0,
+            16.0,
+            Weight::Semibold,
+            t.text,
+            None,
+        );
         let (label, color) = match &self.view {
             View::Loading => (tr("Starting…"), t.gray),
             View::Offline if self.daemon.restarting() => (tr("Restarting retail…"), t.amber),
@@ -391,18 +520,34 @@ impl Ui {
                     Some((_, true)) => (tr("Exit node offline · internet blocked"), t.red),
                     None => (tr("Connected"), t.accent),
                 },
-                (BackendState::Running, false) => (tr("Connected · can't reach the server"), t.amber),
+                (BackendState::Running, false) => {
+                    (tr("Connected · can't reach the server"), t.amber)
+                }
             },
         };
         let label = match self.pending {
-            Some((true, at)) if at.elapsed() < Duration::from_secs(8) && !self.is_running() => tr("Connecting…"),
-            Some((false, at)) if at.elapsed() < Duration::from_secs(8) && self.is_running() => tr("Disconnecting…"),
+            Some((true, at)) if at.elapsed() < Duration::from_secs(8) && !self.is_running() => {
+                tr("Connecting…")
+            }
+            Some((false, at)) if at.elapsed() < Duration::from_secs(8) && self.is_running() => {
+                tr("Disconnecting…")
+            }
             _ => label,
         };
         c.circle(lx + 44.0, 50.0, 3.5, color);
-        c.text(label, lx + 52.0, 54.5, 12.0, Weight::Regular, t.dim, Some(WIDTH - lx - 52.0 - 80.0));
+        c.text(
+            label,
+            lx + 52.0,
+            54.5,
+            12.0,
+            Weight::Regular,
+            t.dim,
+            Some(WIDTH - lx - 52.0 - 80.0),
+        );
 
-        let enabled = self.status().is_some_and(|s| s.state != BackendState::NeedsLogin && s.server.is_some());
+        let enabled = self
+            .status()
+            .is_some_and(|s| s.state != BackendState::NeedsLogin && s.server.is_some());
         let on = self.toggle_state();
         let (tw, th) = (46.0, 26.0);
         let (tx, ty) = (WIDTH - PAD - tw, 23.0);
@@ -414,9 +559,17 @@ impl Ui {
         } else {
             t.gray
         };
-        let track = if enabled && self.hovered(&r) { shade(track, if self.dark { 1.12 } else { 0.92 }) } else { track };
+        let track = if enabled && self.hovered(&r) {
+            shade(track, if self.dark { 1.12 } else { 0.92 })
+        } else {
+            track
+        };
         c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
-        let kx = if on { tx + tw - th / 2.0 } else { tx + th / 2.0 };
+        let kx = if on {
+            tx + tw - th / 2.0
+        } else {
+            tx + th / 2.0
+        };
         c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
         if enabled {
             self.regions.push((r, Action::Toggle));
@@ -431,20 +584,61 @@ impl Ui {
         let (x, w) = (PAD, WIDTH - 2.0 * PAD);
         let r = Rect::from_xywh(x, y + 8.0, w, CARD_H - 8.0).unwrap();
         let hover = self.hovered(&r);
-        c.fill_rrect(x, y + 8.0, w, CARD_H - 8.0, 10.0, if hover { t.hover } else { t.surface });
-        c.text(tr("This device"), x + 14.0, y + 27.0, 10.0, Weight::Semibold, t.dim, None);
-        c.text(&me.hostname, x + 14.0, y + 47.0, 14.0, Weight::Semibold, t.text, Some(w - 140.0));
+        c.fill_rrect(
+            x,
+            y + 8.0,
+            w,
+            CARD_H - 8.0,
+            10.0,
+            if hover { t.hover } else { t.surface },
+        );
+        c.text(
+            tr("This device"),
+            x + 14.0,
+            y + 27.0,
+            10.0,
+            Weight::Semibold,
+            t.dim,
+            None,
+        );
+        c.text(
+            &me.hostname,
+            x + 14.0,
+            y + 47.0,
+            14.0,
+            Weight::Semibold,
+            t.text,
+            Some(w - 140.0),
+        );
         let ip = me.ip.to_string();
         let ipw = c.measure(&ip, 13.0, Weight::Regular);
-        c.text(&ip, x + w - 14.0 - ipw, y + 47.0, 13.0, Weight::Regular, t.dim, None);
+        c.text(
+            &ip,
+            x + w - 14.0 - ipw,
+            y + 47.0,
+            13.0,
+            Weight::Regular,
+            t.dim,
+            None,
+        );
         let corner = if hover {
             Some(tr("Click to copy").to_string())
         } else {
-            s.connected_secs.filter(|_| s.state == BackendState::Running).map(|n| trf("Connected for {time}", &[("time", &duration(n))]))
+            s.connected_secs
+                .filter(|_| s.state == BackendState::Running)
+                .map(|n| trf("Connected for {time}", &[("time", &duration(n))]))
         };
         if let Some(corner) = corner {
             let hw = c.measure(&corner, 10.0, Weight::Regular);
-            c.text(&corner, x + w - 14.0 - hw, y + 27.0, 10.0, Weight::Regular, t.dim, None);
+            c.text(
+                &corner,
+                x + w - 14.0 - hw,
+                y + 27.0,
+                10.0,
+                Weight::Regular,
+                t.dim,
+                None,
+            );
         }
         self.regions.push((r, Action::Copy(ip)));
         y + CARD_H
@@ -452,14 +646,41 @@ impl Ui {
 
     fn devices(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, y: f32) -> f32 {
         let online = s.peers.iter().filter(|p| p.online).count();
-        c.text(tr("Devices"), PAD, y + 22.0, 10.0, Weight::Semibold, t.dim, None);
-        let count = trf("{online} of {total} connected", &[("online", &online), ("total", &s.peers.len())]);
+        c.text(
+            tr("Devices"),
+            PAD,
+            y + 22.0,
+            10.0,
+            Weight::Semibold,
+            t.dim,
+            None,
+        );
+        let count = trf(
+            "{online} of {total} connected",
+            &[("online", &online), ("total", &s.peers.len())],
+        );
         let cw = c.measure(&count, 11.0, Weight::Regular);
-        c.text(&count, WIDTH - PAD - cw, y + 22.0, 11.0, Weight::Regular, t.dim, None);
+        c.text(
+            &count,
+            WIDTH - PAD - cw,
+            y + 22.0,
+            11.0,
+            Weight::Regular,
+            t.dim,
+            None,
+        );
         let mut y = y + SECTION_H;
 
         if s.peers.is_empty() {
-            c.text(tr("No other devices yet."), PAD, y + 30.0, 13.0, Weight::Regular, t.dim, None);
+            c.text(
+                tr("No other devices yet."),
+                PAD,
+                y + 30.0,
+                13.0,
+                Weight::Regular,
+                t.dim,
+                None,
+            );
             return y + ROW_H;
         }
         let visible: Vec<&PeerStatus> = s.peers.iter().skip(self.scroll).take(MAX_ROWS).collect();
@@ -467,47 +688,104 @@ impl Ui {
         for p in visible {
             let r = Rect::from_xywh(PAD - 8.0, y, WIDTH - 2.0 * PAD + 16.0, ROW_H).unwrap();
             if self.hovered(&r) {
-                c.fill_rrect(PAD - 8.0, y + 2.0, WIDTH - 2.0 * PAD + 16.0, ROW_H - 4.0, 8.0, t.hover);
+                c.fill_rrect(
+                    PAD - 8.0,
+                    y + 2.0,
+                    WIDTH - 2.0 * PAD + 16.0,
+                    ROW_H - 4.0,
+                    8.0,
+                    t.hover,
+                );
             }
             let relayed = p.path.as_deref() == Some("relay");
             let (dot, path) = match (p.online, p.endpoint) {
                 (_, Some(_)) => (t.accent, tr("Direct").to_string()),
                 // The relay is the server: down with it
-                (_, None) if relayed && !s.control_connected => (t.amber, tr("Relay unavailable").to_string()),
+                (_, None) if relayed && !s.control_connected => {
+                    (t.amber, tr("Relay unavailable").to_string())
+                }
                 (_, None) if relayed => (t.accent, tr("Relay").to_string()),
                 (true, None) => (t.amber, tr("Connecting…").to_string()),
                 (false, None) => (t.gray, tr("Offline").to_string()),
             };
             c.circle(PAD + 5.0, y + ROW_H / 2.0, 4.5, dot);
-            c.text(&p.hostname, PAD + 20.0, y + 23.0, 14.0, Weight::Regular, t.text, Some(WIDTH - 2.0 * PAD - 120.0));
+            c.text(
+                &p.hostname,
+                PAD + 20.0,
+                y + 23.0,
+                14.0,
+                Weight::Regular,
+                t.text,
+                Some(WIDTH - 2.0 * PAD - 120.0),
+            );
             // WireGuard renews its keys every 2 minutes, so a fresh handshake
             // is not news (and its age, starting over, looked like reconnects);
             // an old one means the device has gone quiet
             let detail = match p.last_handshake_secs {
-                Some(secs) if secs > STALE_HANDSHAKE && (p.endpoint.is_some() || (relayed && s.control_connected)) => {
+                Some(secs)
+                    if secs > STALE_HANDSHAKE
+                        && (p.endpoint.is_some() || (relayed && s.control_connected)) =>
+                {
                     format!("{path} · {}", ago(secs))
                 }
                 _ => path,
             };
             let in_use = s.prefs.exit_node == Some(p.node_key);
             let (detail, detail_color) = match (in_use, p.online && p.exit_node) {
-                (true, true) => (trf("{detail} · used as exit node", &[("detail", &detail)]), t.accent),
-                (true, false) => (tr("Exit node offline · internet blocked").to_string(), t.red),
-                (false, _) if p.exit_node => (trf("{detail} · can be an exit node", &[("detail", &detail)]), t.dim),
+                (true, true) => (
+                    trf("{detail} · used as exit node", &[("detail", &detail)]),
+                    t.accent,
+                ),
+                (true, false) => (
+                    tr("Exit node offline · internet blocked").to_string(),
+                    t.red,
+                ),
+                (false, _) if p.exit_node => (
+                    trf("{detail} · can be an exit node", &[("detail", &detail)]),
+                    t.dim,
+                ),
                 _ => (detail, t.dim),
             };
-            c.text(&detail, PAD + 20.0, y + 40.0, 11.5, Weight::Regular, detail_color, Some(WIDTH - 2.0 * PAD - 120.0));
+            c.text(
+                &detail,
+                PAD + 20.0,
+                y + 40.0,
+                11.5,
+                Weight::Regular,
+                detail_color,
+                Some(WIDTH - 2.0 * PAD - 120.0),
+            );
             let ip = p.ip.to_string();
             let iw = c.measure(&ip, 12.5, Weight::Regular);
-            c.text(&ip, WIDTH - PAD - 30.0 - iw, y + 31.0, 12.5, Weight::Regular, t.dim, None);
+            c.text(
+                &ip,
+                WIDTH - PAD - 30.0 - iw,
+                y + 31.0,
+                12.5,
+                Weight::Regular,
+                t.dim,
+                None,
+            );
             self.regions.push((r, Action::Copy(ip)));
             let open = self.menu == Some(p.node_key);
             let b = Rect::from_xywh(WIDTH - PAD - 26.0, y + 12.0, 28.0, 28.0).unwrap();
             if open || self.hovered(&b) {
-                c.fill_rrect(b.x(), b.y(), b.width(), b.height(), 7.0, if self.dark { t.border } else { t.surface });
+                c.fill_rrect(
+                    b.x(),
+                    b.y(),
+                    b.width(),
+                    b.height(),
+                    7.0,
+                    if self.dark { t.border } else { t.surface },
+                );
             }
             for i in 0..3 {
-                c.circle(b.x() + 8.0 + i as f32 * 6.0, b.y() + 14.0, 1.6, if open { t.text } else { t.dim });
+                c.circle(
+                    b.x() + 8.0 + i as f32 * 6.0,
+                    b.y() + 14.0,
+                    1.6,
+                    if open { t.text } else { t.dim },
+                );
             }
             self.regions.push((b, Action::Menu(p.node_key)));
             if open {
@@ -521,42 +799,101 @@ impl Ui {
         if s.peers.len() > MAX_ROWS {
             let track_h = MAX_ROWS as f32 * ROW_H - 8.0;
             let frac = MAX_ROWS as f32 / s.peers.len() as f32;
-            let top = y - MAX_ROWS as f32 * ROW_H + 4.0 + track_h * (self.scroll as f32 / s.peers.len() as f32);
-            c.fill_rrect(WIDTH - 5.0, top, 3.0, track_h * frac, 1.5, with_alpha(t.dim, 0.5));
+            let top = y - MAX_ROWS as f32 * ROW_H
+                + 4.0
+                + track_h * (self.scroll as f32 / s.peers.len() as f32);
+            c.fill_rrect(
+                WIDTH - 5.0,
+                top,
+                3.0,
+                track_h * frac,
+                1.5,
+                with_alpha(t.dim, 0.5),
+            );
         }
         y
     }
 
     /// The "⋯" menu of a device, under its button (or above it near the bottom)
-    fn device_menu(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, p: &PeerStatus, top: f32) {
-        let mut items = vec![MenuItem { label: tr("Copy IP address").into(), action: Action::Copy(p.ip.to_string()) }];
+    fn device_menu(
+        &mut self,
+        c: &mut Canvas,
+        t: &Theme,
+        s: &StatusResponse,
+        p: &PeerStatus,
+        top: f32,
+    ) {
+        let mut items = vec![MenuItem {
+            label: tr("Copy IP address").into(),
+            action: Action::Copy(p.ip.to_string()),
+        }];
         if !p.dns_name.is_empty() {
-            items.push(MenuItem { label: tr("Copy name").into(), action: Action::Copy(p.dns_name.clone()) });
+            items.push(MenuItem {
+                label: tr("Copy name").into(),
+                action: Action::Copy(p.dns_name.clone()),
+            });
+        }
+        if p.online {
+            items.push(MenuItem {
+                label: tr("Send a file…").into(),
+                action: Action::SendFile(p.ip, p.hostname.clone()),
+            });
         }
         if !p.online && p.can_wake {
-            items.push(MenuItem { label: tr("Wake up").into(), action: Action::Wake(p.hostname.clone()) });
+            items.push(MenuItem {
+                label: tr("Wake up").into(),
+                action: Action::Wake(p.hostname.clone()),
+            });
         }
         let in_use = s.prefs.exit_node == Some(p.node_key);
         if in_use {
-            items.push(MenuItem { label: tr("Stop using exit node").into(), action: Action::SetExit(String::new()) });
+            items.push(MenuItem {
+                label: tr("Stop using exit node").into(),
+                action: Action::SetExit(String::new()),
+            });
         } else if p.exit_node && p.online {
-            items.push(MenuItem { label: tr("Use as exit node").into(), action: Action::SetExit(p.node_key.to_base64()) });
+            items.push(MenuItem {
+                label: tr("Use as exit node").into(),
+                action: Action::SetExit(p.node_key.to_base64()),
+            });
         }
         let h = items.len() as f32 * MENU_ITEM_H + 8.0;
         let x = WIDTH - PAD - MENU_W;
-        let y = if top + h > self.height() - FOOTER_H { top - 36.0 - h } else { top };
-        c.fill_rrect(x, y + 2.0, MENU_W, h, 10.0, with_alpha(Color::BLACK, if self.dark { 0.4 } else { 0.12 }));
+        let y = if top + h > self.height() - FOOTER_H {
+            top - 36.0 - h
+        } else {
+            top
+        };
+        c.fill_rrect(
+            x,
+            y + 2.0,
+            MENU_W,
+            h,
+            10.0,
+            with_alpha(Color::BLACK, if self.dark { 0.4 } else { 0.12 }),
+        );
         c.fill_rrect(x, y, MENU_W, h, 10.0, t.bg);
         c.stroke_rrect(x + 0.5, y + 0.5, MENU_W - 1.0, h - 1.0, 10.0, t.border);
         // Swallow clicks on the panel's padding
-        self.regions.push((Rect::from_xywh(x, y, MENU_W, h).unwrap(), Action::Menu(p.node_key)));
+        self.regions.push((
+            Rect::from_xywh(x, y, MENU_W, h).unwrap(),
+            Action::Menu(p.node_key),
+        ));
         let mut iy = y + 4.0;
         for item in items {
             let r = Rect::from_xywh(x + 4.0, iy, MENU_W - 8.0, MENU_ITEM_H).unwrap();
             if self.hovered(&r) {
                 c.fill_rrect(r.x(), r.y(), r.width(), r.height(), 7.0, t.hover);
             }
-            c.text(&item.label, x + 14.0, iy + 22.0, 13.0, Weight::Regular, t.text, Some(MENU_W - 28.0));
+            c.text(
+                &item.label,
+                x + 14.0,
+                iy + 22.0,
+                13.0,
+                Weight::Regular,
+                t.text,
+                Some(MENU_W - 28.0),
+            );
             self.regions.push((r, item.action));
             iy += MENU_ITEM_H;
         }
@@ -565,18 +902,48 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     /// A title, a wrapped explanation and maybe a button; returns where the
     /// space under the explanation starts
-    fn message(&mut self, c: &mut Canvas, t: &Theme, y: f32, title: &str, body: &str, button: Option<(&str, Action)>) -> f32 {
-        c.text(title, PAD, y + 34.0, 15.0, Weight::Semibold, t.text, Some(WIDTH - 2.0 * PAD));
-        let below = crate::dashboard::paragraph(c, body, PAD, y + 56.0, WIDTH - 2.0 * PAD, 12.5, t.dim) + 20.0;
+    fn message(
+        &mut self,
+        c: &mut Canvas,
+        t: &Theme,
+        y: f32,
+        title: &str,
+        body: &str,
+        button: Option<(&str, Action)>,
+    ) -> f32 {
+        c.text(
+            title,
+            PAD,
+            y + 34.0,
+            15.0,
+            Weight::Semibold,
+            t.text,
+            Some(WIDTH - 2.0 * PAD),
+        );
+        let below =
+            crate::dashboard::paragraph(c, body, PAD, y + 56.0, WIDTH - 2.0 * PAD, 12.5, t.dim)
+                + 20.0;
         if let Some((label, action)) = button {
             let y = below - 76.0;
             let bw = (c.measure(label, 13.0, Weight::Semibold) + 32.0).max(112.0);
             let bh = 34.0;
             let r = Rect::from_xywh(PAD, y + 76.0, bw, bh).unwrap();
-            let bg = if self.hovered(&r) { shade(t.accent, 1.1) } else { t.accent };
+            let bg = if self.hovered(&r) {
+                shade(t.accent, 1.1)
+            } else {
+                t.accent
+            };
             c.fill_rrect(PAD, y + 76.0, bw, bh, 8.0, bg);
             let lw = c.measure(label, 13.0, Weight::Semibold);
-            c.text(label, PAD + (bw - lw) / 2.0, y + 76.0 + bh / 2.0 + 4.5, 13.0, Weight::Semibold, Color::WHITE, None);
+            c.text(
+                label,
+                PAD + (bw - lw) / 2.0,
+                y + 76.0 + bh / 2.0 + 4.5,
+                13.0,
+                Weight::Semibold,
+                Color::WHITE,
+                None,
+            );
             self.regions.push((r, action));
         }
         below
@@ -590,14 +957,38 @@ impl Ui {
             (None, Some(server)) => server.split("://").nth(1).unwrap_or(server).to_string(),
             (None, None) => String::new(),
         };
-        let color = if self.toast.is_some() { t.accent } else { t.dim };
-        c.text(&left, PAD, y + 29.0, 12.0, Weight::Regular, color, Some(WIDTH - 2.0 * PAD - 48.0));
+        let color = if self.toast.is_some() {
+            t.accent
+        } else {
+            t.dim
+        };
+        c.text(
+            &left,
+            PAD,
+            y + 29.0,
+            12.0,
+            Weight::Regular,
+            color,
+            Some(WIDTH - 2.0 * PAD - 48.0),
+        );
 
         let b = Rect::from_xywh(WIDTH - PAD - 30.0, y + 9.0, 30.0, 30.0).unwrap();
         if self.gear || self.hovered(&b) {
-            c.fill_rrect(b.x(), b.y(), b.width(), b.height(), 8.0, if self.dark { t.border } else { t.surface });
+            c.fill_rrect(
+                b.x(),
+                b.y(),
+                b.width(),
+                b.height(),
+                8.0,
+                if self.dark { t.border } else { t.surface },
+            );
         }
-        c.gear(b.x() + 15.0, b.y() + 15.0, 8.5, if self.gear { t.text } else { t.dim });
+        c.gear(
+            b.x() + 15.0,
+            b.y() + 15.0,
+            8.5,
+            if self.gear { t.text } else { t.dim },
+        );
         self.regions.push((b, Action::Gear));
         if self.gear {
             self.gear_menu(c, t, y);
@@ -606,22 +997,46 @@ impl Ui {
 
     /// Opens upwards from the gear
     fn gear_menu(&mut self, c: &mut Canvas, t: &Theme, footer_y: f32) {
-        let items = [(tr("Manage server"), Action::OpenServer), (tr("Settings"), Action::OpenSettings), (tr("Quit"), Action::Quit)];
+        let items = [
+            (tr("Manage server"), Action::OpenServer),
+            (tr("Settings"), Action::OpenSettings),
+            (tr("Quit"), Action::Quit),
+        ];
         let h = items.len() as f32 * MENU_ITEM_H + 8.0;
         let x = WIDTH - PAD - MENU_W;
         let y = footer_y - h + 4.0;
-        c.fill_rrect(x, y + 2.0, MENU_W, h, 10.0, with_alpha(Color::BLACK, if self.dark { 0.4 } else { 0.12 }));
+        c.fill_rrect(
+            x,
+            y + 2.0,
+            MENU_W,
+            h,
+            10.0,
+            with_alpha(Color::BLACK, if self.dark { 0.4 } else { 0.12 }),
+        );
         c.fill_rrect(x, y, MENU_W, h, 10.0, t.bg);
         c.stroke_rrect(x + 0.5, y + 0.5, MENU_W - 1.0, h - 1.0, 10.0, t.border);
-        self.regions.push((Rect::from_xywh(x, y, MENU_W, h).unwrap(), Action::Gear));
+        self.regions
+            .push((Rect::from_xywh(x, y, MENU_W, h).unwrap(), Action::Gear));
         let mut iy = y + 4.0;
         for (label, action) in items {
             let r = Rect::from_xywh(x + 4.0, iy, MENU_W - 8.0, MENU_ITEM_H).unwrap();
             if self.hovered(&r) {
                 c.fill_rrect(r.x(), r.y(), r.width(), r.height(), 7.0, t.hover);
             }
-            let color = if matches!(action, Action::Quit) { t.red } else { t.text };
-            c.text(label, x + 14.0, iy + 22.0, 13.0, Weight::Regular, color, Some(MENU_W - 28.0));
+            let color = if matches!(action, Action::Quit) {
+                t.red
+            } else {
+                t.text
+            };
+            c.text(
+                label,
+                x + 14.0,
+                iy + 22.0,
+                13.0,
+                Weight::Regular,
+                color,
+                Some(MENU_W - 28.0),
+            );
             self.regions.push((r, action));
             iy += MENU_ITEM_H;
         }
@@ -632,12 +1047,22 @@ impl Ui {
 /// What goes in the red box under the devices: a line, and maybe a hint
 fn error_text(s: &StatusResponse) -> Option<(String, Option<String>)> {
     if s.key_expired {
-        return Some((tr("Key expired · ask the admin to renew it").to_string(), None));
+        return Some((
+            tr("Key expired · ask the admin to renew it").to_string(),
+            None,
+        ));
     }
-    if let Some(p) = s.problem.as_ref().filter(|_| s.state == BackendState::Running && !s.control_connected) {
+    if let Some(p) = s
+        .problem
+        .as_ref()
+        .filter(|_| s.state == BackendState::Running && !s.control_connected)
+    {
         return Some(match reason_text(p.reason) {
             Some((what, hint)) => (what.to_string(), Some(hint.to_string())),
-            None => (tr("Can't reach the server").to_string(), Some(p.detail.clone())),
+            None => (
+                tr("Can't reach the server").to_string(),
+                Some(p.detail.clone()),
+            ),
         });
     }
     s.last_error.clone().map(|e| (e, None))
@@ -646,15 +1071,39 @@ fn error_text(s: &StatusResponse) -> Option<(String, Option<String>)> {
 /// Why the server cannot be reached, and what to do: a line each
 pub fn reason_text(r: FailReason) -> Option<(&'static str, &'static str)> {
     let (what, hint) = match r {
-        FailReason::Timeout => ("No answer from the server", "The network may block it, or the server is off"),
-        FailReason::Refused => ("The server refused the connection", "Is retail running on the server's computer?"),
-        FailReason::Reset => ("The connection was cut on the way", "This network may be blocking VPN connections"),
-        FailReason::Dns => ("Could not look up the server's name", "Check this device's internet connection"),
+        FailReason::Timeout => (
+            "No answer from the server",
+            "The network may block it, or the server is off",
+        ),
+        FailReason::Refused => (
+            "The server refused the connection",
+            "Is retail running on the server's computer?",
+        ),
+        FailReason::Reset => (
+            "The connection was cut on the way",
+            "This network may be blocking VPN connections",
+        ),
+        FailReason::Dns => (
+            "Could not look up the server's name",
+            "Check this device's internet connection",
+        ),
         FailReason::Unreachable => ("No route to the server", "Check that this device is online"),
-        FailReason::Intercepted => ("Something answered in the server's place", "A filtering proxy or a Wi-Fi sign-in page"),
-        FailReason::Rejected => ("The server turned this device away", "Ask the administrator for a new invite"),
-        FailReason::ProxyAuth => ("The network's proxy wants a sign-in", "Set one with retail set --proxy"),
-        FailReason::ServerError => ("The server answered with an error", "It may be starting up; retail keeps trying"),
+        FailReason::Intercepted => (
+            "Something answered in the server's place",
+            "A filtering proxy or a Wi-Fi sign-in page",
+        ),
+        FailReason::Rejected => (
+            "The server turned this device away",
+            "Ask the administrator for a new invite",
+        ),
+        FailReason::ProxyAuth => (
+            "The network's proxy wants a sign-in",
+            "Set one with retail set --proxy",
+        ),
+        FailReason::ServerError => (
+            "The server answered with an error",
+            "It may be starting up; retail keeps trying",
+        ),
         FailReason::Other => return None,
     };
     Some((tr(what), tr(hint)))
@@ -673,8 +1122,14 @@ pub fn duration(secs: u64) -> String {
     match secs {
         0..=59 => trf("{n} s", &[("n", &secs)]),
         60..=3599 => trf("{n} min", &[("n", &(secs / 60))]),
-        3600..=86_399 => trf("{h} h {m} min", &[("h", &(secs / 3600)), ("m", &(secs % 3600 / 60))]),
-        _ => trf("{d} d {h} h", &[("d", &(secs / 86_400)), ("h", &(secs % 86_400 / 3600))]),
+        3600..=86_399 => trf(
+            "{h} h {m} min",
+            &[("h", &(secs / 3600)), ("m", &(secs % 3600 / 60))],
+        ),
+        _ => trf(
+            "{d} d {h} h",
+            &[("d", &(secs / 86_400)), ("h", &(secs % 86_400 / 3600))],
+        ),
     }
 }
 
@@ -685,4 +1140,3 @@ fn ago(secs: u64) -> String {
         _ => trf("{n} h ago", &[("n", &(secs / 3600))]),
     }
 }
-

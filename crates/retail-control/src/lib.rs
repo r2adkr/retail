@@ -5,13 +5,13 @@
 
 pub mod acl;
 mod db;
+pub mod helper;
 mod net;
 pub mod reality;
 mod server;
 mod stun;
 mod tls;
 mod tunnel;
-pub mod helper;
 
 pub use tls::{BoxIo, Injector, Prefixed};
 
@@ -123,7 +123,8 @@ impl Server {
         };
 
         let state = server::AppState::new(db, cfg.stun_advertise);
-        let app = server::router(state.clone()).into_make_service_with_connect_info::<tls::PeerAddr>();
+        let app =
+            server::router(state.clone()).into_make_service_with_connect_info::<tls::PeerAddr>();
         let tcp = tokio::net::TcpListener::from_std(
             net::bind_tcp(cfg.listen).with_context(|| format!("binding tcp/{}", cfg.listen))?,
         )?;
@@ -135,8 +136,13 @@ impl Server {
                 Err(e) => tracing::info!("server: not listening on tcp/{addr}: {e}"),
             }
         }
-        let extra_ports = extra.iter().filter_map(|l| l.local_addr().ok()).map(|a| a.port()).collect();
-        let stun_sock = net::bind_udp(cfg.stun_listen).with_context(|| format!("binding udp/{}", cfg.stun_listen))?;
+        let extra_ports = extra
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
+            .map(|a| a.port())
+            .collect();
+        let stun_sock = net::bind_udp(cfg.stun_listen)
+            .with_context(|| format!("binding udp/{}", cfg.stun_listen))?;
         let stun_port = stun_sock.local_addr()?.port();
 
         let (shutdown, stopped) = oneshot::channel::<()>();
@@ -149,11 +155,15 @@ impl Server {
             Some(config) => {
                 tracing::info!("server: HTTPS on tcp/{}", cfg.listen);
                 let listeners = std::iter::once(tcp).chain(extra).collect();
-                let listener = tls::TlsListener::new(listeners, config, cfg.reality.map(std::sync::Arc::new))?;
+                let listener =
+                    tls::TlsListener::new(listeners, config, cfg.reality.map(std::sync::Arc::new))?;
                 let _ = state.inject.set(listener.injector());
                 injector = Some(listener.injector());
                 tokio::spawn(async move {
-                    if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(graceful).await {
+                    if let Err(e) = axum::serve(listener, app)
+                        .with_graceful_shutdown(graceful)
+                        .await
+                    {
                         tracing::error!("server stopped: {e}");
                     }
                 })
@@ -173,7 +183,16 @@ impl Server {
                 tracing::error!("STUN stopped: {e:#}");
             }
         }));
-        Ok(Server { state, pin, port, stun_port, extra_ports, injector, shutdown: Some(shutdown), tasks })
+        Ok(Server {
+            state,
+            pin,
+            port,
+            stun_port,
+            extra_ports,
+            injector,
+            shutdown: Some(shutdown),
+            tasks,
+        })
     }
 
     /// Ports from [`Config::extra_listen`] that could be bound
@@ -280,7 +299,11 @@ impl Server {
         self.state.db.expiry_settings()
     }
 
-    pub fn set_expiry_settings(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {
+    pub fn set_expiry_settings(
+        &self,
+        key_days: Option<u32>,
+        inactive_days: Option<u32>,
+    ) -> Result<()> {
         self.state.db.set_expiry_settings(key_days, inactive_days)?;
         self.state.notify();
         Ok(())

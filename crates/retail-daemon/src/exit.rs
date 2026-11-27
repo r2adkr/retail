@@ -72,12 +72,24 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         .with_context(|| format!("running {program} (is it installed?)"))?;
     if !out.status.success() {
         // netsh says why on stdout
-        let said = if out.stderr.iter().all(u8::is_ascii_whitespace) { &out.stdout } else { &out.stderr };
+        let said = if out.stderr.iter().all(u8::is_ascii_whitespace) {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
         // The first line says what failed; PowerShell adds where in the script
         let text = decode(said);
-        let why = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        let why = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("");
         // Not a script's text
-        let what = if program == "powershell" { program.to_string() } else { format!("{program} {}", args.join(" ")) };
+        let what = if program == "powershell" {
+            program.to_string()
+        } else {
+            format!("{program} {}", args.join(" "))
+        };
         bail!("{what}: {why}");
     }
     Ok(())
@@ -134,7 +146,10 @@ pub struct ClientRoutes {
 
 impl ClientRoutes {
     pub fn activate(tun: &str, tun_index: u32) -> Result<Self> {
-        let routes = ClientRoutes { tun: tun.to_string(), tun_index };
+        let routes = ClientRoutes {
+            tun: tun.to_string(),
+            tun_index,
+        };
         routes.cleanup();
         if let Err(e) = routes.install() {
             routes.cleanup();
@@ -147,13 +162,87 @@ impl ClientRoutes {
     #[cfg(target_os = "linux")]
     fn install(&self) -> Result<()> {
         let mark = format!("{BYPASS_MARK:#x}");
-        run("ip", &["-4", "route", "replace", "default", "dev", &self.tun, "table", TABLE])?;
-        run("ip", &["-4", "rule", "add", "table", "main", "suppress_prefixlength", "0", "priority", PRIO_MAIN])?;
-        run("ip", &["-4", "rule", "add", "not", "fwmark", &mark, "table", TABLE, "priority", PRIO_TUNNEL])?;
+        run(
+            "ip",
+            &[
+                "-4", "route", "replace", "default", "dev", &self.tun, "table", TABLE,
+            ],
+        )?;
+        run(
+            "ip",
+            &[
+                "-4",
+                "rule",
+                "add",
+                "table",
+                "main",
+                "suppress_prefixlength",
+                "0",
+                "priority",
+                PRIO_MAIN,
+            ],
+        )?;
+        run(
+            "ip",
+            &[
+                "-4",
+                "rule",
+                "add",
+                "not",
+                "fwmark",
+                &mark,
+                "table",
+                TABLE,
+                "priority",
+                PRIO_TUNNEL,
+            ],
+        )?;
         // IPv6 cannot go through the IPv4-only tunnel, so block it rather than leak
-        let v6 = run("ip", &["-6", "route", "replace", "unreachable", "default", "table", TABLE])
-            .and_then(|()| run("ip", &["-6", "rule", "add", "table", "main", "suppress_prefixlength", "0", "priority", PRIO_MAIN]))
-            .and_then(|()| run("ip", &["-6", "rule", "add", "not", "fwmark", &mark, "table", TABLE, "priority", PRIO_TUNNEL]));
+        let v6 = run(
+            "ip",
+            &[
+                "-6",
+                "route",
+                "replace",
+                "unreachable",
+                "default",
+                "table",
+                TABLE,
+            ],
+        )
+        .and_then(|()| {
+            run(
+                "ip",
+                &[
+                    "-6",
+                    "rule",
+                    "add",
+                    "table",
+                    "main",
+                    "suppress_prefixlength",
+                    "0",
+                    "priority",
+                    PRIO_MAIN,
+                ],
+            )
+        })
+        .and_then(|()| {
+            run(
+                "ip",
+                &[
+                    "-6",
+                    "rule",
+                    "add",
+                    "not",
+                    "fwmark",
+                    &mark,
+                    "table",
+                    TABLE,
+                    "priority",
+                    PRIO_TUNNEL,
+                ],
+            )
+        });
         if let Err(e) = v6 {
             tracing::debug!("IPv6 exit rules not installed (no IPv6?): {e:#}");
         }
@@ -163,11 +252,43 @@ impl ClientRoutes {
         let connmark = run_quiet("iptables", &["-t", "mangle", "-N", "RETAIL-MARK"])
             | run_quiet("iptables", &["-t", "mangle", "-F", "RETAIL-MARK"]);
         let ok = connmark
-            && run_quiet("iptables", &["-t", "mangle", "-A", "RETAIL-MARK", "-m", "mark", "--mark", &mark, "-j", "CONNMARK", "--save-mark"])
-            && run_quiet("iptables", &["-t", "mangle", "-I", "OUTPUT", "1", "-j", "RETAIL-MARK"])
-            && run_quiet("iptables", &["-t", "mangle", "-I", "PREROUTING", "1", "-j", "CONNMARK", "--restore-mark"]);
+            && run_quiet(
+                "iptables",
+                &[
+                    "-t",
+                    "mangle",
+                    "-A",
+                    "RETAIL-MARK",
+                    "-m",
+                    "mark",
+                    "--mark",
+                    &mark,
+                    "-j",
+                    "CONNMARK",
+                    "--save-mark",
+                ],
+            )
+            && run_quiet(
+                "iptables",
+                &["-t", "mangle", "-I", "OUTPUT", "1", "-j", "RETAIL-MARK"],
+            )
+            && run_quiet(
+                "iptables",
+                &[
+                    "-t",
+                    "mangle",
+                    "-I",
+                    "PREROUTING",
+                    "1",
+                    "-j",
+                    "CONNMARK",
+                    "--restore-mark",
+                ],
+            );
         if !ok {
-            tracing::warn!("iptables unavailable: with strict rp_filter, replies to the daemon may be dropped while an exit node is in use");
+            tracing::warn!(
+                "iptables unavailable: with strict rp_filter, replies to the daemon may be dropped while an exit node is in use"
+            );
         }
         Ok(())
     }
@@ -180,18 +301,34 @@ impl ClientRoutes {
             }
             run_quiet("ip", &[fam, "route", "flush", "table", TABLE]);
         }
-        while run_quiet("iptables", &["-t", "mangle", "-D", "OUTPUT", "-j", "RETAIL-MARK"]) {}
-        while run_quiet("iptables", &["-t", "mangle", "-D", "PREROUTING", "-j", "CONNMARK", "--restore-mark"]) {}
+        while run_quiet(
+            "iptables",
+            &["-t", "mangle", "-D", "OUTPUT", "-j", "RETAIL-MARK"],
+        ) {}
+        while run_quiet(
+            "iptables",
+            &[
+                "-t",
+                "mangle",
+                "-D",
+                "PREROUTING",
+                "-j",
+                "CONNMARK",
+                "--restore-mark",
+            ],
+        ) {}
         run_quiet("iptables", &["-t", "mangle", "-F", "RETAIL-MARK"]);
         run_quiet("iptables", &["-t", "mangle", "-X", "RETAIL-MARK"]);
     }
 
     #[cfg(target_os = "windows")]
     fn install(&self) -> Result<()> {
-        let physical = windows::default_interface().context("finding the default network interface")?;
+        let physical =
+            windows::default_interface().context("finding the default network interface")?;
         BYPASS_IFINDEX.store(physical, Ordering::Relaxed);
         for (addr, len) in windows::HALVES_V4 {
-            windows::route(true, addr, len, self.tun_index).with_context(|| format!("adding the route to {addr}/{len}"))?;
+            windows::route(true, addr, len, self.tun_index)
+                .with_context(|| format!("adding the route to {addr}/{len}"))?;
         }
         // The TUN device drops IPv6, so routing it there blocks it
         for (addr, len) in windows::HALVES_V6 {
@@ -210,13 +347,20 @@ impl ClientRoutes {
 
     #[cfg(target_os = "macos")]
     fn install(&self) -> Result<()> {
-        let physical = macos::default_interface().context("finding the default network interface")?;
+        let physical =
+            macos::default_interface().context("finding the default network interface")?;
         BYPASS_IFINDEX.store(physical, Ordering::Relaxed);
         for prefix in ["0.0.0.0/1", "128.0.0.0/1"] {
-            run("route", &["-q", "-n", "add", "-inet", prefix, "-interface", &self.tun])?;
+            run(
+                "route",
+                &["-q", "-n", "add", "-inet", prefix, "-interface", &self.tun],
+            )?;
         }
         for prefix in ["::/1", "8000::/1"] {
-            let _ = run("route", &["-q", "-n", "add", "-inet6", prefix, "-interface", &self.tun]);
+            let _ = run(
+                "route",
+                &["-q", "-n", "add", "-inet6", prefix, "-interface", &self.tun],
+            );
         }
         Ok(())
     }
@@ -224,10 +368,32 @@ impl ClientRoutes {
     #[cfg(target_os = "macos")]
     fn cleanup(&self) {
         for prefix in ["0.0.0.0/1", "128.0.0.0/1"] {
-            run_quiet("route", &["-q", "-n", "delete", "-inet", prefix, "-interface", &self.tun]);
+            run_quiet(
+                "route",
+                &[
+                    "-q",
+                    "-n",
+                    "delete",
+                    "-inet",
+                    prefix,
+                    "-interface",
+                    &self.tun,
+                ],
+            );
         }
         for prefix in ["::/1", "8000::/1"] {
-            run_quiet("route", &["-q", "-n", "delete", "-inet6", prefix, "-interface", &self.tun]);
+            run_quiet(
+                "route",
+                &[
+                    "-q",
+                    "-n",
+                    "delete",
+                    "-inet6",
+                    prefix,
+                    "-interface",
+                    &self.tun,
+                ],
+            );
         }
         BYPASS_IFINDEX.store(0, Ordering::Relaxed);
     }
@@ -258,12 +424,20 @@ impl Drop for ClientRoutes {
 fn macos_pf_rules(tun: &str, routes: &[(Ipv4Net, String)]) -> String {
     let mut rules = String::new();
     for (r, iface) in routes {
-        rules.push_str(&format!("nat on {iface} inet from 100.64.0.0/10 to {r} -> ({iface})\n"));
+        rules.push_str(&format!(
+            "nat on {iface} inet from 100.64.0.0/10 to {r} -> ({iface})\n"
+        ));
     }
-    rules.push_str(&format!("block drop in quick on ! {tun} inet from 100.64.0.0/10 to any\n"));
-    rules.push_str(&format!("pass in quick on {tun} inet from 100.64.0.0/10 to any keep state\n"));
+    rules.push_str(&format!(
+        "block drop in quick on ! {tun} inet from 100.64.0.0/10 to any\n"
+    ));
+    rules.push_str(&format!(
+        "pass in quick on {tun} inet from 100.64.0.0/10 to any keep state\n"
+    ));
     // Replies to the flows above match their state and never reach this
-    rules.push_str(&format!("block drop out quick on {tun} inet from ! 100.64.0.0/10 to any\n"));
+    rules.push_str(&format!(
+        "block drop out quick on {tun} inet from ! 100.64.0.0/10 to any\n"
+    ));
     rules
 }
 
@@ -284,11 +458,26 @@ pub struct Gateway {
 
 /// The exit's own private networks stay unreachable unless it routes them
 #[cfg(target_os = "linux")]
-const PRIVATE: [&str; 6] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8"];
+const PRIVATE: [&str; 6] = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+];
 
 impl Gateway {
     pub fn new(tun: &str, tun_index: u32, userspace: Userspace) -> Self {
-        Gateway { tun: tun.to_string(), tun_index, restore_forwarding: false, exit: false, routes: Vec::new(), pf_token: None, userspace }
+        Gateway {
+            tun: tun.to_string(),
+            tun_index,
+            restore_forwarding: false,
+            exit: false,
+            routes: Vec::new(),
+            pf_token: None,
+            userspace,
+        }
     }
 
     pub fn exit(&self) -> bool {
@@ -334,7 +523,8 @@ impl Gateway {
 
     #[cfg(target_os = "linux")]
     fn install(&mut self) -> Result<()> {
-        let forwarding = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").unwrap_or_default();
+        let forwarding =
+            std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").unwrap_or_default();
         if forwarding.trim() != "1" {
             run("sysctl", &["-qw", "net.ipv4.ip_forward=1"])?;
             self.restore_forwarding = true;
@@ -358,23 +548,75 @@ impl Gateway {
         } else {
             ipt(&["-A", "RETAIL-FWD", "-i", tun, "-j", "DROP"])?;
         }
-        ipt(&["-A", "RETAIL-FWD", "-o", tun, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])?;
+        ipt(&[
+            "-A",
+            "RETAIL-FWD",
+            "-o",
+            tun,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "RELATED,ESTABLISHED",
+            "-j",
+            "ACCEPT",
+        ])?;
         // Into the mesh only replies: hosts on this device's networks start nothing there
         ipt(&["-A", "RETAIL-FWD", "-o", tun, "-j", "DROP"])?;
         ipt(&["-I", "FORWARD", "1", "-j", "RETAIL-FWD"])?;
         // Hosts on routed networks need no route back to the mesh
         ipt(&["-t", "nat", "-N", "RETAIL-NAT"])?;
         if self.exit {
-            ipt(&["-t", "nat", "-A", "RETAIL-NAT", "-s", "100.64.0.0/10", "!", "-o", tun, "-j", "MASQUERADE"])?;
+            ipt(&[
+                "-t",
+                "nat",
+                "-A",
+                "RETAIL-NAT",
+                "-s",
+                "100.64.0.0/10",
+                "!",
+                "-o",
+                tun,
+                "-j",
+                "MASQUERADE",
+            ])?;
         } else {
             for net in &routes {
-                ipt(&["-t", "nat", "-A", "RETAIL-NAT", "-s", "100.64.0.0/10", "-d", net, "!", "-o", tun, "-j", "MASQUERADE"])?;
+                ipt(&[
+                    "-t",
+                    "nat",
+                    "-A",
+                    "RETAIL-NAT",
+                    "-s",
+                    "100.64.0.0/10",
+                    "-d",
+                    net,
+                    "!",
+                    "-o",
+                    tun,
+                    "-j",
+                    "MASQUERADE",
+                ])?;
             }
         }
         ipt(&["-t", "nat", "-I", "POSTROUTING", "1", "-j", "RETAIL-NAT"])?;
         ipt(&["-t", "mangle", "-N", "RETAIL-MSS"])?;
         for dir in ["-i", "-o"] {
-            ipt(&["-t", "mangle", "-A", "RETAIL-MSS", dir, tun, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"])?;
+            ipt(&[
+                "-t",
+                "mangle",
+                "-A",
+                "RETAIL-MSS",
+                dir,
+                tun,
+                "-p",
+                "tcp",
+                "--tcp-flags",
+                "SYN,RST",
+                "SYN",
+                "-j",
+                "TCPMSS",
+                "--clamp-mss-to-pmtu",
+            ])?;
         }
         ipt(&["-t", "mangle", "-I", "FORWARD", "1", "-j", "RETAIL-MSS"])?;
         Ok(())
@@ -410,7 +652,10 @@ impl Gateway {
              New-NetNat -Name retail-exit -InternalIPInterfaceAddressPrefix 100.64.0.0/10 | Out-Null",
             idx = self.tun_index
         );
-        run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])
+        run(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+        )
     }
 
     #[cfg(target_os = "windows")]
@@ -420,7 +665,10 @@ impl Gateway {
              Set-NetIPInterface -InterfaceIndex {idx} -Forwarding Disabled -ErrorAction SilentlyContinue",
             idx = self.tun_index
         );
-        run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]);
+        run_quiet(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+        );
     }
 
     /// IP forwarding, and pf NAT in an anchor the system's pf.conf already
@@ -428,22 +676,38 @@ impl Gateway {
     /// that reaches it
     #[cfg(target_os = "macos")]
     fn install(&mut self) -> Result<()> {
-        let forwarding = Command::new("sysctl").args(["-n", "net.inet.ip.forwarding"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let forwarding = Command::new("sysctl")
+            .args(["-n", "net.inet.ip.forwarding"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
         if forwarding != "1" {
             run("sysctl", &["-w", "net.inet.ip.forwarding=1"])?;
             self.restore_forwarding = true;
         }
         let mut out = Vec::new();
         for r in &self.routes {
-            let iface = macos_route_interface(r.addr()).with_context(|| format!("finding the interface that reaches {r}"))?;
+            let iface = macos_route_interface(r.addr())
+                .with_context(|| format!("finding the interface that reaches {r}"))?;
             out.push((*r, iface));
         }
-        run_with_input("pfctl", &["-a", PF_ANCHOR, "-f", "-"], &macos_pf_rules(&self.tun, &out))?;
+        run_with_input(
+            "pfctl",
+            &["-a", PF_ANCHOR, "-f", "-"],
+            &macos_pf_rules(&self.tun, &out),
+        )?;
         // Enabling pf takes a reference, released at cleanup, so pf stays as
         // it was for everything else
-        let out = Command::new("pfctl").arg("-E").output().context("running pfctl")?;
-        let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-        self.pf_token = text.lines().find_map(|l| l.trim().strip_prefix("Token : ")).map(|t| t.trim().to_string());
+        let out = Command::new("pfctl")
+            .arg("-E")
+            .output()
+            .context("running pfctl")?;
+        let text = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        self.pf_token = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Token : "))
+            .map(|t| t.trim().to_string());
         Ok(())
     }
 
@@ -474,9 +738,16 @@ const PF_ANCHOR: &str = "com.apple/retail";
 /// The interface macOS sends `ip` out of
 #[cfg(target_os = "macos")]
 fn macos_route_interface(ip: std::net::Ipv4Addr) -> Option<String> {
-    let out = Command::new("route").args(["-n", "get", &ip.to_string()]).output().ok()?;
+    let out = Command::new("route")
+        .args(["-n", "get", &ip.to_string()])
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let name = text.lines().find_map(|l| l.trim().strip_prefix("interface:"))?.trim().to_string();
+    let name = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("interface:"))?
+        .trim()
+        .to_string();
     (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric())).then_some(name)
 }
 
@@ -490,10 +761,18 @@ fn run_with_input(program: &str, args: &[&str], input: &str) -> Result<()> {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("running {program}"))?;
-    child.stdin.take().context("no stdin")?.write_all(input.as_bytes())?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(input.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
-        bail!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "{program} {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -518,19 +797,33 @@ pub struct SubnetRoutes {
 
 impl SubnetRoutes {
     pub fn new(tun: &str, tun_index: u32) -> Self {
-        SubnetRoutes { tun: tun.to_string(), tun_index, installed: Vec::new() }
+        SubnetRoutes {
+            tun: tun.to_string(),
+            tun_index,
+            installed: Vec::new(),
+        }
     }
 
     /// Adds and removes routes to match `wanted`. A route that fails is
     /// reported and left out.
     pub fn set(&mut self, wanted: &[Ipv4Net]) -> Result<()> {
-        let gone: Vec<Ipv4Net> = self.installed.iter().filter(|r| !wanted.contains(r)).copied().collect();
+        let gone: Vec<Ipv4Net> = self
+            .installed
+            .iter()
+            .filter(|r| !wanted.contains(r))
+            .copied()
+            .collect();
         for r in gone {
             self.remove(r);
             self.installed.retain(|x| *x != r);
         }
         let mut result = Ok(());
-        for r in wanted.iter().filter(|r| !self.installed.contains(r)).copied().collect::<Vec<_>>() {
+        for r in wanted
+            .iter()
+            .filter(|r| !self.installed.contains(r))
+            .copied()
+            .collect::<Vec<_>>()
+        {
             match self.add(r) {
                 Ok(()) => {
                     tracing::info!(route = %r, "routing into the mesh");
@@ -547,17 +840,28 @@ impl SubnetRoutes {
 
     #[cfg(target_os = "linux")]
     fn add(&self, r: Ipv4Net) -> Result<()> {
-        run("ip", &["-4", "route", "replace", &r.to_string(), "dev", &self.tun])
+        run(
+            "ip",
+            &["-4", "route", "replace", &r.to_string(), "dev", &self.tun],
+        )
     }
 
     #[cfg(target_os = "linux")]
     fn remove(&self, r: Ipv4Net) {
-        run_quiet("ip", &["-4", "route", "del", &r.to_string(), "dev", &self.tun]);
+        run_quiet(
+            "ip",
+            &["-4", "route", "del", &r.to_string(), "dev", &self.tun],
+        );
     }
 
     #[cfg(target_os = "windows")]
     fn add(&self, r: Ipv4Net) -> Result<()> {
-        Ok(windows::route(true, r.addr().into(), r.prefix_len(), self.tun_index)?)
+        Ok(windows::route(
+            true,
+            r.addr().into(),
+            r.prefix_len(),
+            self.tun_index,
+        )?)
     }
 
     #[cfg(target_os = "windows")]
@@ -567,12 +871,34 @@ impl SubnetRoutes {
 
     #[cfg(target_os = "macos")]
     fn add(&self, r: Ipv4Net) -> Result<()> {
-        run("route", &["-q", "-n", "add", "-inet", &r.to_string(), "-interface", &self.tun])
+        run(
+            "route",
+            &[
+                "-q",
+                "-n",
+                "add",
+                "-inet",
+                &r.to_string(),
+                "-interface",
+                &self.tun,
+            ],
+        )
     }
 
     #[cfg(target_os = "macos")]
     fn remove(&self, r: Ipv4Net) {
-        run_quiet("route", &["-q", "-n", "delete", "-inet", &r.to_string(), "-interface", &self.tun]);
+        run_quiet(
+            "route",
+            &[
+                "-q",
+                "-n",
+                "delete",
+                "-inet",
+                &r.to_string(),
+                "-interface",
+                &self.tun,
+            ],
+        );
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -599,24 +925,32 @@ mod windows {
 
     use windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterfaceEx;
     use windows_sys::Win32::Networking::WinSock::{
-        AF_INET, IN_ADDR, IN_ADDR_0, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SOCKADDR, SOCKADDR_IN,
-        SOCKET, setsockopt,
+        AF_INET, IN_ADDR, IN_ADDR_0, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF,
+        SOCKADDR, SOCKADDR_IN, SOCKET, setsockopt,
     };
 
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     /// The internet in two halves, more specific than any default route
-    pub const HALVES_V4: [(IpAddr, u8); 2] = [(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1), (IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1)];
-    pub const HALVES_V6: [(IpAddr, u8); 2] =
-        [(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 1), (IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1)];
+    pub const HALVES_V4: [(IpAddr, u8); 2] = [
+        (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1),
+        (IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1),
+    ];
+    pub const HALVES_V6: [(IpAddr, u8); 2] = [
+        (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 1),
+        (IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1),
+    ];
 
     /// An on-link route into the interface, in the active store only. Through
     /// IP Helper, not netsh: a process each costs about 0.2 s.
     pub fn route(add: bool, addr: IpAddr, len: u8, index: u32) -> io::Result<()> {
         use windows_sys::Win32::NetworkManagement::IpHelper::{
-            CreateIpForwardEntry2, DeleteIpForwardEntry2, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
+            CreateIpForwardEntry2, DeleteIpForwardEntry2, InitializeIpForwardEntry,
+            MIB_IPFORWARD_ROW2,
         };
-        use windows_sys::Win32::Networking::WinSock::{AF_INET6, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN6};
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET6, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN6,
+        };
         const ERROR_NOT_FOUND: u32 = 1168;
         const ERROR_OBJECT_ALREADY_EXISTS: u32 = 5010;
         let mut row = MIB_IPFORWARD_ROW2::default();
@@ -630,7 +964,11 @@ mod windows {
                 row.DestinationPrefix.Prefix.Ipv4 = SOCKADDR_IN {
                     sin_family: AF_INET,
                     sin_port: 0,
-                    sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes(a.octets()) } },
+                    sin_addr: IN_ADDR {
+                        S_un: IN_ADDR_0 {
+                            S_addr: u32::from_ne_bytes(a.octets()),
+                        },
+                    },
                     sin_zero: [0; 8],
                 };
                 row.NextHop.si_family = AF_INET;
@@ -638,14 +976,22 @@ mod windows {
             IpAddr::V6(a) => {
                 row.DestinationPrefix.Prefix.Ipv6 = SOCKADDR_IN6 {
                     sin6_family: AF_INET6,
-                    sin6_addr: IN6_ADDR { u: IN6_ADDR_0 { Byte: a.octets() } },
+                    sin6_addr: IN6_ADDR {
+                        u: IN6_ADDR_0 { Byte: a.octets() },
+                    },
                     ..Default::default()
                 };
                 row.NextHop.si_family = AF_INET6;
             }
         }
         // SAFETY: a fully initialised row, read for the call's duration
-        let r = unsafe { if add { CreateIpForwardEntry2(&row) } else { DeleteIpForwardEntry2(&row) } };
+        let r = unsafe {
+            if add {
+                CreateIpForwardEntry2(&row)
+            } else {
+                DeleteIpForwardEntry2(&row)
+            }
+        };
         match r {
             0 => Ok(()),
             ERROR_OBJECT_ALREADY_EXISTS if add => Ok(()),
@@ -660,7 +1006,10 @@ mod windows {
     fn system_routes_add_and_remove() {
         let shown = || {
             let script = "@(Get-NetRoute -DestinationPrefix 192.0.2.128/25 -ErrorAction SilentlyContinue).Count";
-            let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).output().unwrap();
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output()
+                .unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let index = default_interface().unwrap();
@@ -677,12 +1026,18 @@ mod windows {
         let dst = SOCKADDR_IN {
             sin_family: AF_INET,
             sin_port: 0,
-            sin_addr: IN_ADDR { S_un: IN_ADDR_0 { S_addr: u32::from_ne_bytes([1, 1, 1, 1]) } },
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_addr: u32::from_ne_bytes([1, 1, 1, 1]),
+                },
+            },
             sin_zero: [0; 8],
         };
         let mut index = 0u32;
         // SAFETY: valid pointers to a SOCKADDR_IN and a u32 for the call's duration
-        let r = unsafe { GetBestInterfaceEx((&dst as *const SOCKADDR_IN).cast::<SOCKADDR>(), &mut index) };
+        let r = unsafe {
+            GetBestInterfaceEx((&dst as *const SOCKADDR_IN).cast::<SOCKADDR>(), &mut index)
+        };
         if r != 0 {
             return Err(io::Error::from_raw_os_error(r as i32));
         }
@@ -702,7 +1057,9 @@ mod windows {
 
     pub fn from_oem(bytes: &[u8]) -> String {
         use windows_sys::Win32::Globalization::{CP_OEMCP, MultiByteToWideChar};
-        let Ok(len) = i32::try_from(bytes.len()) else { return String::from_utf8_lossy(bytes).into_owned() };
+        let Ok(len) = i32::try_from(bytes.len()) else {
+            return String::from_utf8_lossy(bytes).into_owned();
+        };
         // SAFETY: the input slice and output buffer are valid for the lengths given
         unsafe {
             let n = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
@@ -723,8 +1080,20 @@ mod windows {
         // SAFETY: valid socket handle and option buffers of the stated size
         // Errors are ignored because only the option matching the socket's family applies
         unsafe {
-            setsockopt(raw, IPPROTO_IP, IP_UNICAST_IF, (&v4 as *const u32).cast(), 4);
-            setsockopt(raw, IPPROTO_IPV6, IPV6_UNICAST_IF, (&index as *const u32).cast(), 4);
+            setsockopt(
+                raw,
+                IPPROTO_IP,
+                IP_UNICAST_IF,
+                (&v4 as *const u32).cast(),
+                4,
+            );
+            setsockopt(
+                raw,
+                IPPROTO_IPV6,
+                IPV6_UNICAST_IF,
+                (&index as *const u32).cast(),
+                4,
+            );
         }
         Ok(())
     }
@@ -735,10 +1104,19 @@ mod tests {
     #[test]
     fn tool_errors_are_one_readable_line() {
         let script = "$ErrorActionPreference='Stop'; Get-Item C:\\retail-no-such-file";
-        let e = super::run("powershell", &["-NoProfile", "-NonInteractive", "-Command", script]).unwrap_err();
+        let e = super::run(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+        )
+        .unwrap_err();
         let msg = format!("{e:#}");
         // Neither the script, PowerShell's trace, nor a misread code page
-        assert!(!msg.contains('\n') && !msg.contains("$ErrorActionPreference") && !msg.contains('\u{FFFD}'), "{msg}");
+        assert!(
+            !msg.contains('\n')
+                && !msg.contains("$ErrorActionPreference")
+                && !msg.contains('\u{FFFD}'),
+            "{msg}"
+        );
     }
 }
 
@@ -747,7 +1125,9 @@ mod macos {
     use std::io;
 
     pub fn default_interface() -> io::Result<u32> {
-        let out = std::process::Command::new("route").args(["-n", "get", "default"]).output()?;
+        let out = std::process::Command::new("route")
+            .args(["-n", "get", "default"])
+            .output()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let name = text
             .lines()
@@ -757,7 +1137,11 @@ mod macos {
         let c = std::ffi::CString::new(name).map_err(io::Error::other)?;
         // SAFETY: valid NUL-terminated string
         let index = unsafe { libc::if_nametoindex(c.as_ptr()) };
-        if index == 0 { Err(io::Error::last_os_error()) } else { Ok(index) }
+        if index == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(index)
+        }
     }
 }
 
@@ -767,12 +1151,24 @@ mod pf_tests {
 
     #[test]
     fn macos_router_lets_only_mesh_flows_into_the_tunnel() {
-        let rules = macos_pf_rules("utun5", &[("192.168.1.0/24".parse().unwrap(), "en0".to_string())]);
+        let rules = macos_pf_rules(
+            "utun5",
+            &[("192.168.1.0/24".parse().unwrap(), "en0".to_string())],
+        );
         let lines: Vec<&str> = rules.lines().collect();
-        assert_eq!(lines[0], "nat on en0 inet from 100.64.0.0/10 to 192.168.1.0/24 -> (en0)", "translation comes first, as pf requires");
+        assert_eq!(
+            lines[0], "nat on en0 inet from 100.64.0.0/10 to 192.168.1.0/24 -> (en0)",
+            "translation comes first, as pf requires"
+        );
         assert!(lines.contains(&"block drop in quick on ! utun5 inet from 100.64.0.0/10 to any"));
         assert!(lines.contains(&"block drop out quick on utun5 inet from ! 100.64.0.0/10 to any"));
-        let pass = lines.iter().position(|l| l.starts_with("pass in quick on utun5")).unwrap();
-        assert!(pass < lines.len() - 1, "mesh flows keep state before the block that their replies skip");
+        let pass = lines
+            .iter()
+            .position(|l| l.starts_with("pass in quick on utun5"))
+            .unwrap();
+        assert!(
+            pass < lines.len() - 1,
+            "mesh flows keep state before the block that their replies skip"
+        );
     }
 }

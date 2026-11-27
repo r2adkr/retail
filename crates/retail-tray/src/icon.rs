@@ -28,12 +28,19 @@ fn draw(size: u32, connected: bool, template: bool) -> Pixmap {
     let mut pix = Pixmap::new(size, size).expect("non-zero icon size");
     let s = size as f32 / 32.0;
     let ts = Transform::from_scale(s, s);
-    let mut paint = Paint { anti_alias: true, ..Default::default() };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
 
     let glyph = if template {
         Color::from_rgba8(0, 0, 0, if connected { 255 } else { 110 })
     } else {
-        let tile = if connected { Color::from_rgba8(0x25, 0x63, 0xeb, 255) } else { Color::from_rgba8(0x8a, 0x8a, 0x94, 255) };
+        let tile = if connected {
+            Color::from_rgba8(0x25, 0x63, 0xeb, 255)
+        } else {
+            Color::from_rgba8(0x8a, 0x8a, 0x94, 255)
+        };
         paint.set_color(tile);
         if let Some(path) = rounded_square(2.0, 2.0, 28.0, 8.0) {
             pix.fill_path(&path, &paint, FillRule::Winding, ts, None);
@@ -49,7 +56,10 @@ fn draw(size: u32, connected: bool, template: bool) -> Pixmap {
     pb.line_to(nodes[2].0, nodes[2].1);
     pb.close();
     if let Some(path) = pb.finish() {
-        let stroke = Stroke { width: 2.2, ..Default::default() };
+        let stroke = Stroke {
+            width: 2.2,
+            ..Default::default()
+        };
         pix.stroke_path(&path, &paint, &stroke, ts, None);
     }
     for (x, y) in nodes {

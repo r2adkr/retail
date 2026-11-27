@@ -16,9 +16,13 @@ pub const NAMES: [&str; 3] = ["retaild", "retail", "retail-tray"];
 #[cfg(unix)]
 pub fn root_only(dir: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let Ok(dir) = dir.canonicalize() else { return false };
+    let Ok(dir) = dir.canonicalize() else {
+        return false;
+    };
     dir.ancestors().all(|d| {
-        std::fs::metadata(d).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o002 == 0 && (m.mode() & 0o020 == 0 || m.gid() == 0))
+        std::fs::metadata(d).is_ok_and(|m| {
+            m.uid() == 0 && m.mode() & 0o002 == 0 && (m.mode() & 0o020 == 0 || m.gid() == 0)
+        })
     })
 }
 
@@ -26,12 +30,18 @@ pub fn root_only(dir: &Path) -> bool {
 #[cfg(unix)]
 pub fn make_root_only(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o755).create(dir)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
     if root_only(dir) {
         Ok(())
     } else {
-        Err(std::io::Error::other(format!("{} can be changed by users other than root", dir.display())))
+        Err(std::io::Error::other(format!(
+            "{} can be changed by users other than root",
+            dir.display()
+        )))
     }
 }
 
@@ -60,7 +70,9 @@ pub fn unlink(dir: &Path, links: &Path) {
     for name in NAMES {
         let at = links.join(name);
         let ours = match std::fs::symlink_metadata(&at) {
-            Ok(m) if m.file_type().is_symlink() => std::fs::read_link(&at).is_ok_and(|t| t.starts_with(dir)),
+            Ok(m) if m.file_type().is_symlink() => {
+                std::fs::read_link(&at).is_ok_and(|t| t.starts_with(dir))
+            }
             // `retail` alone is a name another program could have
             Ok(m) => m.is_file() && name != "retail",
             Err(_) => false,
@@ -84,8 +96,16 @@ mod tests {
         std::fs::write(dir.join("retaild"), "new").unwrap();
         std::fs::write(links.join("retaild"), "old").unwrap();
         link(&dir, &links).unwrap();
-        assert_eq!(std::fs::read_to_string(links.join("retaild")).unwrap(), "new");
-        assert!(std::fs::symlink_metadata(links.join("retaild")).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(links.join("retaild")).unwrap(),
+            "new"
+        );
+        assert!(
+            std::fs::symlink_metadata(links.join("retaild"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         // No program, no link
         assert!(!links.join("retail-tray").exists());
         unlink(&dir, &links);

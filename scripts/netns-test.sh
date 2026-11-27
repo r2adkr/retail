@@ -780,6 +780,60 @@ invite_first_addr() {
 }
 
 # B's daemon restarts; the server goes away and comes back
+# A offers B files through the tunnel; B's tray would ask, here its API answers
+send_file() {  # ip_b name file -> B's answer
+    nsx hA python3 - "$@" <<'PY'
+import json, os, socket, sys
+ip, name, path = sys.argv[1:4]
+s = socket.create_connection((ip, 41618), timeout=10)
+s.sendall(json.dumps({"name": name, "size": os.path.getsize(path)}).encode() + b"\n")
+s.settimeout(30)
+answer = s.makefile().readline().strip()
+print(answer)
+if answer == "ok":
+    with open(path, "rb") as f:
+        s.sendall(f.read())
+    s.shutdown(socket.SHUT_WR)
+    s.recv(1)
+PY
+}
+
+files_checks() {  # ip_b
+    local ip_b=$1 ok=1 id offer p tok api=http://127.0.0.1:41112
+    tok=$(cat "$WORK/B.token")
+    head -c 3000000 /dev/urandom >"$WORK/sent.bin"
+    wait_offer() {
+        for _ in $(seq 50); do
+            offer=$(cli B status --json | jq -c '.file_offers[0] // empty')
+            [ -n "$offer" ] && return 0
+            sleep 0.1
+        done
+        return 1
+    }
+    send_file "$ip_b" "../../evil.bin" "$WORK/sent.bin" >"$WORK/answer1" &
+    p=$!
+    wait_offer || { echo "  no file offer reached B"; kill $p 2>/dev/null; return 1; }
+    [ "$(jq -r '.from + " " + .name' <<<"$offer")" = "a evil.bin" ] && echo "  B is asked about evil.bin from a" \
+        || { echo "  offer looks wrong: $offer"; ok=0; }
+    id=$(jq -r .id <<<"$offer")
+    nsx hB curl -s -m 5 -o /dev/null -X POST -H 'X-Retail-Local: 1' -H "X-Retail-Token: $tok" "$api/files/$id/decline"
+    wait $p
+    [ "$(cat "$WORK/answer1")" = no ] && echo "  declined: A hears no" || { echo "  declined, A heard '$(cat "$WORK/answer1")'"; ok=0; }
+    send_file "$ip_b" "photo.bin" "$WORK/sent.bin" >"$WORK/answer2" &
+    p=$!
+    wait_offer || { echo "  no second offer"; kill $p 2>/dev/null; return 1; }
+    id=$(jq -r .id <<<"$offer")
+    nsx hB curl -s -m 30 -o "$WORK/got.bin" -X POST -H 'X-Retail-Local: 1' -H "X-Retail-Token: $tok" "$api/files/$id/accept"
+    wait $p
+    if [ "$(cat "$WORK/answer2")" = ok ] && cmp -s "$WORK/sent.bin" "$WORK/got.bin"; then
+        echo "  accepted: B's tray gets the same 3 MB"
+    else
+        echo "  accepted, but answer '$(cat "$WORK/answer2")', $(stat -c %s "$WORK/got.bin" 2>/dev/null || echo 0) bytes"; ok=0
+    fi
+    [ "$(cli B status --json | jq '.file_offers | length')" = 0 ] || { echo "  offers left behind"; ok=0; }
+    [ $ok = 1 ]
+}
+
 lifecycle_checks() {  # ip_b
     local ip_b=$1 took
     kill -TERM "${pid[B]}"
@@ -1261,6 +1315,7 @@ run_scenario() {
             echo "  local API answered another user's change with HTTP $code"; ok=0
         fi
         ip netns exec hA env RETAIL_API_TOKEN_FILE=/nonexistent "$BIN/retail" status >/dev/null || { echo "  status needs no token"; ok=0; }
+        files_checks "$ip_b" || ok=0
         lifecycle_checks "$ip_b" || ok=0
     fi
     if [ "$sc" = magicdns ] && [ "$ok" = 1 ]; then

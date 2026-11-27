@@ -27,7 +27,10 @@ impl retail_web::Backend for Glue {
     }
     fn start(&self) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async {
-            let req = ServerStartRequest { join: true, ..Default::default() };
+            let req = ServerStartRequest {
+                join: true,
+                ..Default::default()
+            };
             self.backend.server_start(req).await.map_err(text)
         })
     }
@@ -41,11 +44,22 @@ impl retail_web::Backend for Glue {
         Box::pin(async move { self.backend.host.named_code(id).await.map_err(text) })
     }
     fn revoke(&self, id: i64) -> BoxFut<'_, Result<(), String>> {
-        Box::pin(async move { self.backend.host.revoke_invite(id).await.map(|_| ()).map_err(text) })
+        Box::pin(async move {
+            self.backend
+                .host
+                .revoke_invite(id)
+                .await
+                .map(|_| ())
+                .map_err(text)
+        })
     }
     fn delete_node(&self, id: i64, revoke_invite: bool) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move {
-            self.backend.host.delete_node(id, revoke_invite).await.map_err(text)?;
+            self.backend
+                .host
+                .delete_node(id, revoke_invite)
+                .await
+                .map_err(text)?;
             let _ = self.backend.host.set_web_admin(id, false);
             Ok(())
         })
@@ -63,7 +77,9 @@ impl retail_web::Backend for Glue {
         clients(&self.state_dir)
     }
     fn upload_dir(&self, variant: &str) -> Option<PathBuf> {
-        STANDARD.contains(&variant).then(|| retail_web::clients_dir(&self.state_dir).join(variant))
+        STANDARD
+            .contains(&variant)
+            .then(|| retail_web::clients_dir(&self.state_dir).join(variant))
     }
     fn set_acl(&self, acl: Option<retail_proto::acl::AclPolicy>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.set_acl(acl).await.map_err(text) })
@@ -77,20 +93,46 @@ impl retail_web::Backend for Glue {
     fn set_helper_device(&self, id: Option<i64>) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.set_helper_device(id).await.map_err(text) })
     }
-    fn set_routes(&self, id: i64, routes: Vec<retail_proto::route::Ipv4Net>) -> BoxFut<'_, Result<(), String>> {
-        Box::pin(async move { self.backend.host.set_routes(id, &routes).await.map_err(text) })
+    fn set_routes(
+        &self,
+        id: i64,
+        routes: Vec<retail_proto::route::Ipv4Net>,
+    ) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.backend
+                .host
+                .set_routes(id, &routes)
+                .await
+                .map_err(text)
+        })
     }
     fn renew(&self, id: i64, never: bool) -> BoxFut<'_, Result<(), String>> {
         Box::pin(async move { self.backend.host.renew(id, never).await.map_err(text) })
     }
-    fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> BoxFut<'_, Result<(), String>> {
-        Box::pin(async move { self.backend.host.set_expiry(key_days, inactive_days).await.map_err(text) })
+    fn set_expiry(
+        &self,
+        key_days: Option<u32>,
+        inactive_days: Option<u32>,
+    ) -> BoxFut<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.backend
+                .host
+                .set_expiry(key_days, inactive_days)
+                .await
+                .map_err(text)
+        })
     }
     fn backup(&self, passphrase: String) -> BoxFut<'_, Result<String, String>> {
         Box::pin(async move { self.backend.host.backup(&passphrase).await.map_err(text) })
     }
     fn restore(&self, backup: String, passphrase: String) -> BoxFut<'_, Result<(), String>> {
-        Box::pin(async move { self.backend.host.restore(&backup, &passphrase).await.map_err(text) })
+        Box::pin(async move {
+            self.backend
+                .host
+                .restore(&backup, &passphrase)
+                .await
+                .map_err(text)
+        })
     }
     fn fetch_client(&self, variant: &str) -> BoxFut<'_, Result<(), String>> {
         let variant = variant.to_string();
@@ -102,13 +144,19 @@ impl retail_web::Backend for Glue {
             // The whole set goes to the clients folder, which wins over this
             // device's own programs when those lack a file
             let dir = retail_web::clients_dir(&self.state_dir).join(&variant);
-            crate::releases::fetch(&variant, &wanted(os), &dir).await.map_err(text)
+            crate::releases::fetch(&variant, &wanted(os), &dir)
+                .await
+                .map_err(text)
         })
     }
 }
 
 fn exe(name: &str, os: &str) -> String {
-    if os == "windows" { format!("{name}.exe") } else { name.to_string() }
+    if os == "windows" {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
 }
 
 /// The client for one `<os>-<arch>` from the files in `dir`
@@ -141,12 +189,24 @@ fn source(id: &str, dir: &Path) -> Option<ClientSource> {
         }
     }
     let fetchable = STANDARD.contains(&id) && crate::releases::base().is_some();
-    Some(ClientSource { id: id.to_string(), label, os: os.to_string(), tray, files, missing, fetchable })
+    Some(ClientSource {
+        id: id.to_string(),
+        label,
+        os: os.to_string(),
+        tray,
+        files,
+        missing,
+        fetchable,
+    })
 }
 
 /// The tray first, then what installs next to it
 fn wanted(os: &str) -> Vec<String> {
-    let mut w = vec![exe("retail-tray", os), exe("retaild", os), exe("retail", os)];
+    let mut w = vec![
+        exe("retail-tray", os),
+        exe("retaild", os),
+        exe("retail", os),
+    ];
     if os == "windows" {
         w.push("wintun.dll".to_string());
     }
@@ -154,13 +214,21 @@ fn wanted(os: &str) -> Vec<String> {
 }
 
 /// Always offered, so the page can ask for the files of a missing one
-const STANDARD: [&str; 5] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64"];
+const STANDARD: [&str; 5] = [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-aarch64",
+    "macos-x86_64",
+];
 
 /// This device's own programs, then any in `<state>/clients/<os>-<arch>/`
 fn clients(state_dir: &Path) -> Vec<ClientSource> {
     let own_id = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let mut out = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
         && let Some(s) = source(&own_id, &dir)
     {
         out.push(s);
@@ -188,7 +256,12 @@ fn clients(state_dir: &Path) -> Vec<ClientSource> {
             out.push(s);
         }
     }
-    let rank = |id: &str| STANDARD.iter().position(|s| *s == id).unwrap_or(STANDARD.len());
+    let rank = |id: &str| {
+        STANDARD
+            .iter()
+            .position(|s| *s == id)
+            .unwrap_or(STANDARD.len())
+    };
     out.sort_by_key(|o| rank(&o.id));
     out
 }
@@ -199,7 +272,10 @@ pub async fn start(backend: Arc<Backend>, state_dir: PathBuf, port: u16) -> Opti
     if port == 0 {
         return None;
     }
-    let glue = Arc::new(Glue { backend: backend.clone(), state_dir });
+    let glue = Arc::new(Glue {
+        backend: backend.clone(),
+        state_dir,
+    });
     let web = WebAdmin::new(glue, port);
     match tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await {
         Ok(l) => {
@@ -228,15 +304,22 @@ pub async fn start(backend: Arc<Backend>, state_dir: PathBuf, port: u16) -> Opti
                 if let Some(ip) = wanted {
                     match tokio::net::TcpListener::bind(SocketAddr::from((ip, port))).await {
                         Ok(l) => {
-                            tracing::info!("web admin open to allowed devices at http://{ip}:{port}");
+                            tracing::info!(
+                                "web admin open to allowed devices at http://{ip}:{port}"
+                            );
                             let w = w.clone();
-                            serving = Some((ip, tokio::spawn(async move {
-                                if let Err(e) = w.serve_mesh(l, ip).await {
-                                    tracing::warn!("web admin (network) stopped: {e}");
-                                }
-                            })));
+                            serving = Some((
+                                ip,
+                                tokio::spawn(async move {
+                                    if let Err(e) = w.serve_mesh(l, ip).await {
+                                        tracing::warn!("web admin (network) stopped: {e}");
+                                    }
+                                }),
+                            ));
                         }
-                        Err(e) => tracing::debug!("web admin: not yet listening on {ip}:{port}: {e}"),
+                        Err(e) => {
+                            tracing::debug!("web admin: not yet listening on {ip}:{port}: {e}")
+                        }
                     }
                 }
             }

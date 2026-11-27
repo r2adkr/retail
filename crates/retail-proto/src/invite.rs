@@ -58,8 +58,11 @@ impl HelperCode {
             .trim()
             .strip_prefix(HELPER_PREFIX)
             .ok_or_else(|| "not a helper code (it starts with retailh1.)".to_string())?;
-        let json = URL_SAFE_NO_PAD.decode(body.trim()).map_err(|_| "the helper code is damaged".to_string())?;
-        let code: HelperCode = serde_json::from_slice(&json).map_err(|_| "the helper code is damaged".to_string())?;
+        let json = URL_SAFE_NO_PAD
+            .decode(body.trim())
+            .map_err(|_| "the helper code is damaged".to_string())?;
+        let code: HelperCode =
+            serde_json::from_slice(&json).map_err(|_| "the helper code is damaged".to_string())?;
         if code.addrs.is_empty() || code.secret.is_empty() || decode_pin(&code.pin).is_none() {
             return Err("the helper code is incomplete".into());
         }
@@ -91,8 +94,11 @@ impl Invite {
             .trim()
             .strip_prefix(PREFIX)
             .ok_or_else(|| "not a retail invite code (it starts with retail1.)".to_string())?;
-        let json = URL_SAFE_NO_PAD.decode(body.trim()).map_err(|_| "the invite code is damaged".to_string())?;
-        let invite: Invite = serde_json::from_slice(&json).map_err(|_| "the invite code is damaged".to_string())?;
+        let json = URL_SAFE_NO_PAD
+            .decode(body.trim())
+            .map_err(|_| "the invite code is damaged".to_string())?;
+        let invite: Invite =
+            serde_json::from_slice(&json).map_err(|_| "the invite code is damaged".to_string())?;
         if invite.addrs.is_empty() || invite.key.is_empty() {
             return Err("the invite code is incomplete".into());
         }
@@ -140,7 +146,11 @@ mod tests {
 
     #[test]
     fn helper_code() {
-        let h = HelperCode { addrs: vec!["198.51.100.4:443".into()], pin: encode_pin(&[3; 32]), secret: "s3cret".into() };
+        let h = HelperCode {
+            addrs: vec!["198.51.100.4:443".into()],
+            pin: encode_pin(&[3; 32]),
+            secret: "s3cret".into(),
+        };
         assert_eq!(HelperCode::decode(&h.encode()).unwrap(), h);
         assert!(HelperCode::decode("retail1.abc").is_err());
     }

@@ -37,7 +37,9 @@ pub struct ServerConfig {
 }
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 struct Len32;
@@ -77,7 +79,12 @@ fn nonce(client_random: &[u8; 32]) -> aead::Nonce {
 
 /// `hello` is the ClientHello handshake message with its session id zeroed,
 /// used as AAD.
-pub fn seal_session_id(auth: &[u8; 32], client_random: &[u8; 32], hello: &[u8], plain: &[u8; 16]) -> [u8; 32] {
+pub fn seal_session_id(
+    auth: &[u8; 32],
+    client_random: &[u8; 32],
+    hello: &[u8],
+    plain: &[u8; 16],
+) -> [u8; 32] {
     let mut buf = plain.to_vec();
     gcm(auth)
         .seal_in_place_append_tag(nonce(client_random), aead::Aad::from(hello), &mut buf)
@@ -85,16 +92,26 @@ pub fn seal_session_id(auth: &[u8; 32], client_random: &[u8; 32], hello: &[u8], 
     buf.try_into().expect("16 bytes + 16-byte tag")
 }
 
-pub fn open_session_id(auth: &[u8; 32], client_random: &[u8; 32], hello: &[u8], sid: &[u8; 32]) -> Option<[u8; 16]> {
+pub fn open_session_id(
+    auth: &[u8; 32],
+    client_random: &[u8; 32],
+    hello: &[u8],
+    sid: &[u8; 32],
+) -> Option<[u8; 16]> {
     let mut buf = sid.to_vec();
-    let plain = gcm(auth).open_in_place(nonce(client_random), aead::Aad::from(hello), &mut buf).ok()?;
+    let plain = gcm(auth)
+        .open_in_place(nonce(client_random), aead::Aad::from(hello), &mut buf)
+        .ok()?;
     plain.try_into().ok()
 }
 
 /// Carried in the throwaway certificate's signature field
 pub fn cert_hmac(auth: &[u8; 32], ed25519_public: &[u8]) -> [u8; 64] {
     let key = hmac::Key::new(hmac::HMAC_SHA512, auth);
-    hmac::sign(&key, ed25519_public).as_ref().try_into().expect("SHA-512 output")
+    hmac::sign(&key, ed25519_public)
+        .as_ref()
+        .try_into()
+        .expect("SHA-512 output")
 }
 
 #[derive(Debug, Clone)]
@@ -126,9 +143,18 @@ pub fn parse_client_hello(msg: &[u8]) -> Option<Hello> {
     r.skip(suites)?;
     let comp = r.u8()? as usize;
     r.skip(comp)?;
-    let mut hello = Hello { random, session_id, session_id_at, server_name: None, x25519: None };
+    let mut hello = Hello {
+        random,
+        session_id,
+        session_id_at,
+        server_name: None,
+        x25519: None,
+    };
     let ext_len = r.u16()? as usize;
-    let mut ext = Reader { b: r.take(ext_len)?, at: 0 };
+    let mut ext = Reader {
+        b: r.take(ext_len)?,
+        at: 0,
+    };
     while ext.at < ext.b.len() {
         let kind = ext.u16()?;
         let n = ext.u16()? as usize;
@@ -140,13 +166,18 @@ pub fn parse_client_hello(msg: &[u8]) -> Option<Hello> {
                 d.skip(2)?;
                 if d.u8()? == 0 {
                     let n = d.u16()? as usize;
-                    hello.server_name = std::str::from_utf8(d.take(n)?).ok().map(str::to_ascii_lowercase);
+                    hello.server_name = std::str::from_utf8(d.take(n)?)
+                        .ok()
+                        .map(str::to_ascii_lowercase);
                 }
             }
             51 => {
                 // key_share: list of (group, key)
                 let total = d.u16()? as usize;
-                let mut shares = Reader { b: d.take(total)?, at: 0 };
+                let mut shares = Reader {
+                    b: d.take(total)?,
+                    at: 0,
+                };
                 while shares.at < shares.b.len() {
                     let group = shares.u16()?;
                     let n = shares.u16()? as usize;
@@ -192,7 +223,9 @@ impl<'a> Reader<'a> {
 pub enum Decision {
     /// Not a camouflage name, so the ordinary HTTPS server handles it
     Normal,
-    Reality { auth: [u8; 32] },
+    Reality {
+        auth: [u8; 32],
+    },
     /// Names the camouflage site but fails authentication, so it goes to the real site
     Camouflage,
 }
@@ -251,7 +284,11 @@ impl ReplayGuard {
             return false;
         }
         if seen.ids.len() >= MAX_SEEN {
-            let heaviest = seen.by_source.iter().max_by_key(|(_, q)| q.len()).map(|(w, _)| *w);
+            let heaviest = seen
+                .by_source
+                .iter()
+                .max_by_key(|(_, q)| q.len())
+                .map(|(w, _)| *w);
             if let Some(w) = heaviest {
                 seen.forget_oldest_of(w);
             }
@@ -267,9 +304,17 @@ impl ReplayGuard {
     }
 }
 pub fn decide(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], from: IpAddr) -> Decision {
-    let Some(hello) = parse_client_hello(msg) else { return Decision::Normal };
-    let Some(name) = hello.server_name.as_deref() else { return Decision::Normal };
-    if !cfg.server_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+    let Some(hello) = parse_client_hello(msg) else {
+        return Decision::Normal;
+    };
+    let Some(name) = hello.server_name.as_deref() else {
+        return Decision::Normal;
+    };
+    if !cfg
+        .server_names
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(name))
+    {
         return Decision::Normal;
     }
     match authenticate(cfg, replay, msg, &hello, from) {
@@ -278,7 +323,13 @@ pub fn decide(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], from: IpAddr
     }
 }
 
-fn authenticate(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], hello: &Hello, from: IpAddr) -> Option<[u8; 32]> {
+fn authenticate(
+    cfg: &ServerConfig,
+    replay: &ReplayGuard,
+    msg: &[u8],
+    hello: &Hello,
+    from: IpAddr,
+) -> Option<[u8; 32]> {
     let client_share = hello.x25519?;
     let sid: [u8; 32] = hello.session_id.as_slice().try_into().ok()?;
     let secret = x25519_dalek::StaticSecret::from(cfg.private_key);
@@ -290,7 +341,8 @@ fn authenticate(cfg: &ServerConfig, replay: &ReplayGuard, msg: &[u8], hello: &He
     let time = u32::from_be_bytes(plain[4..8].try_into().ok()?) as u64;
     let short_id: [u8; 8] = plain[8..].try_into().ok()?;
     let now = now_secs() as u32 as u64;
-    if plain[..3] != VERSION || now.abs_diff(time) > MAX_SKEW || !cfg.short_ids.contains(&short_id) {
+    if plain[..3] != VERSION || now.abs_diff(time) > MAX_SKEW || !cfg.short_ids.contains(&short_id)
+    {
         return None;
     }
     replay.fresh(&sid, from).then_some(auth)
@@ -322,11 +374,21 @@ mod tests {
             assert_eq!(s.ids.len(), MAX_SEEN, "the set stays bounded");
             assert!(s.order.len() < 2 * MAX_SEEN);
         }
-        assert!(!g.fresh(&sid(0), me), "someone else's id was not pushed out, so its replay is still refused");
-        assert!(g.fresh(&sid(1), me), "the heavy source lost its own oldest ids");
+        assert!(
+            !g.fresh(&sid(0), me),
+            "someone else's id was not pushed out, so its replay is still refused"
+        );
+        assert!(
+            g.fresh(&sid(1), me),
+            "the heavy source lost its own oldest ids"
+        );
         let v6 = |s: &str| s.parse::<IpAddr>().unwrap();
         let source = crate::net::same_network;
-        assert_eq!(source(v6("2001:db8::1")), source(v6("2001:db8::ffff:1")), "an IPv6 source is its /64");
+        assert_eq!(
+            source(v6("2001:db8::1")),
+            source(v6("2001:db8::ffff:1")),
+            "an IPv6 source is its /64"
+        );
         assert_eq!(source(v6("::ffff:192.0.2.1")), v6("192.0.2.1"));
     }
     pub(crate) fn hello(sni: &str, share: [u8; 32], sid: [u8; 32], random: [u8; 32]) -> Vec<u8> {
@@ -376,25 +438,47 @@ mod tests {
         let parsed = parse_client_hello(&msg).unwrap();
         let shared = client.diffie_hellman(&x25519_dalek::PublicKey::from(&server));
         let auth = auth_key(shared.as_bytes(), &random);
-        let sid = seal_session_id(&auth, &random, &msg, &session_plaintext(now_secs(), [9u8; 8]));
+        let sid = seal_session_id(
+            &auth,
+            &random,
+            &msg,
+            &session_plaintext(now_secs(), [9u8; 8]),
+        );
         msg[parsed.session_id_at..parsed.session_id_at + 32].copy_from_slice(&sid);
 
-        assert!(matches!(decide(&cfg, &replay, &msg, me), Decision::Reality { auth: a } if a == auth));
-        assert!(matches!(decide(&cfg, &replay, &msg, me), Decision::Camouflage), "a replay is a probe");
+        assert!(
+            matches!(decide(&cfg, &replay, &msg, me), Decision::Reality { auth: a } if a == auth)
+        );
+        assert!(
+            matches!(decide(&cfg, &replay, &msg, me), Decision::Camouflage),
+            "a replay is a probe"
+        );
         let probe = hello("www.example.com", share, [1; 32], [8; 32]);
-        assert!(matches!(decide(&cfg, &replay, &probe, me), Decision::Camouflage));
+        assert!(matches!(
+            decide(&cfg, &replay, &probe, me),
+            Decision::Camouflage
+        ));
         let other = hello("retail.example.net", share, [1; 32], [8; 32]);
-        assert!(matches!(decide(&cfg, &replay, &other, me), Decision::Normal));
+        assert!(matches!(
+            decide(&cfg, &replay, &other, me),
+            Decision::Normal
+        ));
 
         // Wrong short id or a stale clock is a probe too
-        for (time, id) in [(now_secs(), [1u8; 8]), (now_secs() - 3 * MAX_SKEW, [9u8; 8])] {
+        for (time, id) in [
+            (now_secs(), [1u8; 8]),
+            (now_secs() - 3 * MAX_SKEW, [9u8; 8]),
+        ] {
             let random = [time as u8; 32];
             let mut m = hello("www.example.com", share, [0; 32], random);
             let shared = client.diffie_hellman(&x25519_dalek::PublicKey::from(&server));
             let a = auth_key(shared.as_bytes(), &random);
             let sid = seal_session_id(&a, &random, &m, &session_plaintext(time, id));
             m[parsed.session_id_at..parsed.session_id_at + 32].copy_from_slice(&sid);
-            assert!(matches!(decide(&cfg, &replay, &m, me), Decision::Camouflage));
+            assert!(matches!(
+                decide(&cfg, &replay, &m, me),
+                Decision::Camouflage
+            ));
         }
     }
 }

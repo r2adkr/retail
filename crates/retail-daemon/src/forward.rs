@@ -59,7 +59,11 @@ const FIRST_PORT: u16 = 1024;
 /// Other sources come only from peers trusted with many (an exit, a router),
 /// and share one count, so many addresses do not buy many shares.
 fn owner(src: Ipv4Addr) -> Ipv4Addr {
-    if retail_proto::in_mesh(src) { src } else { Ipv4Addr::UNSPECIFIED }
+    if retail_proto::in_mesh(src) {
+        src
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    }
 }
 
 /// A peer's connection as it sent it
@@ -95,19 +99,31 @@ struct Table {
 impl Table {
     fn add(&mut self, conn: Conn, syn: Vec<u8>) -> Option<u16> {
         let ip = *conn.peer.ip();
-        if self.conns.len() >= MAX_TCP || self.per_peer.get(&owner(ip)).copied().unwrap_or(0) >= MAX_TCP_PER_PEER {
+        if self.conns.len() >= MAX_TCP
+            || self.per_peer.get(&owner(ip)).copied().unwrap_or(0) >= MAX_TCP_PER_PEER
+        {
             return None;
         }
         let mut port = None;
         for _ in FIRST_PORT..=u16::MAX {
-            self.next = if self.next < FIRST_PORT || self.next == u16::MAX { FIRST_PORT } else { self.next + 1 };
+            self.next = if self.next < FIRST_PORT || self.next == u16::MAX {
+                FIRST_PORT
+            } else {
+                self.next + 1
+            };
             if !self.ports.contains_key(&(ip, self.next)) {
                 port = Some(self.next);
                 break;
             }
         }
         let port = port?;
-        self.conns.insert(conn, Entry { port, stage: Stage::Dialing(syn) });
+        self.conns.insert(
+            conn,
+            Entry {
+                port,
+                stage: Stage::Dialing(syn),
+            },
+        );
         self.ports.insert((ip, port), conn);
         *self.per_peer.entry(owner(ip)).or_default() += 1;
         Some(port)
@@ -153,7 +169,9 @@ impl Flows {
         let from = if mine >= MAX_UDP_PER_PEER {
             who
         } else if self.by_client.len() >= MAX_UDP {
-            let Some((&top, _)) = self.per_peer.iter().max_by_key(|(_, n)| **n) else { return };
+            let Some((&top, _)) = self.per_peer.iter().max_by_key(|(_, n)| **n) else {
+                return;
+            };
             top
         } else {
             return;
@@ -201,7 +219,9 @@ impl Forward {
         let rt = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let listener = std::net::TcpListener::bind((ip, 0))?;
         listener.set_nonblocking(true)?;
-        let SocketAddr::V4(me) = listener.local_addr()? else { return Err(io::Error::other("not an IPv4 listener")) };
+        let SocketAddr::V4(me) = listener.local_addr()? else {
+            return Err(io::Error::other("not an IPv4 listener"));
+        };
         let shared = Arc::new(Shared {
             me,
             engine: Arc::downgrade(engine),
@@ -227,10 +247,14 @@ impl Forward {
     /// or a routed network.
     pub fn inbound(&self, p: &mut [u8], forwarded: bool) -> bool {
         let s = &self.shared;
-        let Some(h) = Header::parse(p) else { return true };
+        let Some(h) = Header::parse(p) else {
+            return true;
+        };
         if !forwarded {
             // The listener takes readdressed connections only
-            return !(h.proto == TCP && h.dst == *s.me.ip() && (h.dport == s.me.port() || h.partial));
+            return !(h.proto == TCP
+                && h.dst == *s.me.ip()
+                && (h.dport == s.me.port() || h.partial));
         }
         if h.fragment {
             return false;
@@ -287,7 +311,10 @@ impl Shared {
     }
 
     fn tcp_in(self: &Arc<Self>, p: &mut [u8], h: &Header) -> bool {
-        let conn = Conn { peer: SocketAddrV4::new(h.src, h.sport), dst: SocketAddrV4::new(h.dst, h.dport) };
+        let conn = Conn {
+            peer: SocketAddrV4::new(h.src, h.sport),
+            dst: SocketAddrV4::new(h.dst, h.dport),
+        };
         let mut t = self.table.lock().unwrap();
         if let Some(e) = t.conns.get(&conn) {
             // Repeated SYNs wait with the first
@@ -340,7 +367,9 @@ impl Shared {
         let mut t = self.table.lock().unwrap();
         let conn = *t.ports.get(&(*from.ip(), from.port()))?;
         let e = t.conns.get_mut(&conn)?;
-        let Stage::Dialled(stream, _) = &mut e.stage else { return None };
+        let Stage::Dialled(stream, _) = &mut e.stage else {
+            return None;
+        };
         let stream = stream.take()?;
         e.stage = Stage::Open;
         Some((conn, stream))
@@ -353,7 +382,9 @@ impl Shared {
     }
 
     fn udp_in(self: &Arc<Self>, p: &[u8], h: &Header) {
-        let Some(payload) = p.get(h.l4 + 8..) else { return };
+        let Some(payload) = p.get(h.l4 + 8..) else {
+            return;
+        };
         let client = SocketAddrV4::new(h.src, h.sport);
         let now = self.now();
         let sock = {
@@ -371,7 +402,14 @@ impl Shared {
                     let last = Arc::new(AtomicU64::new(now));
                     let task = self.spawn(udp_reader(self.clone(), client, reader, last.clone()));
                     let sock = Arc::new(sock);
-                    flows.by_client.insert(client, Udp { sock: sock.clone(), last, task });
+                    flows.by_client.insert(
+                        client,
+                        Udp {
+                            sock: sock.clone(),
+                            last,
+                            task,
+                        },
+                    );
                     *flows.per_peer.entry(who).or_default() += 1;
                     sock
                 }
@@ -382,7 +420,9 @@ impl Shared {
     }
 
     fn ping(self: &Arc<Self>, p: &[u8], h: &Header) {
-        let Some(icmp) = p.get(h.l4..).filter(|i| i.len() >= 8).map(<[u8]>::to_vec) else { return };
+        let Some(icmp) = p.get(h.l4..).filter(|i| i.len() >= 8).map(<[u8]>::to_vec) else {
+            return;
+        };
         let who = owner(h.src);
         {
             let mut per_peer = self.pings_per_peer.lock().unwrap();
@@ -413,7 +453,9 @@ impl Shared {
 
     /// To a peer, in fragments if it does not fit the tunnel
     fn send(&self, src: Ipv4Addr, dst: Ipv4Addr, proto: u8, l4: &[u8]) {
-        let Some(engine) = self.engine.upgrade() else { return };
+        let Some(engine) = self.engine.upgrade() else {
+            return;
+        };
         let id = self.ip_id.fetch_add(1, Ordering::Relaxed);
         for p in ipv4_packets(src, dst, proto, id, l4) {
             engine.send_ip(&p);
@@ -425,17 +467,24 @@ async fn dial(s: Arc<Shared>, conn: Conn) {
     let dialled = tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(conn.dst)).await;
     let syn = {
         let mut t = s.table.lock().unwrap();
-        let Some(e) = t.conns.get_mut(&conn) else { return };
+        let Some(e) = t.conns.get_mut(&conn) else {
+            return;
+        };
         match dialled {
             Ok(Ok(stream)) => {
-                let Stage::Dialing(mut syn) = std::mem::replace(&mut e.stage, Stage::Dialled(Some(stream), Instant::now())) else {
+                let Stage::Dialing(mut syn) =
+                    std::mem::replace(&mut e.stage, Stage::Dialled(Some(stream), Instant::now()))
+                else {
                     return;
                 };
                 readdress(&mut syn, SocketAddrV4::new(*conn.peer.ip(), e.port), s.me);
                 Ok(syn)
             }
             _ => match t.remove(&conn) {
-                Some(Entry { stage: Stage::Dialing(syn), .. }) => Err(syn),
+                Some(Entry {
+                    stage: Stage::Dialing(syn),
+                    ..
+                }) => Err(syn),
                 _ => return,
             },
         }
@@ -503,7 +552,11 @@ fn give_back(buf: Box<[u8]>) {
 async fn pipe(from: OwnedReadHalf, mut to: OwnedWriteHalf) -> io::Result<()> {
     loop {
         from.readable().await?;
-        let mut buf = SPARE.lock().unwrap().pop().unwrap_or_else(|| vec![0; SPLICE_BUF].into_boxed_slice());
+        let mut buf = SPARE
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| vec![0; SPLICE_BUF].into_boxed_slice());
         let done = loop {
             match from.try_read(&mut buf) {
                 Ok(0) => break Ok(true),
@@ -549,7 +602,9 @@ async fn sweep(s: Arc<Shared>) {
             let idle: Vec<SocketAddrV4> = flows
                 .by_client
                 .iter()
-                .filter(|(_, f)| now.saturating_sub(f.last.load(Ordering::Relaxed)) >= UDP_IDLE.as_secs())
+                .filter(|(_, f)| {
+                    now.saturating_sub(f.last.load(Ordering::Relaxed)) >= UDP_IDLE.as_secs()
+                })
                 .map(|(c, _)| *c)
                 .collect();
             for c in idle {
@@ -571,8 +626,15 @@ thread_local! {
     static DATAGRAM: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0; 65536]);
 }
 
-async fn udp_reader(s: Arc<Shared>, client: SocketAddrV4, sock: std::net::UdpSocket, last: Arc<AtomicU64>) {
-    let Ok(sock) = UdpSocket::from_std(sock) else { return };
+async fn udp_reader(
+    s: Arc<Shared>,
+    client: SocketAddrV4,
+    sock: std::net::UdpSocket,
+    last: Arc<AtomicU64>,
+) {
+    let Ok(sock) = UdpSocket::from_std(sock) else {
+        return;
+    };
     loop {
         if sock.readable().await.is_err() {
             return;
@@ -581,7 +643,14 @@ async fn udp_reader(s: Arc<Shared>, client: SocketAddrV4, sock: std::net::UdpSoc
             Ok((n, SocketAddr::V4(from))) => Ok(Some((from, buf[..n].to_vec()))),
             Ok(_) => Ok(None),
             // Windows reports an earlier datagram's ICMP error here
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::ConnectionReset) => Ok(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e),
         });
         match got {
@@ -780,8 +849,12 @@ fn ipv4_packets(src: Ipv4Addr, dst: Ipv4Addr, proto: u8, id: u16, l4: &[u8]) -> 
 #[cfg(target_os = "windows")]
 fn echo(dst: Ipv4Addr, data: &[u8]) -> bool {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::NetworkManagement::IpHelper::{ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho};
-    let Ok(size) = u16::try_from(data.len()) else { return false };
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+    };
+    let Ok(size) = u16::try_from(data.len()) else {
+        return false;
+    };
     let mut reply = vec![0u8; size_of::<ICMP_ECHO_REPLY>() + data.len() + 8 + 64];
     // SAFETY: valid buffers of the stated sizes for the call's duration; the handle is closed after use
     unsafe {
@@ -806,9 +879,11 @@ fn echo(dst: Ipv4Addr, data: &[u8]) -> bool {
 
 #[cfg(unix)]
 fn echo(dst: Ipv4Addr, data: &[u8]) -> bool {
-    use std::io::Read;
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-    let Ok(sock) = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) else { return false };
+    use std::io::Read;
+    let Ok(sock) = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) else {
+        return false;
+    };
     let id: u16 = rand::random();
     let mut req = vec![8, 0, 0, 0];
     req.extend_from_slice(&id.to_be_bytes());
@@ -816,16 +891,24 @@ fn echo(dst: Ipv4Addr, data: &[u8]) -> bool {
     req.extend_from_slice(data);
     let sum = checksum(&req, 0);
     req[2..4].copy_from_slice(&sum.to_be_bytes());
-    if sock.send_to(&req, &SockAddr::from(SocketAddrV4::new(dst, 0))).is_err() {
+    if sock
+        .send_to(&req, &SockAddr::from(SocketAddrV4::new(dst, 0)))
+        .is_err()
+    {
         return false;
     }
     let deadline = Instant::now() + PING_TIMEOUT;
     let mut buf = [0u8; 2048];
-    while let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+    while let Some(left) = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+    {
         if sock.set_read_timeout(Some(left)).is_err() {
             return false;
         }
-        let Ok(n) = (&sock).read(&mut buf) else { return false };
+        let Ok(n) = (&sock).read(&mut buf) else {
+            return false;
+        };
         // A raw socket sees every echo reply, with its IP header
         let p = &buf[..n];
         let Some(h) = Header::parse(p) else { continue };
@@ -874,7 +957,10 @@ mod tests {
         readdress(&mut p, SocketAddrV4::new(*peer.ip(), 1024), me);
         assert!(valid(&p));
         let h = Header::parse(&p).unwrap();
-        assert_eq!((h.src, h.sport, h.dst, h.dport), (*peer.ip(), 1024, *me.ip(), me.port()));
+        assert_eq!(
+            (h.src, h.sport, h.dst, h.dport),
+            (*peer.ip(), 1024, *me.ip(), me.port())
+        );
     }
 
     #[test]
@@ -899,8 +985,14 @@ mod tests {
     fn ports_are_not_reused_while_taken() {
         let mut t = Table::default();
         let dst: SocketAddrV4 = "203.0.113.80:80".parse().unwrap();
-        let a = Conn { peer: "100.64.0.2:40000".parse().unwrap(), dst };
-        let b = Conn { peer: "100.64.0.2:40001".parse().unwrap(), dst };
+        let a = Conn {
+            peer: "100.64.0.2:40000".parse().unwrap(),
+            dst,
+        };
+        let b = Conn {
+            peer: "100.64.0.2:40001".parse().unwrap(),
+            dst,
+        };
         let pa = t.add(a, vec![]).unwrap();
         let pb = t.add(b, vec![]).unwrap();
         assert_ne!(pa, pb);
@@ -909,9 +1001,26 @@ mod tests {
         assert!(!t.ports.contains_key(&(Ipv4Addr::new(100, 64, 0, 2), pa)));
         assert!(t.per_peer[&Ipv4Addr::new(100, 64, 0, 2)] == 1);
         for i in 0..MAX_TCP_PER_PEER - 1 {
-            t.add(Conn { peer: SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), 1 + i as u16), dst }, vec![]).unwrap();
+            t.add(
+                Conn {
+                    peer: SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), 1 + i as u16),
+                    dst,
+                },
+                vec![],
+            )
+            .unwrap();
         }
-        assert!(t.add(Conn { peer: "100.64.0.2:9".parse().unwrap(), dst }, vec![]).is_none(), "per-peer cap");
+        assert!(
+            t.add(
+                Conn {
+                    peer: "100.64.0.2:9".parse().unwrap(),
+                    dst
+                },
+                vec![]
+            )
+            .is_none(),
+            "per-peer cap"
+        );
     }
 
     /// Sources outside the mesh (an exit's, a router's) share one peer's share
@@ -921,10 +1030,36 @@ mod tests {
         let dst: SocketAddrV4 = "203.0.113.80:80".parse().unwrap();
         for i in 0..MAX_TCP_PER_PEER {
             let src = Ipv4Addr::new(10, 0, (i / 250) as u8, (i % 250) as u8 + 1);
-            t.add(Conn { peer: SocketAddrV4::new(src, 5000), dst }, vec![]).unwrap();
+            t.add(
+                Conn {
+                    peer: SocketAddrV4::new(src, 5000),
+                    dst,
+                },
+                vec![],
+            )
+            .unwrap();
         }
-        assert!(t.add(Conn { peer: "10.9.9.9:5000".parse().unwrap(), dst }, vec![]).is_none());
-        assert!(t.add(Conn { peer: "100.64.0.3:5000".parse().unwrap(), dst }, vec![]).is_some(), "others still get in");
+        assert!(
+            t.add(
+                Conn {
+                    peer: "10.9.9.9:5000".parse().unwrap(),
+                    dst
+                },
+                vec![]
+            )
+            .is_none()
+        );
+        assert!(
+            t.add(
+                Conn {
+                    peer: "100.64.0.3:5000".parse().unwrap(),
+                    dst
+                },
+                vec![]
+            )
+            .is_some(),
+            "others still get in"
+        );
     }
 
     /// One peer opening flow after flow evicts only its own
@@ -936,16 +1071,30 @@ mod tests {
             flows.make_room(who);
             let task = tokio::spawn(std::future::pending::<()>()).abort_handle();
             let sock = Arc::new(udp_socket().unwrap());
-            flows.by_client.insert(client, Udp { sock, last: Arc::new(AtomicU64::new(last)), task });
+            flows.by_client.insert(
+                client,
+                Udp {
+                    sock,
+                    last: Arc::new(AtomicU64::new(last)),
+                    task,
+                },
+            );
             *flows.per_peer.entry(who).or_default() += 1;
         };
         let victim: SocketAddrV4 = "100.64.0.3:5000".parse().unwrap();
         add(&mut flows, victim, 0);
         for port in 1..=2000u16 {
-            add(&mut flows, SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), port), 1);
+            add(
+                &mut flows,
+                SocketAddrV4::new(Ipv4Addr::new(100, 64, 0, 2), port),
+                1,
+            );
         }
         assert!(flows.by_client.contains_key(&victim));
-        assert_eq!(flows.per_peer[&Ipv4Addr::new(100, 64, 0, 2)], MAX_UDP_PER_PEER);
+        assert_eq!(
+            flows.per_peer[&Ipv4Addr::new(100, 64, 0, 2)],
+            MAX_UDP_PER_PEER
+        );
         assert_eq!(flows.by_client.len(), MAX_UDP_PER_PEER + 1);
     }
 

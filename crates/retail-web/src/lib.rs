@@ -43,10 +43,18 @@ pub trait Backend: Send + Sync + 'static {
     /// With `revoke_invite`, the invite it joined with stops working too
     fn delete_node(&self, id: i64, revoke_invite: bool) -> BoxFut<'_, Result<(), String>>;
     /// The networks a device may route
-    fn set_routes(&self, id: i64, routes: Vec<retail_proto::route::Ipv4Net>) -> BoxFut<'_, Result<(), String>>;
+    fn set_routes(
+        &self,
+        id: i64,
+        routes: Vec<retail_proto::route::Ipv4Net>,
+    ) -> BoxFut<'_, Result<(), String>>;
     /// A new key lifetime, or none with `never`
     fn renew(&self, id: i64, never: bool) -> BoxFut<'_, Result<(), String>>;
-    fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> BoxFut<'_, Result<(), String>>;
+    fn set_expiry(
+        &self,
+        key_days: Option<u32>,
+        inactive_days: Option<u32>,
+    ) -> BoxFut<'_, Result<(), String>>;
     /// The server's data, encrypted with the passphrase
     fn backup(&self, passphrase: String) -> BoxFut<'_, Result<String, String>>;
     /// Replaces the server's data with a backup's, while it is stopped
@@ -101,7 +109,12 @@ struct Ctx {
 
 impl WebAdmin {
     pub fn new(backend: Arc<dyn Backend>, port: u16) -> Self {
-        WebAdmin { backend, sessions: Arc::default(), logins: Arc::default(), port }
+        WebAdmin {
+            backend,
+            sessions: Arc::default(),
+            logins: Arc::default(),
+            port,
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -123,12 +136,23 @@ impl WebAdmin {
     }
 
     /// Serves allowed devices of the network at this device's mesh address
-    pub async fn serve_mesh(&self, listener: tokio::net::TcpListener, ip: Ipv4Addr) -> std::io::Result<()> {
+    pub async fn serve_mesh(
+        &self,
+        listener: tokio::net::TcpListener,
+        ip: Ipv4Addr,
+    ) -> std::io::Result<()> {
         self.serve(listener, Listener::Mesh(ip)).await
     }
 
-    async fn serve(&self, listener: tokio::net::TcpListener, which: Listener) -> std::io::Result<()> {
-        let ctx = Ctx { web: self.clone(), listener: which };
+    async fn serve(
+        &self,
+        listener: tokio::net::TcpListener,
+        which: Listener,
+    ) -> std::io::Result<()> {
+        let ctx = Ctx {
+            web: self.clone(),
+            listener: which,
+        };
         let app = Router::new()
             .route("/", get(page))
             .route("/login", get(login).post(login))
@@ -145,7 +169,10 @@ impl WebAdmin {
             .route("/api/nodes/{id}/renew", post(renew))
             .route("/api/expiry", post(set_expiry))
             .route("/api/backup", post(backup))
-            .route("/api/restore", post(restore).layer(axum::extract::DefaultBodyLimit::max(64 << 20)))
+            .route(
+                "/api/restore",
+                post(restore).layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+            )
             .route("/api/acl", post(set_acl))
             .route("/api/helper-device", post(set_helper_device))
             .route("/api/tunnel", post(set_tunnel))
@@ -159,7 +186,11 @@ impl WebAdmin {
             .layer(middleware::from_fn_with_state(ctx.clone(), guard))
             .layer(middleware::from_fn(no_framing))
             .with_state(ctx);
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
     }
 }
 
@@ -168,8 +199,14 @@ impl WebAdmin {
 async fn no_framing(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
-    h.insert(header::X_FRAME_OPTIONS, header::HeaderValue::from_static("DENY"));
-    h.insert(header::CONTENT_SECURITY_POLICY, header::HeaderValue::from_static("frame-ancestors 'none'"));
+    h.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
     resp
 }
 
@@ -181,26 +218,47 @@ fn random_token() -> String {
 }
 
 fn deny(status: StatusCode, msg: &str) -> Response {
-    (status, Json(ApiError { error: msg.into(), reason: None })).into_response()
+    (
+        status,
+        Json(ApiError {
+            error: msg.into(),
+            reason: None,
+        }),
+    )
+        .into_response()
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).find_map(|c| {
-        let (k, v) = c.trim().split_once('=')?;
-        (k == name).then(|| v.to_string())
-    })
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| {
+            let (k, v) = c.trim().split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
 }
 
 /// The exact `Host` values each listener answers to
 fn host_ok(headers: &HeaderMap, which: Listener, port: u16) -> bool {
-    let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else { return false };
+    let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else {
+        return false;
+    };
     match which {
-        Listener::Local => host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}"),
+        Listener::Local => {
+            host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}")
+        }
         Listener::Mesh(ip) => host == format!("{ip}:{port}"),
     }
 }
 
-async fn guard(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+async fn guard(
+    State(ctx): State<Ctx>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
     let port = ctx.web.port;
     if !host_ok(req.headers(), ctx.listener, port) {
         return deny(StatusCode::FORBIDDEN, "unexpected Host");
@@ -212,12 +270,23 @@ async fn guard(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr
     // one-time token is the proof, so it needs no page header
     let sign_in = req.uri().path() == "/login" && ctx.listener == Listener::Local;
     if req.method() == Method::POST && !sign_in {
-        let origin_ok = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()).is_none_or(|o| {
-            let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
-            o == format!("http://{host}")
-        });
+        let origin_ok = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|o| o.to_str().ok())
+            .is_none_or(|o| {
+                let host = req
+                    .headers()
+                    .get(header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("");
+                o == format!("http://{host}")
+            });
         if !req.headers().contains_key(CHANGE_HEADER) || !origin_ok {
-            return deny(StatusCode::FORBIDDEN, "changes need the page's own requests");
+            return deny(
+                StatusCode::FORBIDDEN,
+                "changes need the page's own requests",
+            );
         }
     }
     let allowed = match ctx.listener {
@@ -234,7 +303,8 @@ async fn guard(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr
         Listener::Mesh(own) => mesh_allowed(&ctx, peer.ip(), own).await,
     };
     if !allowed {
-        if req.method() == Method::GET && req.uri().path() == "/" && ctx.listener == Listener::Local {
+        if req.method() == Method::GET && req.uri().path() == "/" && ctx.listener == Listener::Local
+        {
             return (StatusCode::UNAUTHORIZED, Html(SIGN_IN_PAGE)).into_response();
         }
         return deny(StatusCode::UNAUTHORIZED, "not allowed");
@@ -246,7 +316,9 @@ async fn guard(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr
 /// the node the host allowed. This device's own address does not count:
 /// local programs reach that too.
 async fn mesh_allowed(ctx: &Ctx, peer: IpAddr, own: Ipv4Addr) -> bool {
-    let IpAddr::V4(ip) = peer.to_canonical() else { return false };
+    let IpAddr::V4(ip) = peer.to_canonical() else {
+        return false;
+    };
     if ip == own || !retail_proto::in_mesh(ip) {
         return false;
     }
@@ -255,30 +327,55 @@ async fn mesh_allowed(ctx: &Ctx, peer: IpAddr, own: Ipv4Addr) -> bool {
         return false;
     }
     let status = ctx.web.backend.status().await;
-    status.nodes.iter().any(|n| n.ip == ip && admins.contains(&n.id))
+    status
+        .nodes
+        .iter()
+        .any(|n| n.ip == ip && admins.contains(&n.id))
 }
 
 /// The one-time sign-in, from a link (`?t=`) or, so the token stays off
 /// command lines and out of history, a form the CLI or tray app has the
 /// browser post from a private file (`t=` in the body)
 async fn login(State(ctx): State<Ctx>, uri: axum::http::Uri, body: String) -> Response {
-    let field = |s: &str| s.split('&').find_map(|kv| kv.strip_prefix("t=")).map(str::to_string);
-    let token = field(uri.query().unwrap_or("")).or_else(|| field(&body)).unwrap_or_default();
+    let field = |s: &str| {
+        s.split('&')
+            .find_map(|kv| kv.strip_prefix("t="))
+            .map(str::to_string)
+    };
+    let token = field(uri.query().unwrap_or(""))
+        .or_else(|| field(&body))
+        .unwrap_or_default();
     let valid = {
         let mut logins = ctx.web.logins.lock().unwrap();
-        logins.remove(&token).is_some_and(|t| t.elapsed() < LOGIN_TTL)
+        logins
+            .remove(&token)
+            .is_some_and(|t| t.elapsed() < LOGIN_TTL)
     };
     if !valid || ctx.listener != Listener::Local {
         return (StatusCode::UNAUTHORIZED, Html(SIGN_IN_PAGE)).into_response();
     }
     let session = random_token();
-    ctx.web.sessions.lock().unwrap().insert(session.clone(), Instant::now());
-    let cookie = format!("{SESSION_COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}", SESSION_TTL.as_secs());
+    ctx.web
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session.clone(), Instant::now());
+    let cookie = format!(
+        "{SESSION_COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        SESSION_TTL.as_secs()
+    );
     // Moving on from this page rather than redirecting: a navigation the page
     // itself starts is same-site, so the strict cookie goes along even when
     // the sign-in came from a local file
     let next = "<!DOCTYPE html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=/\"><title>retail</title>";
-    ([(header::SET_COOKIE, cookie), (header::CACHE_CONTROL, "no-store".to_string())], Html(next)).into_response()
+    (
+        [
+            (header::SET_COOKIE, cookie),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        Html(next),
+    )
+        .into_response()
 }
 
 async fn page() -> Response {
@@ -315,7 +412,12 @@ async fn status(State(ctx): State<Ctx>) -> Response {
         clients: b
             .clients()
             .into_iter()
-            .map(|c| ClientView { id: c.id, label: c.label, missing: c.missing, fetchable: c.fetchable })
+            .map(|c| ClientView {
+                id: c.id,
+                label: c.label,
+                missing: c.missing,
+                fetchable: c.fetchable,
+            })
             .collect(),
         mesh_url: own_ip.map(|ip| format!("http://{ip}:{}", ctx.web.port)),
         local: ctx.listener == Listener::Local,
@@ -347,7 +449,11 @@ async fn create_invite(State(ctx): State<Ctx>, Json(req): Json<InviteRequest>) -
 
 async fn named_code(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Response {
     match ctx.web.backend.named_code(id).await {
-        Ok(code) => Json(InviteResponse { code, expires_at: 0 }).into_response(),
+        Ok(code) => Json(InviteResponse {
+            code,
+            expires_at: 0,
+        })
+        .into_response(),
         Err(e) => deny(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -356,28 +462,54 @@ async fn revoke(State(ctx): State<Ctx>, Path(id): Path<i64>) -> Response {
     done(ctx.web.backend.revoke(id).await)
 }
 
-async fn delete_node(State(ctx): State<Ctx>, Path(id): Path<i64>, body: axum::body::Bytes) -> Response {
+async fn delete_node(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> Response {
     let req: retail_proto::api::RemoveRequest = serde_json::from_slice(&body).unwrap_or_default();
     done(ctx.web.backend.delete_node(id, req.revoke_invite).await)
 }
 
-async fn set_routes(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RoutesRequest>) -> Response {
+async fn set_routes(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Json(req): Json<retail_proto::api::RoutesRequest>,
+) -> Response {
     done(ctx.web.backend.set_routes(id, req.routes).await)
 }
 
-async fn renew(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::RenewRequest>) -> Response {
+async fn renew(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Json(req): Json<retail_proto::api::RenewRequest>,
+) -> Response {
     done(ctx.web.backend.renew(id, req.never).await)
 }
 
-async fn set_expiry(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::ExpiryRequest>) -> Response {
-    done(ctx.web.backend.set_expiry(req.key_expiry_days, req.remove_inactive_days).await)
+async fn set_expiry(
+    State(ctx): State<Ctx>,
+    Json(req): Json<retail_proto::api::ExpiryRequest>,
+) -> Response {
+    done(
+        ctx.web
+            .backend
+            .set_expiry(req.key_expiry_days, req.remove_inactive_days)
+            .await,
+    )
 }
 
 /// A backup holds the server's keys, so only the server's own device makes
 /// or restores one, not devices allowed to manage it over the network
-async fn backup(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::BackupRequest>) -> Response {
+async fn backup(
+    State(ctx): State<Ctx>,
+    Json(req): Json<retail_proto::api::BackupRequest>,
+) -> Response {
     if ctx.listener != Listener::Local {
-        return deny(StatusCode::FORBIDDEN, "backups are made on the server's own device");
+        return deny(
+            StatusCode::FORBIDDEN,
+            "backups are made on the server's own device",
+        );
     }
     match ctx.web.backend.backup(req.passphrase).await {
         Ok(backup) => Json(retail_proto::api::BackupResponse { backup }).into_response(),
@@ -385,9 +517,15 @@ async fn backup(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::Backu
     }
 }
 
-async fn restore(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::RestoreRequest>) -> Response {
+async fn restore(
+    State(ctx): State<Ctx>,
+    Json(req): Json<retail_proto::api::RestoreRequest>,
+) -> Response {
     if ctx.listener != Listener::Local {
-        return deny(StatusCode::FORBIDDEN, "backups are restored on the server's own device");
+        return deny(
+            StatusCode::FORBIDDEN,
+            "backups are restored on the server's own device",
+        );
     }
     done(ctx.web.backend.restore(req.backup, req.passphrase).await)
 }
@@ -397,62 +535,109 @@ struct AdminReq {
     allowed: bool,
 }
 
-async fn set_admin(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<AdminReq>) -> Response {
+async fn set_admin(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Json(req): Json<AdminReq>,
+) -> Response {
     done(ctx.web.backend.set_admin(id, req.allowed))
 }
 
-async fn set_tags(State(ctx): State<Ctx>, Path(id): Path<i64>, Json(req): Json<retail_proto::api::TagsRequest>) -> Response {
+async fn set_tags(
+    State(ctx): State<Ctx>,
+    Path(id): Path<i64>,
+    Json(req): Json<retail_proto::api::TagsRequest>,
+) -> Response {
     done(ctx.web.backend.set_tags(id, req.tags).await)
 }
 
-async fn set_acl(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::AclRequest>) -> Response {
+async fn set_acl(
+    State(ctx): State<Ctx>,
+    Json(req): Json<retail_proto::api::AclRequest>,
+) -> Response {
     done(ctx.web.backend.set_acl(req.acl).await)
 }
 
-async fn set_helper_device(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::HelperDeviceRequest>) -> Response {
+async fn set_helper_device(
+    State(ctx): State<Ctx>,
+    Json(req): Json<retail_proto::api::HelperDeviceRequest>,
+) -> Response {
     // The device hosting the server cannot be its own helper
     if let (Some(id), Some(own)) = (req.id, ctx.web.backend.own_ip().await)
-        && ctx.web.backend.status().await.nodes.iter().any(|n| n.id == id && n.ip == own)
+        && ctx
+            .web
+            .backend
+            .status()
+            .await
+            .nodes
+            .iter()
+            .any(|n| n.id == id && n.ip == own)
     {
-        return deny(StatusCode::BAD_REQUEST, "the device hosting the server cannot be its helper node");
+        return deny(
+            StatusCode::BAD_REQUEST,
+            "the device hosting the server cannot be its helper node",
+        );
     }
     done(ctx.web.backend.set_helper_device(req.id).await)
 }
 
-async fn set_tunnel(State(ctx): State<Ctx>, Json(req): Json<retail_proto::api::TunnelRequest>) -> Response {
+async fn set_tunnel(
+    State(ctx): State<Ctx>,
+    Json(req): Json<retail_proto::api::TunnelRequest>,
+) -> Response {
     done(ctx.web.backend.set_tunnel(req.on).await)
 }
 
 /// Stores one program file for a client variant (a macOS build, say), so
 /// the page can hand that client out. Only the files a client needs are
 /// accepted, and only if they are executables for that system.
-async fn upload(State(ctx): State<Ctx>, Path((variant, name)): Path<(String, String)>, body: axum::body::Body) -> Response {
+async fn upload(
+    State(ctx): State<Ctx>,
+    Path((variant, name)): Path<(String, String)>,
+    body: axum::body::Body,
+) -> Response {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let Some(dir) = ctx.web.backend.upload_dir(&variant) else {
         return deny(StatusCode::NOT_FOUND, "no such client");
     };
     let os = variant.split('-').next().unwrap_or("");
-    let exe = |n: &str| if os == "windows" { format!("{n}.exe") } else { n.to_string() };
+    let exe = |n: &str| {
+        if os == "windows" {
+            format!("{n}.exe")
+        } else {
+            n.to_string()
+        }
+    };
     let mut wanted = vec![exe("retail-tray"), exe("retaild"), exe("retail")];
     if os == "windows" {
         wanted.push("wintun.dll".into());
     }
     if !wanted.contains(&name) {
-        return deny(StatusCode::BAD_REQUEST, &format!("expected one of: {}", wanted.join(", ")));
+        return deny(
+            StatusCode::BAD_REQUEST,
+            &format!("expected one of: {}", wanted.join(", ")),
+        );
     }
     // From another device, only missing files may be supplied: the files
     // present (an official set checked against its checksums, or ones the
     // owner put there) go into every installer and are replaced only here
-    if ctx.listener != Listener::Local && tokio::fs::try_exists(dir.join(&name)).await.unwrap_or(true) {
-        return deny(StatusCode::CONFLICT, "this file is already there; it can only be replaced on the server's own device");
+    if ctx.listener != Listener::Local
+        && tokio::fs::try_exists(dir.join(&name)).await.unwrap_or(true)
+    {
+        return deny(
+            StatusCode::CONFLICT,
+            "this file is already there; it can only be replaced on the server's own device",
+        );
     }
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return deny(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     let tmp = dir.join(format!("{name}.upload"));
     let result: Result<(), String> = async {
-        let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| e.to_string())?;
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| e.to_string())?;
         let mut stream = body.into_data_stream();
         let mut head: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -489,7 +674,10 @@ fn executable_for(os: &str, head: &[u8]) -> bool {
     match os {
         "windows" => head.starts_with(b"MZ"),
         "linux" => head.starts_with(b"\x7fELF"),
-        "macos" => matches!(head, [0xcf, 0xfa, 0xed, 0xfe] | [0xce, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe]),
+        "macos" => matches!(
+            head,
+            [0xcf, 0xfa, 0xed, 0xfe] | [0xce, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe]
+        ),
         _ => false,
     }
 }
@@ -519,7 +707,14 @@ async fn qr(Json(req): Json<QrReq>) -> Response {
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" shape-rendering="crispEdges"><rect width="{size}" height="{size}" fill="#fff"/><path d="{path}" fill="#000"/></svg>"##
     );
-    ([(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, "no-store")], svg).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        svg,
+    )
+        .into_response()
 }
 
 async fn fetch_client(State(ctx): State<Ctx>, Path(variant): Path<String>) -> Response {
@@ -528,7 +723,10 @@ async fn fetch_client(State(ctx): State<Ctx>, Path(variant): Path<String>) -> Re
 
 /// A client for one OS with the named invite's current code inside. Missing
 /// program files come from the official release first, when possible.
-async fn download(State(ctx): State<Ctx>, Path((invite, variant)): Path<(i64, String)>) -> Response {
+async fn download(
+    State(ctx): State<Ctx>,
+    Path((invite, variant)): Path<(i64, String)>,
+) -> Response {
     ctx.web.package(invite, &variant).await
 }
 
@@ -556,14 +754,25 @@ async fn package_response(b: &dyn Backend, invite: i64, variant: &str) -> Respon
         }
     }
     if !source.missing.is_empty() {
-        return deny(StatusCode::NOT_FOUND, &format!("files missing for this client: {}", source.missing.join(", ")));
+        return deny(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "files missing for this client: {}",
+                source.missing.join(", ")
+            ),
+        );
     }
     let code = match b.named_code(invite).await {
         Ok(c) => c,
         Err(e) => return deny(StatusCode::BAD_REQUEST, &e),
     };
     let status = b.status().await;
-    let name = status.invites.iter().find(|i| i.id == invite).and_then(|i| i.name.clone()).unwrap_or_default();
+    let name = status
+        .invites
+        .iter()
+        .find(|i| i.id == invite)
+        .and_then(|i| i.name.clone())
+        .unwrap_or_default();
     match package::build(&source, &code, &name).await {
         Ok((len, body)) => {
             let file = package::file_name(&source, &name);

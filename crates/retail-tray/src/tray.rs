@@ -28,7 +28,12 @@ impl Tray {
         use tray_icon::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-            if let TrayIconEvent::Click { rect, button_state: MouseButtonState::Up, .. } = event {
+            if let TrayIconEvent::Click {
+                rect,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 let anchor = Anchor {
                     x: rect.position.x,
                     y: rect.position.y,
@@ -64,8 +69,12 @@ impl Tray {
 #[cfg(any(windows, target_os = "macos"))]
 fn make_icon(connected: bool) -> Result<tray_icon::Icon, String> {
     let size = if cfg!(target_os = "macos") { 44 } else { 32 };
-    tray_icon::Icon::from_rgba(icon::rgba(size, connected, cfg!(target_os = "macos")), size, size)
-        .map_err(|e| e.to_string())
+    tray_icon::Icon::from_rgba(
+        icon::rgba(size, connected, cfg!(target_os = "macos")),
+        size,
+        size,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -91,7 +100,12 @@ impl ksni::Tray for SniTray {
     }
 
     fn activate(&mut self, x: i32, y: i32) {
-        let anchor = Anchor { x: x as f64, y: y as f64, w: 0.0, h: 0.0 };
+        let anchor = Anchor {
+            x: x as f64,
+            y: y as f64,
+            w: 0.0,
+            h: 0.0,
+        };
         let _ = self.proxy.send_event(UserEvent::TrayClicked(anchor));
     }
 
@@ -104,13 +118,20 @@ impl ksni::Tray for SniTray {
                     .chunks_exact(4)
                     .flat_map(|p| [p[3], p[0], p[1], p[2]])
                     .collect();
-                ksni::Icon { width: size as i32, height: size as i32, data }
+                ksni::Icon {
+                    width: size as i32,
+                    height: size as i32,
+                    data,
+                }
             })
             .collect()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        ksni::ToolTip { title: self.tooltip.clone(), ..Default::default() }
+        ksni::ToolTip {
+            title: self.tooltip.clone(),
+            ..Default::default()
+        }
     }
 }
 
@@ -118,9 +139,15 @@ impl ksni::Tray for SniTray {
 impl Tray {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Result<Self, String> {
         use ksni::blocking::TrayMethods;
-        let handle = SniTray { proxy, connected: false, tooltip: "retail".into() }
-            .spawn()
-            .map_err(|e| format!("no StatusNotifier host (is a tray/appindicator extension running?): {e}"))?;
+        let handle = SniTray {
+            proxy,
+            connected: false,
+            tooltip: "retail".into(),
+        }
+        .spawn()
+        .map_err(|e| {
+            format!("no StatusNotifier host (is a tray/appindicator extension running?): {e}")
+        })?;
         Ok(Tray { handle })
     }
 

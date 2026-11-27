@@ -6,23 +6,30 @@
 #[cfg(windows)]
 pub fn spawn(addr: std::net::SocketAddr) {
     use std::time::Duration;
-    let _ = std::thread::Builder::new().name("retail-proxy".into()).stack_size(256 * 1024).spawn(move || {
-        let mut sent: Option<Vec<String>> = None;
-        loop {
-            let server = crate::api::status_blocking(addr).ok().and_then(|s| s.server);
-            if let Some(server) = server {
-                let proxies = for_url(&server);
-                if sent.as_ref() != Some(&proxies) {
-                    let body = serde_json::to_string(&retail_proto::api::SystemProxy { proxies: proxies.clone() })
+    let _ = std::thread::Builder::new()
+        .name("retail-proxy".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let mut sent: Option<Vec<String>> = None;
+            loop {
+                let server = crate::api::status_blocking(addr)
+                    .ok()
+                    .and_then(|s| s.server);
+                if let Some(server) = server {
+                    let proxies = for_url(&server);
+                    if sent.as_ref() != Some(&proxies) {
+                        let body = serde_json::to_string(&retail_proto::api::SystemProxy {
+                            proxies: proxies.clone(),
+                        })
                         .unwrap_or_default();
-                    if crate::api::post_blocking(addr, "/proxy/system", &body).is_ok() {
-                        sent = Some(proxies);
+                        if crate::api::post_blocking(addr, "/proxy/system", &body).is_ok() {
+                            sent = Some(proxies);
+                        }
                     }
                 }
+                std::thread::sleep(Duration::from_secs(60));
             }
-            std::thread::sleep(Duration::from_secs(60));
-        }
-    });
+        });
 }
 
 #[cfg(not(windows))]
@@ -54,7 +61,11 @@ unsafe fn take(p: *mut u16) -> Option<String> {
 fn parse_list(list: &str) -> Vec<String> {
     let mut https = Vec::new();
     let mut other = Vec::new();
-    for entry in list.split([';', ' ']).map(str::trim).filter(|e| !e.is_empty()) {
+    for entry in list
+        .split([';', ' '])
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         match entry.split_once('=') {
             Some((scheme, addr)) => match scheme.to_ascii_lowercase().as_str() {
                 "https" => https.push(format!("http://{addr}")),
@@ -82,13 +93,22 @@ fn for_url(url: &str) -> Vec<String> {
     let _ = unsafe { take(ie.lpszProxyBypass) };
     if ie.fAutoDetect != 0 || auto_url.is_some() {
         let agent = wide("retail");
-        let session = unsafe { WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_NO_PROXY, std::ptr::null(), std::ptr::null(), 0) };
+        let session = unsafe {
+            WinHttpOpen(
+                agent.as_ptr(),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
+        };
         if !session.is_null() {
             let auto_w = auto_url.as_deref().map(wide);
             let mut opts: WINHTTP_AUTOPROXY_OPTIONS = unsafe { std::mem::zeroed() };
             if ie.fAutoDetect != 0 {
                 opts.dwFlags |= WINHTTP_AUTOPROXY_AUTO_DETECT;
-                opts.dwAutoDetectFlags = WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+                opts.dwAutoDetectFlags =
+                    WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
             }
             if let Some(w) = &auto_w {
                 opts.dwFlags |= WINHTTP_AUTOPROXY_CONFIG_URL;
@@ -97,7 +117,9 @@ fn for_url(url: &str) -> Vec<String> {
             opts.fAutoLogonIfChallenged = 1;
             let target = wide(url);
             let mut info: WINHTTP_PROXY_INFO = unsafe { std::mem::zeroed() };
-            let ok = unsafe { WinHttpGetProxyForUrl(session, target.as_ptr(), &mut opts, &mut info) } != 0;
+            let ok =
+                unsafe { WinHttpGetProxyForUrl(session, target.as_ptr(), &mut opts, &mut info) }
+                    != 0;
             unsafe { WinHttpCloseHandle(session) };
             if ok {
                 let list = unsafe { take(info.lpszProxy) };

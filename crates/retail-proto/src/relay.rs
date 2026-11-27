@@ -41,9 +41,21 @@ pub fn tune(socket: &impl std::os::fd::AsRawFd) {
     // SAFETY: a valid descriptor and options of the stated sizes; a system
     // without BBR refuses it and keeps its own congestion control
     unsafe {
-        libc::setsockopt(fd, libc::IPPROTO_TCP, TCP_NOTSENT_LOWAT, (&raw const bytes).cast(), size_of::<libc::c_int>() as libc::socklen_t);
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_NOTSENT_LOWAT,
+            (&raw const bytes).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        );
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_CONGESTION, b"bbr".as_ptr().cast(), 3);
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_CONGESTION,
+            b"bbr".as_ptr().cast(),
+            3,
+        );
     }
 }
 
@@ -61,7 +73,12 @@ pub fn paced<T>(socket: T) -> T {
 
 #[cfg(windows)]
 pub fn paced<T: std::os::windows::io::AsRawSocket>(socket: T) -> Paced<T> {
-    let mut p = Paced { raw: socket.as_raw_socket() as usize, inner: socket, sndbuf: 0, checked: std::time::Instant::now() };
+    let mut p = Paced {
+        raw: socket.as_raw_socket() as usize,
+        inner: socket,
+        sndbuf: 0,
+        checked: std::time::Instant::now(),
+    };
     p.refresh();
     p
 }
@@ -80,19 +97,37 @@ impl<T> Paced<T> {
     const EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
     fn refresh(&mut self) {
-        use windows_sys::Win32::Networking::WinSock::{SO_SNDBUF, SOL_SOCKET, WSAIoctl, setsockopt};
+        use windows_sys::Win32::Networking::WinSock::{
+            SO_SNDBUF, SOL_SOCKET, WSAIoctl, setsockopt,
+        };
         // _IOR('t', 123, ULONG)
         const SIO_IDEAL_SEND_BACKLOG_QUERY: u32 = 0x4004_747B;
         self.checked = std::time::Instant::now();
         let (mut isb, mut len) = (0u32, 0u32);
         // SAFETY: the socket lives as long as `inner`; buffers of the stated sizes
         let ok = unsafe {
-            WSAIoctl(self.raw, SIO_IDEAL_SEND_BACKLOG_QUERY, std::ptr::null(), 0, (&raw mut isb).cast(), 4, &mut len, std::ptr::null_mut(), None)
+            WSAIoctl(
+                self.raw,
+                SIO_IDEAL_SEND_BACKLOG_QUERY,
+                std::ptr::null(),
+                0,
+                (&raw mut isb).cast(),
+                4,
+                &mut len,
+                std::ptr::null_mut(),
+                None,
+            )
         } == 0;
-        let want = if ok { isb.saturating_add(Self::UNSENT).min(i32::MAX as u32) as i32 } else { return };
+        let want = if ok {
+            isb.saturating_add(Self::UNSENT).min(i32::MAX as u32) as i32
+        } else {
+            return;
+        };
         if want != self.sndbuf {
             // SAFETY: as above, an i32 option
-            let set = unsafe { setsockopt(self.raw, SOL_SOCKET, SO_SNDBUF, (&raw const want).cast(), 4) } == 0;
+            let set =
+                unsafe { setsockopt(self.raw, SOL_SOCKET, SO_SNDBUF, (&raw const want).cast(), 4) }
+                    == 0;
             if set {
                 self.sndbuf = want;
             }
@@ -118,18 +153,28 @@ impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Paced<T> {
 
 #[cfg(windows)]
 impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Paced<T> {
-    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         if self.checked.elapsed() >= Self::EVERY {
             self.refresh();
         }
         std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -144,7 +189,11 @@ mod paced_tests {
         let addr = l.local_addr().unwrap();
         let (client, accepted) = tokio::join!(tokio::net::TcpStream::connect(addr), l.accept());
         let mut p = super::paced(client.unwrap());
-        assert!(p.sndbuf() >= super::Paced::<()>::UNSENT as i32, "{}", p.sndbuf());
+        assert!(
+            p.sndbuf() >= super::Paced::<()>::UNSENT as i32,
+            "{}",
+            p.sndbuf()
+        );
         let (mut server, _) = accepted.unwrap();
         let reader = tokio::spawn(async move {
             let mut buf = vec![0; 1 << 16];
@@ -183,7 +232,12 @@ pub fn parse(frame: &[u8]) -> Option<(Key, Datagrams<'_>)> {
         return None;
     }
     let key = Key(frame[..HEADER].try_into().ok()?);
-    Some((key, Datagrams { rest: &frame[HEADER..] }))
+    Some((
+        key,
+        Datagrams {
+            rest: &frame[HEADER..],
+        },
+    ))
 }
 
 /// The server's only edit to a frame

@@ -84,13 +84,17 @@ fn dns_reply(q: &[u8], names: &Names) -> Option<Vec<u8>> {
     let mut record: Option<(u16, Vec<u8>)> = None;
     if let Some(ip) = reverse_ip(&labels) {
         match names.by_ip.get(&ip) {
-            Some(n) if qtype == TYPE_PTR || qtype == TYPE_ANY => record = Some((TYPE_PTR, encode_name(n))),
+            Some(n) if qtype == TYPE_PTR || qtype == TYPE_ANY => {
+                record = Some((TYPE_PTR, encode_name(n)))
+            }
             Some(_) => {}
             None => rcode = NXDOMAIN,
         }
     } else if name == MAGIC_DNS_DOMAIN || name.ends_with(&format!(".{MAGIC_DNS_DOMAIN}")) {
         match names.by_name.get(&name) {
-            Some(ip) if qtype == TYPE_A || qtype == TYPE_ANY => record = Some((TYPE_A, ip.octets().to_vec())),
+            Some(ip) if qtype == TYPE_A || qtype == TYPE_ANY => {
+                record = Some((TYPE_A, ip.octets().to_vec()))
+            }
             // The name exists, with no record of that type (AAAA, say)
             Some(_) => {}
             None if name == MAGIC_DNS_DOMAIN => {}
@@ -125,7 +129,11 @@ fn reverse_ip(labels: &[String]) -> Option<Ipv4Addr> {
     if labels.len() != 6 || labels[4] != "in-addr" || labels[5] != "arpa" {
         return None;
     }
-    let o: Vec<u8> = labels[..4].iter().rev().map(|l| l.parse().ok()).collect::<Option<_>>()?;
+    let o: Vec<u8> = labels[..4]
+        .iter()
+        .rev()
+        .map(|l| l.parse().ok())
+        .collect::<Option<_>>()?;
     let ip = Ipv4Addr::new(o[0], o[1], o[2], o[3]);
     retail_proto::in_mesh(ip).then_some(ip)
 }
@@ -193,9 +201,13 @@ impl SystemDns {
     pub fn configure(tun: &str) -> Option<SystemDns> {
         let ok = setup(tun);
         if !ok {
-            tracing::info!("MagicDNS: the system does not send {MAGIC_DNS_DOMAIN} names here; ask {MAGIC_DNS_IP} directly");
+            tracing::info!(
+                "MagicDNS: the system does not send {MAGIC_DNS_DOMAIN} names here; ask {MAGIC_DNS_IP} directly"
+            );
         }
-        ok.then(|| SystemDns { tun: tun.to_string() })
+        ok.then(|| SystemDns {
+            tun: tun.to_string(),
+        })
     }
 }
 
@@ -236,9 +248,9 @@ mod nrpt {
 
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_OPTION_VOLATILE, REG_SZ,
-        REG_VALUE_TYPE, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegEnumKeyExW, RegGetValueW,
-        RegOpenKeyExW, RegSetValueExW,
+        HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE,
+        REG_OPTION_VOLATILE, REG_SZ, REG_VALUE_TYPE, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+        RegDeleteKeyW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
     };
 
     const RULES: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
@@ -267,20 +279,47 @@ mod nrpt {
 
     fn set(key: &Key, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> bool {
         // SAFETY: an open key, a terminated name and a buffer of the stated length
-        unsafe { RegSetValueExW(key.0, wide(name).as_ptr(), 0, kind, data.as_ptr(), data.len() as u32) == ERROR_SUCCESS }
+        unsafe {
+            RegSetValueExW(
+                key.0,
+                wide(name).as_ptr(),
+                0,
+                kind,
+                data.as_ptr(),
+                data.len() as u32,
+            ) == ERROR_SUCCESS
+        }
     }
 
     fn create(parent: HKEY, path: &str, options: u32) -> Result<Key, u32> {
         let mut h = null_mut();
         // SAFETY: a terminated string and an out pointer valid for the call
-        let r = unsafe { RegCreateKeyExW(parent, wide(path).as_ptr(), 0, null(), options, KEY_ALL_ACCESS, null(), &mut h, null_mut()) };
-        if r == ERROR_SUCCESS { Ok(Key(h)) } else { Err(r) }
+        let r = unsafe {
+            RegCreateKeyExW(
+                parent,
+                wide(path).as_ptr(),
+                0,
+                null(),
+                options,
+                KEY_ALL_ACCESS,
+                null(),
+                &mut h,
+                null_mut(),
+            )
+        };
+        if r == ERROR_SUCCESS {
+            Ok(Key(h))
+        } else {
+            Err(r)
+        }
     }
 
     pub fn add(namespace: &str, server: &str) -> bool {
         // The list stays an ordinary key, as other programs' rules need; only
         // ours is volatile, gone after a restart even if never undone
-        let key = match create(HKEY_LOCAL_MACHINE, RULES, REG_OPTION_NON_VOLATILE).and_then(|rules| create(rules.0, RULE, REG_OPTION_VOLATILE)) {
+        let key = match create(HKEY_LOCAL_MACHINE, RULES, REG_OPTION_NON_VOLATILE)
+            .and_then(|rules| create(rules.0, RULE, REG_OPTION_VOLATILE))
+        {
             Ok(key) => key,
             Err(e) => {
                 tracing::debug!("NRPT rule: error {e}");
@@ -292,7 +331,12 @@ mod nrpt {
         let ok = set(&key, "Version", REG_DWORD, &2u32.to_le_bytes())
             && set(&key, "Name", REG_MULTI_SZ, &bytes(&names))
             && set(&key, "GenericDNSServers", REG_SZ, &bytes(&wide(server)))
-            && set(&key, "ConfigOptions", REG_DWORD, &GENERIC_DNS_SERVERS.to_le_bytes())
+            && set(
+                &key,
+                "ConfigOptions",
+                REG_DWORD,
+                &GENERIC_DNS_SERVERS.to_le_bytes(),
+            )
             && set(&key, "IPSECCARestriction", REG_SZ, &bytes(&wide("")))
             && set(&key, "Comment", REG_SZ, &bytes(&wide(COMMENT)))
             && set(&key, "DisplayName", REG_SZ, &bytes(&wide(COMMENT)));
@@ -308,7 +352,16 @@ mod nrpt {
     pub fn remove() {
         let mut h = null_mut();
         // SAFETY: a terminated string and an out pointer valid for the call
-        if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, wide(RULES).as_ptr(), 0, KEY_ALL_ACCESS, &mut h) } != ERROR_SUCCESS {
+        if unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                wide(RULES).as_ptr(),
+                0,
+                KEY_ALL_ACCESS,
+                &mut h,
+            )
+        } != ERROR_SUCCESS
+        {
             return;
         }
         let rules = Key(h);
@@ -317,12 +370,25 @@ mod nrpt {
             let mut name = [0u16; 256];
             let mut len = name.len() as u32;
             // SAFETY: a buffer of `len` characters
-            let r = unsafe { RegEnumKeyExW(rules.0, i, name.as_mut_ptr(), &mut len, null(), null_mut(), null_mut(), null_mut()) };
+            let r = unsafe {
+                RegEnumKeyExW(
+                    rules.0,
+                    i,
+                    name.as_mut_ptr(),
+                    &mut len,
+                    null(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            };
             if r != ERROR_SUCCESS {
                 break;
             }
             let name = name[..len as usize].to_vec();
-            if String::from_utf16_lossy(&name).eq_ignore_ascii_case(RULE) || comment(&rules, &name).as_deref() == Some(COMMENT) {
+            if String::from_utf16_lossy(&name).eq_ignore_ascii_case(RULE)
+                || comment(&rules, &name).as_deref() == Some(COMMENT)
+            {
                 ours.push(name);
             }
         }
@@ -344,18 +410,33 @@ mod nrpt {
         let mut size = std::mem::size_of_val(&buf) as u32;
         // SAFETY: terminated strings and a buffer of `size` bytes
         let r = unsafe {
-            RegGetValueW(rules.0, sub.as_ptr(), wide("Comment").as_ptr(), RRF_RT_REG_SZ, null_mut(), buf.as_mut_ptr().cast(), &mut size)
+            RegGetValueW(
+                rules.0,
+                sub.as_ptr(),
+                wide("Comment").as_ptr(),
+                RRF_RT_REG_SZ,
+                null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
         };
-        (r == ERROR_SUCCESS).then(|| String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]))
+        (r == ERROR_SUCCESS)
+            .then(|| String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]))
     }
 
     /// So names in the domain are not answered from before the change
     fn flush_cache() {
-        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+        use windows_sys::Win32::System::LibraryLoader::{
+            GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+        };
         // SAFETY: dnsapi.dll from System32; DnsFlushResolverCache takes no
         // arguments and returns a BOOL
         unsafe {
-            let lib = LoadLibraryExW(wide("dnsapi.dll").as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+            let lib = LoadLibraryExW(
+                wide("dnsapi.dll").as_ptr(),
+                null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            );
             if lib.is_null() {
                 return;
             }
@@ -371,8 +452,13 @@ mod nrpt {
     #[ignore]
     fn system_dns_client_applies_the_rule() {
         let policy = |ns: &str| {
-            let script = format!("(Get-DnsClientNrptPolicy -Namespace '{ns}' | Select-Object -ExpandProperty NameServers) -join ','");
-            let out = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().unwrap();
+            let script = format!(
+                "(Get-DnsClientNrptPolicy -Namespace '{ns}' | Select-Object -ExpandProperty NameServers) -join ','"
+            );
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let ns = ".retail-nrpt-test.invalid";
@@ -387,7 +473,11 @@ mod nrpt {
 #[cfg(target_os = "macos")]
 fn setup(_tun: &str) -> bool {
     let _ = std::fs::create_dir_all("/etc/resolver");
-    std::fs::write(format!("/etc/resolver/{MAGIC_DNS_DOMAIN}"), format!("# retail MagicDNS\nnameserver {MAGIC_DNS_IP}\n")).is_ok()
+    std::fs::write(
+        format!("/etc/resolver/{MAGIC_DNS_DOMAIN}"),
+        format!("# retail MagicDNS\nnameserver {MAGIC_DNS_IP}\n"),
+    )
+    .is_ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -399,7 +489,10 @@ fn teardown(_tun: &str) {
 #[cfg(target_os = "linux")]
 fn setup(tun: &str) -> bool {
     run("resolvectl", &["dns", tun, &MAGIC_DNS_IP.to_string()])
-        && run("resolvectl", &["domain", tun, &format!("~{MAGIC_DNS_DOMAIN}")])
+        && run(
+            "resolvectl",
+            &["domain", tun, &format!("~{MAGIC_DNS_DOMAIN}")],
+        )
 }
 
 #[cfg(target_os = "linux")]
@@ -421,7 +514,11 @@ mod tests {
 
     fn names() -> Names {
         Names::new(
-            [("laptop.retail.internal", Ipv4Addr::new(100, 64, 0, 1)), ("nas.retail.internal.", Ipv4Addr::new(100, 64, 0, 2))].into_iter(),
+            [
+                ("laptop.retail.internal", Ipv4Addr::new(100, 64, 0, 1)),
+                ("nas.retail.internal.", Ipv4Addr::new(100, 64, 0, 2)),
+            ]
+            .into_iter(),
         )
     }
 
@@ -440,9 +537,11 @@ mod tests {
         assert_eq!(&dns[dns.len() - 4..], &[100, 64, 0, 2]);
         assert_eq!(&dns[..2], &[0x12, 0x34]);
         // No IPv6 address, but the name exists
-        let (rcode, answers, _) = reply(&answer(&query("nas.retail.internal", 28), &names()).unwrap());
+        let (rcode, answers, _) =
+            reply(&answer(&query("nas.retail.internal", 28), &names()).unwrap());
         assert_eq!((rcode, answers), (0, 0));
-        let (rcode, _, _) = reply(&answer(&query("gone.retail.internal", TYPE_A), &names()).unwrap());
+        let (rcode, _, _) =
+            reply(&answer(&query("gone.retail.internal", TYPE_A), &names()).unwrap());
         assert_eq!(rcode, NXDOMAIN);
         let (rcode, _, _) = reply(&answer(&query("example.com", TYPE_A), &names()).unwrap());
         assert_eq!(rcode, REFUSED);

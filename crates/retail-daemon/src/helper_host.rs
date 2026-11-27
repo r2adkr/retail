@@ -29,11 +29,18 @@ pub struct HelperHost {
 
 impl HelperHost {
     pub fn new(state_dir: &std::path::Path) -> Self {
-        HelperHost { dir: state_dir.join("helper"), running: Default::default(), last_error: Mutex::default() }
+        HelperHost {
+            dir: state_dir.join("helper"),
+            running: Default::default(),
+            last_error: Mutex::default(),
+        }
     }
 
     fn config(&self) -> Config {
-        std::fs::read(self.dir.join("helper.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        std::fs::read(self.dir.join("helper.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
     }
 
     fn save(&self, c: &Config) -> Result<()> {
@@ -46,7 +53,12 @@ impl HelperHost {
     pub async fn resume(&self) {
         let c = self.config();
         if c.enabled
-            && let Err(e) = self.start(&HelperStartRequest { port: c.port, public: c.public.clone() }).await
+            && let Err(e) = self
+                .start(&HelperStartRequest {
+                    port: c.port,
+                    public: c.public.clone(),
+                })
+                .await
         {
             tracing::error!("could not resume the helper node: {e:#}");
             *self.last_error.lock().unwrap() = Some(format!("{e:#}"));
@@ -58,14 +70,19 @@ impl HelperHost {
         if running.is_some() {
             return Ok(());
         }
-        std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating {}", self.dir.display()))?;
         crate::state::secure_dir(&self.dir);
         let port = req.port.unwrap_or(DEFAULT_PORT);
         let any = |p| SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, p));
         let helper = retail_control::helper::Helper::start(retail_control::helper::HelperConfig {
             data_dir: self.dir.clone(),
             listen: any(port),
-            extra_listen: if port == HTTP_PORT { Vec::new() } else { vec![any(HTTP_PORT)] },
+            extra_listen: if port == HTTP_PORT {
+                Vec::new()
+            } else {
+                vec![any(HTTP_PORT)]
+            },
             stun_listen: any(DEFAULT_STUN_PORT),
         })
         .await
@@ -74,7 +91,11 @@ impl HelperHost {
         if !firewall {
             tracing::debug!("no firewall rule added for the helper node");
         }
-        let config = Config { enabled: true, port: Some(port), public: req.public.clone().filter(|p| !p.trim().is_empty()) };
+        let config = Config {
+            enabled: true,
+            port: Some(port),
+            public: req.public.clone().filter(|p| !p.trim().is_empty()),
+        };
         self.save(&config)?;
         *running = Some((helper, config));
         *self.last_error.lock().unwrap() = None;
@@ -104,7 +125,10 @@ impl HelperHost {
         let running = self.running.lock().await;
         let last_error = self.last_error.lock().unwrap().clone();
         let Some((h, c)) = running.as_ref() else {
-            return HelperStatus { last_error, ..Default::default() };
+            return HelperStatus {
+                last_error,
+                ..Default::default()
+            };
         };
         HelperStatus {
             running: true,
@@ -122,14 +146,16 @@ fn code(h: &retail_control::helper::Helper, c: &Config) -> String {
     let port = h.port();
     let mut addrs: Vec<String> = Vec::new();
     if let Some(p) = &c.public {
-        addrs.push(if p.contains(':') && !p.starts_with('[') && p.parse::<std::net::Ipv6Addr>().is_err() {
-            p.clone()
-        } else {
-            match p.parse::<IpAddr>() {
-                Ok(ip) => SocketAddr::new(ip, port).to_string(),
-                Err(_) => format!("{}:{port}", p.trim_matches(['[', ']'])),
-            }
-        });
+        addrs.push(
+            if p.contains(':') && !p.starts_with('[') && p.parse::<std::net::Ipv6Addr>().is_err() {
+                p.clone()
+            } else {
+                match p.parse::<IpAddr>() {
+                    Ok(ip) => SocketAddr::new(ip, port).to_string(),
+                    Err(_) => format!("{}:{port}", p.trim_matches(['[', ']'])),
+                }
+            },
+        );
     }
     let mut ips = crate::host::lan_ips();
     ips.sort_by_key(|ip| crate::portmap::is_private(*ip));
@@ -139,5 +165,10 @@ fn code(h: &retail_control::helper::Helper, c: &Config) -> String {
             addrs.push(a);
         }
     }
-    HelperCode { addrs, pin: encode_pin(&h.pin()), secret: h.secret().to_string() }.encode()
+    HelperCode {
+        addrs,
+        pin: encode_pin(&h.pin()),
+        secret: h.secret().to_string(),
+    }
+    .encode()
 }

@@ -9,7 +9,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use retail_proto::api::{
-    ApiError, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus, StatusResponse, UpRequest,
+    ApiError, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest,
+    ServerStatus, StatusResponse, UpRequest,
 };
 
 use crate::i18n::tr;
@@ -22,7 +23,13 @@ pub enum Origin {
 
 pub enum Command {
     /// With an auth key or an invite code this (re-)registers
-    Up { server: String, auth_key: Option<String>, hostname: Option<String>, invite: Option<String>, origin: Origin },
+    Up {
+        server: String,
+        auth_key: Option<String>,
+        hostname: Option<String>,
+        invite: Option<String>,
+        origin: Origin,
+    },
     Down,
     Logout,
     /// Connect to a saved server instead of the current one
@@ -33,7 +40,10 @@ pub enum Command {
     CheckUpdate,
     InstallUpdate,
     Refresh,
-    Prefs { req: PrefsRequest, origin: Origin },
+    Prefs {
+        req: PrefsRequest,
+        origin: Origin,
+    },
     /// Wake a device that is off (hostname)
     Wake(String),
     /// Hosting a network on this device
@@ -47,10 +57,17 @@ pub enum ServerCommand {
     /// A new invite, or a new code for a named one
     CreateInvite(InviteRequest),
     /// The current code of a named invite: shown, or copied when `copy`
-    Code { id: i64, copy: bool },
+    Code {
+        id: i64,
+        copy: bool,
+    },
     Revoke(i64),
     /// The installer of a named invite for `variant`, saved to `dir`
-    Package { id: i64, variant: String, dir: PathBuf },
+    Package {
+        id: i64,
+        variant: String,
+        dir: PathBuf,
+    },
     Remove(i64),
     /// Opens the web admin page with a one-time sign-in link
     OpenWeb,
@@ -60,16 +77,27 @@ pub enum ServerCommand {
 
 pub enum ApiEvent {
     Status(Result<StatusResponse, String>),
-    Action { origin: Origin, kind: ActionKind, result: Result<StatusResponse, String> },
+    Action {
+        origin: Origin,
+        kind: ActionKind,
+        result: Result<StatusResponse, String>,
+    },
     /// Server status after a refresh or a server command (`Err` for a failed command)
     Server(Result<ServerStatus, String>),
     Invite(Result<InviteResponse, String>),
     /// A named invite's code, for showing or copying
-    Code { id: i64, copy: bool, result: Result<String, String> },
+    Code {
+        id: i64,
+        copy: bool,
+        result: Result<String, String>,
+    },
     /// Where an installer was saved
     Saved(Result<PathBuf, String>),
     /// A wake-up was sent to this device, or why not
-    Woken { name: String, result: Result<(), String> },
+    Woken {
+        name: String,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,70 +127,191 @@ pub fn spawn(
         .stack_size(256 * 1024)
         .spawn(move || {
             loop {
-                let wait = if fast.load(Ordering::Relaxed) { Duration::from_secs(1) } else { Duration::from_secs(5) };
+                let wait = if fast.load(Ordering::Relaxed) {
+                    Duration::from_secs(1)
+                } else {
+                    Duration::from_secs(5)
+                };
                 let (origin, kind, result) = match rx.recv_timeout(wait) {
-                    Ok(Command::Up { server, auth_key, hostname, invite, origin }) => {
-                        let body = serde_json::to_string(&UpRequest { server, auth_key, hostname, invite }).unwrap_or_default();
+                    Ok(Command::Up {
+                        server,
+                        auth_key,
+                        hostname,
+                        invite,
+                        origin,
+                    }) => {
+                        let body = serde_json::to_string(&UpRequest {
+                            server,
+                            auth_key,
+                            hostname,
+                            invite,
+                        })
+                        .unwrap_or_default();
                         // Registration contacts the control server, which may be slow
-                        (origin, ActionKind::Up, call(addr, "POST", "/up", Some(&body), Duration::from_secs(40)))
+                        (
+                            origin,
+                            ActionKind::Up,
+                            call(addr, "POST", "/up", Some(&body), Duration::from_secs(40)),
+                        )
                     }
-                    Ok(Command::Down) => {
-                        (Origin::Popup, ActionKind::Down, call(addr, "POST", "/down", None, Duration::from_secs(10)))
-                    }
+                    Ok(Command::Down) => (
+                        Origin::Popup,
+                        ActionKind::Down,
+                        call(addr, "POST", "/down", None, Duration::from_secs(10)),
+                    ),
                     Ok(Command::Prefs { req, origin }) => {
                         let body = serde_json::to_string(&req).unwrap_or_default();
                         // A new memory limit restarts the tunnel
-                        (origin, ActionKind::Prefs, call(addr, "POST", "/prefs", Some(&body), Duration::from_secs(20)))
+                        (
+                            origin,
+                            ActionKind::Prefs,
+                            call(addr, "POST", "/prefs", Some(&body), Duration::from_secs(20)),
+                        )
                     }
-                    Ok(Command::Logout) => {
-                        (Origin::Settings, ActionKind::Logout, call(addr, "POST", "/logout", None, Duration::from_secs(10)))
-                    }
+                    Ok(Command::Logout) => (
+                        Origin::Settings,
+                        ActionKind::Logout,
+                        call(addr, "POST", "/logout", None, Duration::from_secs(10)),
+                    ),
                     Ok(Command::Switch(server)) => {
-                        let body = serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
-                        (Origin::Settings, ActionKind::Switch, call(addr, "POST", "/servers/switch", Some(&body), Duration::from_secs(20)))
+                        let body =
+                            serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
+                        (
+                            Origin::Settings,
+                            ActionKind::Switch,
+                            call(
+                                addr,
+                                "POST",
+                                "/servers/switch",
+                                Some(&body),
+                                Duration::from_secs(20),
+                            ),
+                        )
                     }
                     Ok(Command::Forget(server)) => {
-                        let body = serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
-                        (Origin::Settings, ActionKind::Forget, call(addr, "POST", "/servers/forget", Some(&body), Duration::from_secs(10)))
+                        let body =
+                            serde_json::to_string(&ServerSelect { server }).unwrap_or_default();
+                        (
+                            Origin::Settings,
+                            ActionKind::Forget,
+                            call(
+                                addr,
+                                "POST",
+                                "/servers/forget",
+                                Some(&body),
+                                Duration::from_secs(10),
+                            ),
+                        )
                     }
-                    Ok(Command::CheckUpdate) => {
-                        (Origin::Settings, ActionKind::Update, call(addr, "POST", "/update/check", None, Duration::from_secs(70)))
-                    }
-                    Ok(Command::InstallUpdate) => {
-                        (Origin::Settings, ActionKind::Update, call(addr, "POST", "/update/install", None, Duration::from_secs(10)))
-                    }
+                    Ok(Command::CheckUpdate) => (
+                        Origin::Settings,
+                        ActionKind::Update,
+                        call(addr, "POST", "/update/check", None, Duration::from_secs(70)),
+                    ),
+                    Ok(Command::InstallUpdate) => (
+                        Origin::Settings,
+                        ActionKind::Update,
+                        call(
+                            addr,
+                            "POST",
+                            "/update/install",
+                            None,
+                            Duration::from_secs(10),
+                        ),
+                    ),
                     Ok(Command::Wake(name)) => {
-                        let body = serde_json::to_string(&retail_proto::api::WakeRequest { peer: name.clone() }).unwrap_or_default();
-                        let result = call::<retail_proto::api::WakeResponse>(addr, "POST", "/wake", Some(&body), Duration::from_secs(10));
-                        on_event(ApiEvent::Woken { name, result: result.map(|_| ()) });
+                        let body = serde_json::to_string(&retail_proto::api::WakeRequest {
+                            peer: name.clone(),
+                        })
+                        .unwrap_or_default();
+                        let result = call::<retail_proto::api::WakeResponse>(
+                            addr,
+                            "POST",
+                            "/wake",
+                            Some(&body),
+                            Duration::from_secs(10),
+                        );
+                        on_event(ApiEvent::Woken {
+                            name,
+                            result: result.map(|_| ()),
+                        });
                         continue;
                     }
                     Ok(Command::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
-                        on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));
+                        on_event(ApiEvent::Status(call(
+                            addr,
+                            "GET",
+                            "/status",
+                            None,
+                            Duration::from_secs(3),
+                        )));
                         if dashboard.load(Ordering::Relaxed) {
-                            on_event(ApiEvent::Server(call(addr, "GET", "/server", None, Duration::from_secs(3))));
+                            on_event(ApiEvent::Server(call(
+                                addr,
+                                "GET",
+                                "/server",
+                                None,
+                                Duration::from_secs(3),
+                            )));
                         }
                         continue;
                     }
                     Ok(Command::Server(cmd)) => {
                         let t = Duration::from_secs(30);
                         match cmd {
-                            ServerCommand::Refresh => on_event(ApiEvent::Server(call(addr, "GET", "/server", None, t))),
-                            ServerCommand::Start => {
-                                let body = serde_json::to_string(&ServerStartRequest { join: true, ..Default::default() }).unwrap_or_default();
-                                on_event(ApiEvent::Server(call(addr, "POST", "/server/start", Some(&body), t)));
+                            ServerCommand::Refresh => {
+                                on_event(ApiEvent::Server(call(addr, "GET", "/server", None, t)))
                             }
-                            ServerCommand::Stop => on_event(ApiEvent::Server(call(addr, "POST", "/server/stop", None, t))),
+                            ServerCommand::Start => {
+                                let body = serde_json::to_string(&ServerStartRequest {
+                                    join: true,
+                                    ..Default::default()
+                                })
+                                .unwrap_or_default();
+                                on_event(ApiEvent::Server(call(
+                                    addr,
+                                    "POST",
+                                    "/server/start",
+                                    Some(&body),
+                                    t,
+                                )));
+                            }
+                            ServerCommand::Stop => on_event(ApiEvent::Server(call(
+                                addr,
+                                "POST",
+                                "/server/stop",
+                                None,
+                                t,
+                            ))),
                             ServerCommand::Tunnel(on) => {
-                                let body = serde_json::to_string(&retail_proto::api::TunnelRequest { on }).unwrap_or_default();
-                                on_event(ApiEvent::Server(call(addr, "POST", "/server/tunnel", Some(&body), t)));
+                                let body =
+                                    serde_json::to_string(&retail_proto::api::TunnelRequest { on })
+                                        .unwrap_or_default();
+                                on_event(ApiEvent::Server(call(
+                                    addr,
+                                    "POST",
+                                    "/server/tunnel",
+                                    Some(&body),
+                                    t,
+                                )));
                             }
                             ServerCommand::Remove(id) => {
-                                on_event(ApiEvent::Server(call(addr, "POST", &format!("/server/nodes/{id}/delete"), None, t)));
+                                on_event(ApiEvent::Server(call(
+                                    addr,
+                                    "POST",
+                                    &format!("/server/nodes/{id}/delete"),
+                                    None,
+                                    t,
+                                )));
                             }
                             ServerCommand::OpenWeb => {
-                                if let Ok(v) = call::<serde_json::Value>(addr, "POST", "/web/login", Some("{}"), t)
-                                    && let Some(url) = v["url"].as_str()
+                                if let Ok(v) = call::<serde_json::Value>(
+                                    addr,
+                                    "POST",
+                                    "/web/login",
+                                    Some("{}"),
+                                    t,
+                                ) && let Some(url) = v["url"].as_str()
                                     && let Ok(page) = retail_proto::local::sign_in_page(url)
                                 {
                                     // A private page that posts the sign-in, keeping the link off the browser's command line
@@ -172,17 +321,35 @@ pub fn spawn(
                             }
                             ServerCommand::CreateInvite(req) => {
                                 let body = serde_json::to_string(&req).unwrap_or_default();
-                                on_event(ApiEvent::Invite(call(addr, "POST", "/server/invite", Some(&body), t)));
+                                on_event(ApiEvent::Invite(call(
+                                    addr,
+                                    "POST",
+                                    "/server/invite",
+                                    Some(&body),
+                                    t,
+                                )));
                                 on_event(ApiEvent::Server(call(addr, "GET", "/server", None, t)));
                             }
                             ServerCommand::Code { id, copy } => {
-                                let result = call::<InviteResponse>(addr, "POST", &format!("/server/invites/{id}/code"), Some("{}"), t);
-                                on_event(ApiEvent::Code { id, copy, result: result.map(|r| r.code) });
+                                let result = call::<InviteResponse>(
+                                    addr,
+                                    "POST",
+                                    &format!("/server/invites/{id}/code"),
+                                    Some("{}"),
+                                    t,
+                                );
+                                on_event(ApiEvent::Code {
+                                    id,
+                                    copy,
+                                    result: result.map(|r| r.code),
+                                });
                                 continue;
                             }
                             ServerCommand::Revoke(id) => {
                                 let path = format!("/server/invites/{id}/revoke");
-                                if let Err(e) = call::<serde_json::Value>(addr, "POST", &path, Some("{}"), t) {
+                                if let Err(e) =
+                                    call::<serde_json::Value>(addr, "POST", &path, Some("{}"), t)
+                                {
                                     on_event(ApiEvent::Server(Err(e)));
                                 }
                                 on_event(ApiEvent::Server(call(addr, "GET", "/server", None, t)));
@@ -190,19 +357,40 @@ pub fn spawn(
                             ServerCommand::Package { id, variant, dir } => {
                                 // Fetching an official client first can take minutes
                                 let path = format!("/server/invites/{id}/package/{variant}");
-                                on_event(ApiEvent::Saved(download(addr, &path, &dir, Duration::from_secs(600))));
+                                on_event(ApiEvent::Saved(download(
+                                    addr,
+                                    &path,
+                                    &dir,
+                                    Duration::from_secs(600),
+                                )));
                                 continue;
                             }
                         }
-                        on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));
+                        on_event(ApiEvent::Status(call(
+                            addr,
+                            "GET",
+                            "/status",
+                            None,
+                            Duration::from_secs(3),
+                        )));
                         continue;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 };
                 let failed = result.is_err();
-                on_event(ApiEvent::Action { origin, kind, result });
+                on_event(ApiEvent::Action {
+                    origin,
+                    kind,
+                    result,
+                });
                 if failed {
-                    on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));
+                    on_event(ApiEvent::Status(call(
+                        addr,
+                        "GET",
+                        "/status",
+                        None,
+                        Duration::from_secs(3),
+                    )));
                 }
             }
         })
@@ -212,12 +400,19 @@ pub fn spawn(
 
 /// POSTs `path` and saves the answer in `dir` under the name the daemon
 /// gives it, streaming (installers are tens of MiB)
-fn download(addr: SocketAddr, path: &str, dir: &Path, timeout: Duration) -> Result<PathBuf, String> {
+fn download(
+    addr: SocketAddr,
+    path: &str,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<PathBuf, String> {
     retail_proto::local::check_listener(addr)?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
         .map_err(|_| tr("retaild is not running").to_string())?;
     s.set_read_timeout(Some(timeout)).ok();
-    let token = retail_proto::local::read_token().map(|t| format!("X-Retail-Token: {t}\r\n")).unwrap_or_default();
+    let token = retail_proto::local::read_token()
+        .map(|t| format!("X-Retail-Token: {t}\r\n"))
+        .unwrap_or_default();
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Retail-Local: 1\r\n{token}Connection: close\r\nContent-Length: 0\r\n\r\n"
     );
@@ -232,7 +427,11 @@ fn download(addr: SocketAddr, path: &str, dir: &Path, timeout: Duration) -> Resu
         head.push(byte[0]);
     }
     let head = String::from_utf8_lossy(&head).to_string();
-    let code: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("malformed status line")?;
+    let code: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .ok_or("malformed status line")?;
     if !(200..300).contains(&code) {
         let mut body = Vec::new();
         s.take(1 << 16).read_to_end(&mut body).ok();
@@ -261,6 +460,32 @@ fn download(addr: SocketAddr, path: &str, dir: &Path, timeout: Duration) -> Resu
     Ok(dest)
 }
 
+/// A POST to the real daemon with no body, its answer left to read
+pub fn open_post(addr: SocketAddr, path: &str) -> Result<TcpStream, String> {
+    retail_proto::local::check_listener(addr)?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(800))
+        .map_err(|_| tr("retaild is not running").to_string())?;
+    let token = retail_proto::local::read_token()
+        .map(|t| {
+            format!(
+                "X-Retail-Token: {t}
+"
+            )
+        })
+        .unwrap_or_default();
+    let req = format!(
+        "POST {path} HTTP/1.1
+Host: 127.0.0.1
+X-Retail-Local: 1
+{token}Connection: close
+Content-Length: 0
+
+"
+    );
+    s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
 /// `name` in `dir`, or `name (2)` and so on if taken
 fn free_name(dir: &Path, name: &str) -> PathBuf {
     let (stem, ext) = match name.rsplit_once('.') {
@@ -268,14 +493,22 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
         None => (name.to_string(), String::new()),
     };
     (1..)
-        .map(|i| if i == 1 { dir.join(name) } else { dir.join(format!("{stem} ({i}){ext}")) })
+        .map(|i| {
+            if i == 1 {
+                dir.join(name)
+            } else {
+                dir.join(format!("{stem} ({i}){ext}"))
+            }
+        })
         .find(|p| !p.exists())
         .unwrap_or_else(|| dir.join(name))
 }
 
 /// The user's downloads folder, or the home folder
 pub fn downloads_dir() -> PathBuf {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     let d = home.join("Downloads");
     if d.is_dir() { d } else { home }
 }
@@ -295,7 +528,10 @@ pub fn reveal(file: &Path) {
         c.arg(file.parent().unwrap_or(file));
         c
     };
-    let _ = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    let _ = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// For threads other than the poller
@@ -303,12 +539,16 @@ pub fn status_blocking(addr: SocketAddr) -> Result<retail_proto::api::StatusResp
     call(addr, "GET", "/status", None, Duration::from_secs(3))
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn post_blocking(addr: SocketAddr, path: &str, body: &str) -> Result<(), String> {
     post_blocking_timeout(addr, path, body, Duration::from_secs(5))
 }
 
-pub fn post_blocking_timeout(addr: SocketAddr, path: &str, body: &str, timeout: Duration) -> Result<(), String> {
+pub fn post_blocking_timeout(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     call::<serde_json::Value>(addr, "POST", path, Some(body), timeout).map(|_| ())
 }
 
@@ -330,7 +570,9 @@ fn call<T: serde::de::DeserializeOwned>(
     s.set_write_timeout(Some(timeout)).ok();
     let body = body.unwrap_or("");
     // Read each time because the daemon writes a new token whenever it starts
-    let token = retail_proto::local::read_token().map(|t| format!("X-Retail-Token: {t}\r\n")).unwrap_or_default();
+    let token = retail_proto::local::read_token()
+        .map(|t| format!("X-Retail-Token: {t}\r\n"))
+        .unwrap_or_default();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Retail-Local: 1\r\n{token}Connection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -338,10 +580,19 @@ fn call<T: serde::de::DeserializeOwned>(
     );
     s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
-    s.take(1 << 20).read_to_end(&mut raw).map_err(|e| e.to_string())?;
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("malformed response")?;
+    s.take(1 << 20)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("malformed response")?;
     let head = String::from_utf8_lossy(&raw[..split]);
-    let code: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("malformed status line")?;
+    let code: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .ok_or("malformed status line")?;
     let body = &raw[split + 4..];
     if (200..300).contains(&code) {
         serde_json::from_slice(body).map_err(|e| format!("bad status JSON: {e}"))
@@ -365,15 +616,20 @@ fn open_browser(url: &str) {
         c.arg(url);
         c
     };
-    let _ = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    let _ = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// The daemon words its errors in English for logs and the CLI; the common
 /// ones are reworded and translated here, the rest shown as they are
 /// The daemon's error in the user's language: a known message, else why
 /// the server could not be reached (two lines), else as it came
-fn api_error(body: &[u8], code: u16) -> String {
-    let Ok(e) = serde_json::from_slice::<ApiError>(body) else { return format!("HTTP {code}") };
+pub fn api_error(body: &[u8], code: u16) -> String {
+    let Ok(e) = serde_json::from_slice::<ApiError>(body) else {
+        return format!("HTTP {code}");
+    };
     // A rejected auth key or a damaged code carries no reason
     match e.reason.and_then(crate::ui::reason_text) {
         Some((what, hint)) => format!("{what}\n{hint}"),
@@ -383,17 +639,44 @@ fn api_error(body: &[u8], code: u16) -> String {
 
 fn friendly(msg: String) -> String {
     let known: [(&str, &'static str); 9] = [
-        ("invalid, used or expired auth key", "The invite code or auth key is wrong, already used, or expired."),
-        ("too many attempts", "Too many attempts. Try again in a minute."),
-        ("not a retail invite code", "This is not a retail invite code. Paste a code that starts with retail1."),
-        ("the invite code is damaged", "The invite code is damaged. Copy and paste it again."),
-        ("the invite code is incomplete", "Only part of the invite code came through. Copy and paste it again."),
-        ("request timed out", "Could not reach the server. Check the server address and your network."),
-        ("connecting to", "Could not reach the server. Check the server address and your network."),
-        ("not allowed", "Permission denied. Run as administrator (on Linux, join the retail group)."),
+        (
+            "invalid, used or expired auth key",
+            "The invite code or auth key is wrong, already used, or expired.",
+        ),
+        (
+            "too many attempts",
+            "Too many attempts. Try again in a minute.",
+        ),
+        (
+            "not a retail invite code",
+            "This is not a retail invite code. Paste a code that starts with retail1.",
+        ),
+        (
+            "the invite code is damaged",
+            "The invite code is damaged. Copy and paste it again.",
+        ),
+        (
+            "the invite code is incomplete",
+            "Only part of the invite code came through. Copy and paste it again.",
+        ),
+        (
+            "request timed out",
+            "Could not reach the server. Check the server address and your network.",
+        ),
+        (
+            "connecting to",
+            "Could not reach the server. Check the server address and your network.",
+        ),
+        (
+            "not allowed",
+            "Permission denied. Run as administrator (on Linux, join the retail group).",
+        ),
         ("the server is not running", "The server is not running."),
     ];
-    known.iter().find(|(k, _)| msg.contains(k)).map_or(msg, |(_, en)| tr(en).to_string())
+    known
+        .iter()
+        .find(|(k, _)| msg.contains(k))
+        .map_or(msg, |(_, en)| tr(en).to_string())
 }
 
 #[cfg(test)]
@@ -402,13 +685,22 @@ mod tests {
 
     #[test]
     fn errors_say_why_the_server_was_not_reached() {
-        let _language = crate::i18n::tests::LANGUAGE.lock().unwrap_or_else(|e| e.into_inner());
+        let _language = crate::i18n::tests::LANGUAGE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::i18n::set(crate::i18n::LangPref::En);
         let timeout = br#"{"error":"contacting https://vpn.example.com: connecting to 203.0.113.5:443 timed out","reason":"timeout"}"#;
-        assert_eq!(api_error(timeout, 400), "No answer from the server\nThe network may block it, or the server is off");
+        assert_eq!(
+            api_error(timeout, 400),
+            "No answer from the server\nThe network may block it, or the server is off"
+        );
         // No reason: the known message
-        let key = br#"{"error":"registration rejected (HTTP 401): invalid, used or expired auth key"}"#;
-        assert_eq!(api_error(key, 400), "The invite code or auth key is wrong, already used, or expired.");
+        let key =
+            br#"{"error":"registration rejected (HTTP 401): invalid, used or expired auth key"}"#;
+        assert_eq!(
+            api_error(key, 400),
+            "The invite code or auth key is wrong, already used, or expired."
+        );
         assert_eq!(api_error(b"not json", 502), "HTTP 502");
     }
 }

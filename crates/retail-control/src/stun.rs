@@ -44,9 +44,16 @@ mod tests {
         let tx = [7u8; 12];
         let mut buf = [0u8; 512];
         for _ in 0..50 {
-            client.send_to(&stun::binding_request(&tx), ("127.0.0.1", port)).await.unwrap();
-            if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(100), client.recv(&mut buf)).await {
-                let (got_tx, addr) = stun::parse_binding_response(&buf[..n]).expect("binding response");
+            client
+                .send_to(&stun::binding_request(&tx), ("127.0.0.1", port))
+                .await
+                .unwrap();
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), client.recv(&mut buf))
+                    .await
+            {
+                let (got_tx, addr) =
+                    stun::parse_binding_response(&buf[..n]).expect("binding response");
                 assert_eq!(got_tx, tx);
                 assert_eq!(addr, client.local_addr().unwrap(), "reported as plain IPv4");
                 return;

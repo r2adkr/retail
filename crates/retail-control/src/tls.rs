@@ -31,14 +31,18 @@ pub fn self_signed(dir: &Path) -> Result<(Arc<ServerConfig>, [u8; 32])> {
         params.not_after = rcgen::date_time_ymd(2100, 1, 1);
         let cert = params.self_signed(&key)?;
         write_private(&key_path, key.serialize_pem().as_bytes())?;
-        std::fs::write(&cert_path, cert.pem()).with_context(|| format!("writing {}", cert_path.display()))?;
+        std::fs::write(&cert_path, cert.pem())
+            .with_context(|| format!("writing {}", cert_path.display()))?;
         tracing::info!("created the server certificate in {}", dir.display());
     }
-    let pem = std::fs::read_to_string(&key_path).with_context(|| format!("reading {}", key_path.display()))?;
+    let pem = std::fs::read_to_string(&key_path)
+        .with_context(|| format!("reading {}", key_path.display()))?;
     let key = rcgen::KeyPair::from_pem(&pem)?;
     let pin: [u8; 32] = Sha256::digest(key.public_key_der()).into();
     let resolver = Arc::new(StaticResolver(load_key(&cert_path, &key_path)?));
-    let mut config = ServerConfig::builder().with_no_client_auth().with_cert_resolver(resolver);
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok((Arc::new(config), pin))
 }
@@ -75,9 +79,14 @@ fn load_key(cert: &Path, key: &Path) -> Result<Arc<CertifiedKey>> {
     if chain.is_empty() {
         bail!("{} contains no certificates", cert.display());
     }
-    let key = PrivateKeyDer::from_pem_file(key).with_context(|| format!("reading {}", key.display()))?;
-    let provider = rustls::crypto::CryptoProvider::get_default().context("no TLS crypto provider installed")?;
-    let signing = provider.key_provider.load_private_key(key).context("unsupported private key")?;
+    let key =
+        PrivateKeyDer::from_pem_file(key).with_context(|| format!("reading {}", key.display()))?;
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .context("no TLS crypto provider installed")?;
+    let signing = provider
+        .key_provider
+        .load_private_key(key)
+        .context("unsupported private key")?;
     Ok(Arc::new(CertifiedKey::new(chain, signing)))
 }
 
@@ -108,7 +117,11 @@ pub enum Conn {
 }
 
 impl AsyncRead for Conn {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Conn::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
             Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
@@ -117,7 +130,11 @@ impl AsyncRead for Conn {
 }
 
 impl AsyncWrite for Conn {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
             Conn::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
             Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
@@ -162,7 +179,10 @@ impl TlsListener {
         config: Arc<ServerConfig>,
         reality: Option<Arc<crate::reality::ServerConfig>>,
     ) -> Result<Self> {
-        let local = listeners.first().context("no listening socket")?.local_addr()?;
+        let local = listeners
+            .first()
+            .context("no listening socket")?
+            .local_addr()?;
         let acceptor = TlsAcceptor::from(config);
         let replay = Arc::new(crate::reality::ReplayGuard::default());
         let camouflage = Arc::new(tokio::sync::Semaphore::new(MAX_CAMOUFLAGE));
@@ -177,7 +197,11 @@ impl TlsListener {
                         Ok((stream, peer)) => {
                             let _ = stream.set_nodelay(true);
                             retail_proto::relay::tune(&stream);
-                            if raw_tx.send((Box::new(retail_proto::relay::paced(stream)), peer)).await.is_err() {
+                            if raw_tx
+                                .send((Box::new(retail_proto::relay::paced(stream)), peer))
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -192,12 +216,17 @@ impl TlsListener {
         tasks.push(tokio::spawn(async move {
             while let Some((stream, peer)) = raw_rx.recv().await {
                 let (acceptor, tx) = (acceptor.clone(), tx.clone());
-                let (reality, replay, camouflage) = (reality.clone(), replay.clone(), camouflage.clone());
+                let (reality, replay, camouflage) =
+                    (reality.clone(), replay.clone(), camouflage.clone());
                 tokio::spawn(async move {
                     let handshake = async move {
                         let mut stream = stream;
                         let (prefix, hello) = read_client_hello(&mut stream).await?;
-                        let io = Prefixed { prefix, at: 0, inner: stream };
+                        let io = Prefixed {
+                            prefix,
+                            at: 0,
+                            inner: stream,
+                        };
                         let Some(hello) = hello else {
                             return Ok(looks_like_http(&io.prefix).then_some(Conn::Plain(io)));
                         };
@@ -206,13 +235,18 @@ impl TlsListener {
                             None => crate::reality::Decision::Normal,
                         };
                         match decision {
-                            crate::reality::Decision::Normal => Ok(Some(Conn::Tls(Box::new(small_buffer(acceptor.accept(io).await?))))),
+                            crate::reality::Decision::Normal => Ok(Some(Conn::Tls(Box::new(
+                                small_buffer(acceptor.accept(io).await?),
+                            )))),
                             crate::reality::Decision::Reality { auth } => {
                                 let config = reality_tls_config(&auth)?;
-                                Ok(Some(Conn::Tls(Box::new(small_buffer(TlsAcceptor::from(config).accept(io).await?)))))
+                                Ok(Some(Conn::Tls(Box::new(small_buffer(
+                                    TlsAcceptor::from(config).accept(io).await?,
+                                )))))
                             }
                             crate::reality::Decision::Camouflage => {
-                                let dest = reality.as_ref().map(|r| r.dest.clone()).unwrap_or_default();
+                                let dest =
+                                    reality.as_ref().map(|r| r.dest.clone()).unwrap_or_default();
                                 if let Ok(permit) = camouflage.try_acquire_owned() {
                                     tokio::spawn(async move {
                                         splice(io, &dest).await;
@@ -227,7 +261,15 @@ impl TlsListener {
                     match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
                         Ok(Ok(Some(conn))) => {
                             let secure = matches!(conn, Conn::Tls(_));
-                            let _ = tx.send((conn, ConnInfo { addr: canonical(peer), secure })).await;
+                            let _ = tx
+                                .send((
+                                    conn,
+                                    ConnInfo {
+                                        addr: canonical(peer),
+                                        secure,
+                                    },
+                                ))
+                                .await;
                         }
                         Ok(Ok(None)) => {}
                         Ok(Err(e)) => tracing::debug!(%peer, "handshake failed: {e:#}"),
@@ -236,7 +278,15 @@ impl TlsListener {
                 });
             }
         }));
-        Ok(TlsListener { rx, local: ConnInfo { addr: local, secure: true }, inject: raw_tx, tasks })
+        Ok(TlsListener {
+            rx,
+            local: ConnInfo {
+                addr: local,
+                secure: true,
+            },
+            inject: raw_tx,
+            tasks,
+        })
     }
 
     pub fn injector(&self) -> Injector {
@@ -246,14 +296,19 @@ impl TlsListener {
 
 /// An HTTP/1 request line starts with an upper-case method
 fn looks_like_http(prefix: &[u8]) -> bool {
-    prefix.len() >= 4 && prefix[..4].iter().all(|b| b.is_ascii_uppercase() || *b == b' ')
+    prefix.len() >= 4
+        && prefix[..4]
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || *b == b' ')
 }
 
 /// Reads raw TLS records up to the end of the first handshake message, before
 /// rustls sees the connection, so REALITY can still hand it to the camouflage
 /// site untouched. Returns the bytes read, to replay, and the message if the
 /// first record is a handshake.
-pub(crate) async fn read_client_hello<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+pub(crate) async fn read_client_hello<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     let mut raw = Vec::with_capacity(2048);
     let mut msg = Vec::new();
     loop {
@@ -297,14 +352,19 @@ fn reality_tls_config(auth: &[u8; 32]) -> Result<Arc<ServerConfig>> {
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_no_client_auth()
-        .with_single_cert(vec![CertificateDer::from(der)], PrivateKeyDer::try_from(key.serialize_der()).map_err(anyhow::Error::msg)?)?;
+        .with_single_cert(
+            vec![CertificateDer::from(der)],
+            PrivateKeyDer::try_from(key.serialize_der()).map_err(anyhow::Error::msg)?,
+        )?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }
 
 /// Hands a probe to the real website, ClientHello included
 async fn splice(mut io: Prefixed, dest: &str) {
-    let Ok(Ok(mut upstream)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(dest)).await else {
+    let Ok(Ok(mut upstream)) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(dest)).await
+    else {
         return;
     };
     let prefix = std::mem::take(&mut io.prefix);
@@ -323,12 +383,20 @@ pub struct Prefixed {
 
 impl Prefixed {
     pub fn new(prefix: Vec<u8>, inner: BoxIo) -> Self {
-        Prefixed { prefix, at: 0, inner }
+        Prefixed {
+            prefix,
+            at: 0,
+            inner,
+        }
     }
 }
 
 impl AsyncRead for Prefixed {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         if self.at < self.prefix.len() {
             let n = (self.prefix.len() - self.at).min(buf.remaining());
             let at = self.at;
@@ -345,7 +413,11 @@ impl AsyncRead for Prefixed {
 }
 
 impl AsyncWrite for Prefixed {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -385,7 +457,9 @@ pub struct ConnInfo {
 #[derive(Clone, Copy, Debug)]
 pub struct PeerAddr(pub SocketAddr, pub bool);
 
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>> for PeerAddr {
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
+    for PeerAddr
+{
     fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
         let info = stream.remote_addr();
         PeerAddr(info.addr, info.secure)
@@ -393,7 +467,9 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsL
 }
 
 /// Test servers without TLS allow everything
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpListener>> for PeerAddr {
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpListener>>
+    for PeerAddr
+{
     fn connect_info(stream: axum::serve::IncomingStream<'_, TcpListener>) -> Self {
         PeerAddr(canonical(*stream.remote_addr()), true)
     }
@@ -404,7 +480,11 @@ fn canonical(addr: SocketAddr) -> SocketAddr {
 }
 
 /// Relay frames wait in the socket, not in TLS (`relay::TLS_BUFFER`)
-pub fn small_buffer<IO>(mut s: tokio_rustls::server::TlsStream<IO>) -> tokio_rustls::server::TlsStream<IO> {
-    s.get_mut().1.set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
+pub fn small_buffer<IO>(
+    mut s: tokio_rustls::server::TlsStream<IO>,
+) -> tokio_rustls::server::TlsStream<IO> {
+    s.get_mut()
+        .1
+        .set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
     s
 }

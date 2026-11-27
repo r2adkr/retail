@@ -42,9 +42,17 @@ pub struct Mapping {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Method {
     /// The nonce identifies the mappings for renewal and removal
-    Pcp { gateway: Ipv4Addr, nonce: [u8; 12] },
-    NatPmp { gateway: Ipv4Addr },
-    Upnp { control: String, service: String },
+    Pcp {
+        gateway: Ipv4Addr,
+        nonce: [u8; 12],
+    },
+    NatPmp {
+        gateway: Ipv4Addr,
+    },
+    Upnp {
+        control: String,
+        service: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,7 +64,10 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn external(&self, proto: Proto, internal: u16) -> Option<u16> {
-        self.mappings.iter().find(|m| m.proto == proto && m.internal == internal).map(|m| m.external)
+        self.mappings
+            .iter()
+            .find(|m| m.proto == proto && m.internal == internal)
+            .map(|m| m.external)
     }
 
     pub fn method_name(&self) -> &'static str {
@@ -81,7 +92,10 @@ fn ports_of(o: &Outcome) -> Vec<(Proto, u16)> {
 }
 
 fn read_record(path: &std::path::Path) -> Vec<Outcome> {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 /// Adds `o` to the record, or with `remove` takes it out
@@ -94,7 +108,13 @@ fn note(o: &Outcome, remove: bool) {
         all.push(o.clone());
     }
     let result = if all.is_empty() {
-        std::fs::remove_file(path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+        std::fs::remove_file(path).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
     } else {
         std::fs::write(path, serde_json::to_vec(&all).unwrap_or_default())
     };
@@ -111,7 +131,10 @@ pub async fn init(state_dir: &std::path::Path) {
     if stale.is_empty() {
         return;
     }
-    tracing::info!("removing {} router port mapping(s) left from the last run", stale.len());
+    tracing::info!(
+        "removing {} router port mapping(s) left from the last run",
+        stale.len()
+    );
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         for o in &stale {
             close(o).await;
@@ -140,7 +163,9 @@ async fn open_new(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
         Ok(o) => return Ok(o),
         Err(e) => tracing::debug!("NAT-PMP: {e:#}"),
     }
-    upnp_open(ports, required).await.context("the router answered none of PCP, NAT-PMP and UPnP")
+    upnp_open(ports, required)
+        .await
+        .context("the router answered none of PCP, NAT-PMP and UPnP")
 }
 
 /// The router's internet address, asked without opening anything: for a
@@ -148,15 +173,23 @@ async fn open_new(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
 pub async fn router_ip() -> Option<IpAddr> {
     let gateway = default_gateway()?;
     if let Ok(resp) = natpmp_request(gateway, &[0, 0], 12).await {
-        return Some(IpAddr::V4(Ipv4Addr::new(resp[8], resp[9], resp[10], resp[11])));
+        return Some(IpAddr::V4(Ipv4Addr::new(
+            resp[8], resp[9], resp[10], resp[11],
+        )));
     }
     let (control, service, _) = discover().await.ok()?;
-    let body = soap(&control, &service, "GetExternalIPAddress", "").await.ok()?;
+    let body = soap(&control, &service, "GetExternalIPAddress", "")
+        .await
+        .ok()?;
     tag(&body, "NewExternalIPAddress").and_then(|s| s.trim().parse().ok())
 }
 
 pub async fn renew(outcome: &Outcome, required: usize) -> Result<Outcome> {
-    let ports: Vec<(Proto, u16)> = outcome.mappings.iter().map(|m| (m.proto, m.internal)).collect();
+    let ports: Vec<(Proto, u16)> = outcome
+        .mappings
+        .iter()
+        .map(|m| (m.proto, m.internal))
+        .collect();
     let o = match &outcome.method {
         Method::Pcp { gateway, nonce } => pcp_open(*gateway, *nonce, &ports, required).await,
         Method::NatPmp { gateway } => natpmp_open(*gateway, &ports, required).await,
@@ -175,7 +208,15 @@ async fn close_on_router(outcome: &Outcome) {
     match &outcome.method {
         Method::Pcp { gateway, nonce } => {
             for m in &outcome.mappings {
-                let _ = pcp_map(*gateway, *nonce, m.proto, m.internal, m.external, Duration::ZERO).await;
+                let _ = pcp_map(
+                    *gateway,
+                    *nonce,
+                    m.proto,
+                    m.internal,
+                    m.external,
+                    Duration::ZERO,
+                )
+                .await;
             }
         }
         Method::NatPmp { gateway } => {
@@ -183,7 +224,9 @@ async fn close_on_router(outcome: &Outcome) {
                 let _ = natpmp_map(*gateway, m.proto, m.internal, 0, Duration::ZERO).await;
             }
         }
-        Method::Upnp { control, service, .. } => {
+        Method::Upnp {
+            control, service, ..
+        } => {
             for m in &outcome.mappings {
                 let args = format!(
                     "<NewRemoteHost></NewRemoteHost><NewExternalPort>{}</NewExternalPort><NewProtocol>{}</NewProtocol>",
@@ -201,9 +244,15 @@ async fn close_on_router(outcome: &Outcome) {
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() || retail_proto::in_mesh(v4)
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || retail_proto::in_mesh(v4)
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
     }
 }
 
@@ -216,7 +265,8 @@ async fn pcp_map(
     external: u16,
     lease: Duration,
 ) -> Result<(u16, IpAddr)> {
-    let local = local_ipv4_towards(IpAddr::V4(gateway)).context("no local address towards the router")?;
+    let local =
+        local_ipv4_towards(IpAddr::V4(gateway)).context("no local address towards the router")?;
     let mut req = vec![2, 1, 0, 0];
     req.extend_from_slice(&(lease.as_secs() as u32).to_be_bytes());
     req.extend_from_slice(&local.to_ipv6_mapped().octets());
@@ -234,7 +284,9 @@ async fn pcp_map(
     let mut buf = [0u8; 1100];
     for wait in [250u64, 500] {
         sock.send(&req).await?;
-        let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(wait), sock.recv(&mut buf)).await else {
+        let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(wait), sock.recv(&mut buf)).await
+        else {
             continue;
         };
         if n >= 2 && buf[0] != 2 {
@@ -255,23 +307,41 @@ async fn pcp_map(
     bail!("no PCP answer from {gateway}")
 }
 
-async fn pcp_open(gateway: Ipv4Addr, nonce: [u8; 12], ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
+async fn pcp_open(
+    gateway: Ipv4Addr,
+    nonce: [u8; 12],
+    ports: &[(Proto, u16)],
+    required: usize,
+) -> Result<Outcome> {
     let mut mappings = Vec::new();
     let mut external_ip = None;
     for (i, &(proto, internal)) in ports.iter().enumerate() {
         match pcp_map(gateway, nonce, proto, internal, internal, LEASE).await {
             Ok((external, ip)) => {
                 external_ip = Some(ip);
-                mappings.push(Mapping { proto, internal, external });
+                mappings.push(Mapping {
+                    proto,
+                    internal,
+                    external,
+                });
             }
             Err(e) if i < required => {
-                undo(Outcome { method: Method::Pcp { gateway, nonce }, external_ip, mappings }).await;
+                undo(Outcome {
+                    method: Method::Pcp { gateway, nonce },
+                    external_ip,
+                    mappings,
+                })
+                .await;
                 return Err(e);
             }
             Err(e) => tracing::debug!(internal, "optional port not mapped: {e:#}"),
         }
     }
-    Ok(Outcome { method: Method::Pcp { gateway, nonce }, external_ip, mappings })
+    Ok(Outcome {
+        method: Method::Pcp { gateway, nonce },
+        external_ip,
+        mappings,
+    })
 }
 
 async fn natpmp_request(gateway: Ipv4Addr, req: &[u8], expect: usize) -> Result<Vec<u8>> {
@@ -281,7 +351,8 @@ async fn natpmp_request(gateway: Ipv4Addr, req: &[u8], expect: usize) -> Result<
     // RFC 6886 retransmits from 250 ms, doubling, and two tries keep a silent router cheap
     for wait in [250u64, 500] {
         sock.send(req).await?;
-        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(wait), sock.recv(&mut buf)).await
+        if let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(wait), sock.recv(&mut buf)).await
             && n >= expect
             && buf[0] == 0
             && buf[1] == req[1] | 0x80
@@ -296,7 +367,13 @@ async fn natpmp_request(gateway: Ipv4Addr, req: &[u8], expect: usize) -> Result<
     bail!("no NAT-PMP answer from {gateway}")
 }
 
-async fn natpmp_map(gateway: Ipv4Addr, proto: Proto, internal: u16, external: u16, lease: Duration) -> Result<u16> {
+async fn natpmp_map(
+    gateway: Ipv4Addr,
+    proto: Proto,
+    internal: u16,
+    external: u16,
+    lease: Duration,
+) -> Result<u16> {
     let op = match proto {
         Proto::Udp => 1,
         Proto::Tcp => 2,
@@ -309,21 +386,38 @@ async fn natpmp_map(gateway: Ipv4Addr, proto: Proto, internal: u16, external: u1
     Ok(u16::from_be_bytes([resp[10], resp[11]]))
 }
 
-async fn natpmp_open(gateway: Ipv4Addr, ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
+async fn natpmp_open(
+    gateway: Ipv4Addr,
+    ports: &[(Proto, u16)],
+    required: usize,
+) -> Result<Outcome> {
     let resp = natpmp_request(gateway, &[0, 0], 12).await?;
     let external_ip = IpAddr::V4(Ipv4Addr::new(resp[8], resp[9], resp[10], resp[11]));
     let mut mappings = Vec::new();
     for (i, &(proto, internal)) in ports.iter().enumerate() {
         match natpmp_map(gateway, proto, internal, internal, LEASE).await {
-            Ok(external) => mappings.push(Mapping { proto, internal, external }),
+            Ok(external) => mappings.push(Mapping {
+                proto,
+                internal,
+                external,
+            }),
             Err(e) if i < required => {
-                undo(Outcome { method: Method::NatPmp { gateway }, external_ip: Some(external_ip), mappings }).await;
+                undo(Outcome {
+                    method: Method::NatPmp { gateway },
+                    external_ip: Some(external_ip),
+                    mappings,
+                })
+                .await;
                 return Err(e);
             }
             Err(e) => tracing::debug!(internal, "optional port not mapped: {e:#}"),
         }
     }
-    Ok(Outcome { method: Method::NatPmp { gateway }, external_ip: Some(external_ip), mappings })
+    Ok(Outcome {
+        method: Method::NatPmp { gateway },
+        external_ip: Some(external_ip),
+        mappings,
+    })
 }
 
 const SERVICES: [&str; 3] = [
@@ -341,15 +435,28 @@ async fn upnp_open(ports: &[(Proto, u16)], required: usize) -> Result<Outcome> {
     let mut mappings = Vec::new();
     for (i, &(proto, internal)) in ports.iter().enumerate() {
         match upnp_map(&control, &service, local, proto, internal).await {
-            Ok(external) => mappings.push(Mapping { proto, internal, external }),
+            Ok(external) => mappings.push(Mapping {
+                proto,
+                internal,
+                external,
+            }),
             Err(e) if i < required => {
-                undo(Outcome { method: Method::Upnp { control, service }, external_ip, mappings }).await;
+                undo(Outcome {
+                    method: Method::Upnp { control, service },
+                    external_ip,
+                    mappings,
+                })
+                .await;
                 return Err(e);
             }
             Err(e) => tracing::debug!(internal, "optional port not mapped: {e:#}"),
         }
     }
-    Ok(Outcome { method: Method::Upnp { control, service }, external_ip, mappings })
+    Ok(Outcome {
+        method: Method::Upnp { control, service },
+        external_ip,
+        mappings,
+    })
 }
 
 /// What a failed open got before a required port failed: nothing would
@@ -360,12 +467,22 @@ async fn undo(partial: Outcome) {
     }
 }
 
-async fn upnp_map(control: &str, service: &str, local: Ipv4Addr, proto: Proto, internal: u16) -> Result<u16> {
+async fn upnp_map(
+    control: &str,
+    service: &str,
+    local: Ipv4Addr,
+    proto: Proto,
+    internal: u16,
+) -> Result<u16> {
     let mut lease = LEASE.as_secs();
     let mut last = None;
     for attempt in 0..6u16 {
         // The same port first, then others above the privileged range
-        let external = if attempt == 0 { internal } else { 1024 + internal.wrapping_add(attempt * 1000) % 64000 };
+        let external = if attempt == 0 {
+            internal
+        } else {
+            1024 + internal.wrapping_add(attempt * 1000) % 64000
+        };
         let args = format!(
             "<NewRemoteHost></NewRemoteHost><NewExternalPort>{external}</NewExternalPort><NewProtocol>{}</NewProtocol>\
              <NewInternalPort>{internal}</NewInternalPort><NewInternalClient>{local}</NewInternalClient>\
@@ -402,21 +519,30 @@ async fn discover() -> Result<(String, String, Ipv4Addr)> {
     let mut buf = [0u8; 2048];
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
     let gateway = default_gateway();
-    while let Ok(Ok((n, from))) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
+    while let Ok(Ok((n, from))) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await
+    {
         // Any device on the LAN can answer; only the router counts
         if gateway.is_some_and(|gw| from.ip() != IpAddr::V4(gw)) {
             continue;
         }
         let text = String::from_utf8_lossy(&buf[..n]);
-        let Some(location) = header(&text, "location") else { continue };
+        let Some(location) = header(&text, "location") else {
+            continue;
+        };
         // Only follow descriptions served by the device that answered
-        let Some((host, port, path)) = split_http_url(&location) else { continue };
+        let Some((host, port, path)) = split_http_url(&location) else {
+            continue;
+        };
         if host.parse::<IpAddr>().ok() != Some(from.ip()) {
             continue;
         }
         match description(host, port, &path).await {
             Ok((control, service)) => {
-                let control = if control.starts_with("http://") { control } else { format!("http://{host}:{port}{}", absolute(&control)) };
+                let control = if control.starts_with("http://") {
+                    control
+                } else {
+                    format!("http://{host}:{port}{}", absolute(&control))
+                };
                 // The control URL may not send us to another host
                 if split_http_url(&control).is_none_or(|(h, _, _)| h != host) {
                     continue;
@@ -431,7 +557,12 @@ async fn discover() -> Result<(String, String, Ipv4Addr)> {
 }
 
 async fn description(host: &str, port: u16, path: &str) -> Result<(String, String)> {
-    let body = http(host, port, &format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n")).await?;
+    let body = http(
+        host,
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"),
+    )
+    .await?;
     for service in SERVICES {
         if let Some(at) = body.find(service) {
             let rest = &body[at..];
@@ -470,7 +601,9 @@ async fn http(host: &str, port: u16, request: &str) -> Result<String> {
         (&mut s).take(MAX_HTTP as u64).read_to_end(&mut raw).await?;
         anyhow::Ok(raw)
     };
-    let raw = tokio::time::timeout(HTTP_TIMEOUT, exchange).await.context("router did not answer")??;
+    let raw = tokio::time::timeout(HTTP_TIMEOUT, exchange)
+        .await
+        .context("router did not answer")??;
     let resp = crate::http::parse_response(&raw)?;
     let body = String::from_utf8_lossy(&resp.body).into_owned();
     if resp.status >= 400 && !body.contains("errorCode") {
@@ -482,7 +615,9 @@ async fn http(host: &str, port: u16, request: &str) -> Result<String> {
 fn header(text: &str, name: &str) -> Option<String> {
     text.lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
-        k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_string())
     })
 }
 
@@ -495,7 +630,11 @@ fn tag<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn absolute(path: &str) -> String {
-    if path.starts_with('/') { path.to_string() } else { format!("/{path}") }
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
 }
 
 fn split_http_url(url: &str) -> Option<(&str, u16, String)> {
@@ -548,7 +687,10 @@ pub fn default_gateway() -> Option<Ipv4Addr> {
 
 #[cfg(target_os = "macos")]
 pub fn default_gateway() -> Option<Ipv4Addr> {
-    let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
+    let out = std::process::Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()?;
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.trim().strip_prefix("gateway:"))
@@ -569,30 +711,58 @@ mod tests {
     #[tokio::test]
     async fn stale_mappings_are_removed_at_start() {
         let router = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let control = format!("http://127.0.0.1:{}/ctl", router.local_addr().unwrap().port());
+        let control = format!(
+            "http://127.0.0.1:{}/ctl",
+            router.local_addr().unwrap().port()
+        );
         let deleted = tokio::spawn(async move {
             let mut got = Vec::new();
-            while let Ok(Ok((mut s, _))) = tokio::time::timeout(Duration::from_secs(2), router.accept()).await {
+            while let Ok(Ok((mut s, _))) =
+                tokio::time::timeout(Duration::from_secs(2), router.accept()).await
+            {
                 let mut buf = vec![0u8; 8192];
                 let n = s.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
                 if req.contains("DeletePortMapping") {
                     got.push(tag(&req, "NewExternalPort").unwrap_or_default().to_string());
                 }
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
             }
             got
         });
         let dir = std::env::temp_dir().join(format!("retail-portmap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let left = Outcome {
-            method: Method::Upnp { control, service: "urn:schemas-upnp-org:service:WANIPConnection:1".into() },
+            method: Method::Upnp {
+                control,
+                service: "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
+            },
             external_ip: None,
-            mappings: vec![Mapping { proto: Proto::Tcp, internal: 443, external: 443 }, Mapping { proto: Proto::Udp, internal: 3478, external: 3478 }],
+            mappings: vec![
+                Mapping {
+                    proto: Proto::Tcp,
+                    internal: 443,
+                    external: 443,
+                },
+                Mapping {
+                    proto: Proto::Udp,
+                    internal: 3478,
+                    external: 3478,
+                },
+            ],
         };
-        std::fs::write(dir.join("portmaps.json"), serde_json::to_vec(&vec![left.clone()]).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("portmaps.json"),
+            serde_json::to_vec(&vec![left.clone()]).unwrap(),
+        )
+        .unwrap();
         init(&dir).await;
-        assert!(!dir.join("portmaps.json").exists(), "the record is cleared once removed");
+        assert!(
+            !dir.join("portmaps.json").exists(),
+            "the record is cleared once removed"
+        );
         assert_eq!(deleted.await.unwrap(), ["443", "3478"]);
         // Recorded while open, gone after a clean close
         note(&left, false);
@@ -606,10 +776,20 @@ mod tests {
     #[test]
     fn parsing_router_answers() {
         let ssdp = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLocation: http://192.168.1.1:5000/rootDesc.xml\r\n\r\n";
-        assert_eq!(header(ssdp, "location").as_deref(), Some("http://192.168.1.1:5000/rootDesc.xml"));
-        assert_eq!(split_http_url("http://192.168.1.1:5000/ctl/IPConn"), Some(("192.168.1.1", 5000, "/ctl/IPConn".into())));
-        assert_eq!(split_http_url("http://10.0.0.1"), Some(("10.0.0.1", 80, "/".into())));
-        let xml = "<s:Body><u:R><NewExternalIPAddress>203.0.113.9</NewExternalIPAddress></u:R></s:Body>";
+        assert_eq!(
+            header(ssdp, "location").as_deref(),
+            Some("http://192.168.1.1:5000/rootDesc.xml")
+        );
+        assert_eq!(
+            split_http_url("http://192.168.1.1:5000/ctl/IPConn"),
+            Some(("192.168.1.1", 5000, "/ctl/IPConn".into()))
+        );
+        assert_eq!(
+            split_http_url("http://10.0.0.1"),
+            Some(("10.0.0.1", 80, "/".into()))
+        );
+        let xml =
+            "<s:Body><u:R><NewExternalIPAddress>203.0.113.9</NewExternalIPAddress></u:R></s:Body>";
         assert_eq!(tag(xml, "NewExternalIPAddress"), Some("203.0.113.9"));
         assert!(is_private("100.64.1.2".parse().unwrap()), "CGNAT");
         assert!(is_private("192.168.0.1".parse().unwrap()));

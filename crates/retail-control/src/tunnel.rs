@@ -59,8 +59,15 @@ fn real_peer(peer: PeerAddr, headers: &HeaderMap) -> PeerAddr {
     if !peer.0.ip().is_loopback() {
         return peer;
     }
-    match headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {
-        Some(ip) => PeerAddr(std::net::SocketAddr::new(ip.to_canonical(), peer.0.port()), peer.1),
+    match headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok())
+    {
+        Some(ip) => PeerAddr(
+            std::net::SocketAddr::new(ip.to_canonical(), peer.0.port()),
+            peer.1,
+        ),
         None => peer,
     }
 }
@@ -100,7 +107,10 @@ impl Websockets {
         }
         self.next += 1;
         let close = Arc::new(tokio::sync::Notify::new());
-        self.by_ip.entry(ip).or_default().push((self.next, close.clone()));
+        self.by_ip
+            .entry(ip)
+            .or_default()
+            .push((self.next, close.clone()));
         Some((self.next, close))
     }
 
@@ -120,7 +130,11 @@ struct WebsocketSlot(std::net::IpAddr, u64);
 impl WebsocketSlot {
     fn take(ip: std::net::IpAddr) -> Option<(Self, Arc<tokio::sync::Notify>)> {
         let ip = same_network(ip);
-        let (id, close) = WEBSOCKETS.lock().unwrap().get_or_insert_with(Default::default).admit(ip)?;
+        let (id, close) = WEBSOCKETS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(Default::default)
+            .admit(ip)?;
         Some((WebsocketSlot(ip, id), close))
     }
 }
@@ -146,7 +160,10 @@ pub async fn websocket(
     let Some((slot, close)) = WebsocketSlot::take(peer.0.ip()) else {
         return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
     };
-    let ws = ws.max_message_size(MAX_MESSAGE).max_frame_size(MAX_MESSAGE).read_buffer_size(PIPE);
+    let ws = ws
+        .max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .read_buffer_size(PIPE);
     ws.on_upgrade(move |socket| async move {
         let _slot = slot;
         if let Some(pipe) = open(&state, peer).await {
@@ -183,7 +200,11 @@ async fn pump(socket: WebSocket, pipe: DuplexStream) {
             match tokio::time::timeout(WEBSOCKET_IDLE, pipe_rx.read(&mut buf)).await {
                 Ok(Ok(0) | Err(_)) | Err(_) => break,
                 Ok(Ok(n)) => {
-                    if tx.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                    if tx
+                        .send(Message::Binary(Bytes::copy_from_slice(&buf[..n])))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -198,12 +219,21 @@ async fn pump(socket: WebSocket, pipe: DuplexStream) {
     }
 }
 
-pub async fn poll_open(State(state): State<AppState>, ConnectInfo(peer): ConnectInfo<PeerAddr>, headers: HeaderMap) -> Response {
+pub async fn poll_open(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<PeerAddr>,
+    headers: HeaderMap,
+) -> Response {
     let peer = real_peer(peer, &headers);
     let mine = same_network(peer.0.ip());
     let full = |polls: &mut std::collections::HashMap<String, Arc<PollSession>>| {
         polls.retain(|_, s| s.touched.lock().unwrap().elapsed() < POLL_IDLE);
-        polls.len() >= MAX_POLL_SESSIONS || polls.values().filter(|s| same_network(s.ip) == mine).count() >= MAX_POLL_SESSIONS_PER_IP
+        polls.len() >= MAX_POLL_SESSIONS
+            || polls
+                .values()
+                .filter(|s| same_network(s.ip) == mine)
+                .count()
+                >= MAX_POLL_SESSIONS_PER_IP
     };
     if full(&mut state.polls().lock().unwrap()) {
         return no_store(StatusCode::SERVICE_UNAVAILABLE, "busy");
@@ -267,7 +297,11 @@ pub async fn poll_down(State(state): State<AppState>, Path(id): Path<String>) ->
     }
 }
 
-pub async fn poll_up(State(state): State<AppState>, Path(id): Path<String>, body: Bytes) -> Response {
+pub async fn poll_up(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
     let Some(s) = session(&state, &id) else {
         return no_store(StatusCode::NOT_FOUND, "");
     };
@@ -291,9 +325,14 @@ mod tests {
     #[test]
     fn websocket_tunnels_are_capped_per_network() {
         let ip = |i: u16| std::net::IpAddr::from([0x2001, 0xdb8, 0, 7, 0, 0, 0, i]);
-        let held: Vec<_> = (0..MAX_WEBSOCKETS_PER_IP).map(|i| WebsocketSlot::take(ip(i as u16)).unwrap()).collect();
+        let held: Vec<_> = (0..MAX_WEBSOCKETS_PER_IP)
+            .map(|i| WebsocketSlot::take(ip(i as u16)).unwrap())
+            .collect();
         assert_eq!(held.len(), MAX_WEBSOCKETS_PER_IP);
-        assert!(WebsocketSlot::take(ip(999)).is_none(), "the rest of the /64 is the same source");
+        assert!(
+            WebsocketSlot::take(ip(999)).is_none(),
+            "the rest of the /64 is the same source"
+        );
         let other = WebsocketSlot::take("198.51.100.1".parse().unwrap());
         assert!(other.is_some());
         drop(held);
@@ -313,14 +352,32 @@ mod tests {
         }
         assert!(w.admit(net(0)).is_none());
         let honest = "198.51.100.1".parse().unwrap();
-        assert!(w.admit(honest).is_some(), "takes the oldest tunnel of a large holder");
-        let (&holder, _) = w.by_ip.iter().find(|(_, v)| v.len() == MAX_WEBSOCKETS_PER_IP - 1).unwrap();
+        assert!(
+            w.admit(honest).is_some(),
+            "takes the oldest tunnel of a large holder"
+        );
+        let (&holder, _) = w
+            .by_ip
+            .iter()
+            .find(|(_, v)| v.len() == MAX_WEBSOCKETS_PER_IP - 1)
+            .unwrap();
         let evicted = handles[&holder].1.clone();
-        assert!(tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(async {
-            tokio::time::timeout(Duration::from_millis(10), evicted.notified()).await.is_ok()
-        }));
+        assert!(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_millis(10), evicted.notified())
+                        .await
+                        .is_ok()
+                })
+        );
         assert!(w.admit(holder).is_none(), "the holder cannot take it back");
-        assert_eq!(w.by_ip.values().map(Vec::len).sum::<usize>(), MAX_WEBSOCKETS);
+        assert_eq!(
+            w.by_ip.values().map(Vec::len).sum::<usize>(),
+            MAX_WEBSOCKETS
+        );
     }
 
     #[test]
@@ -334,7 +391,10 @@ mod tests {
         assert_eq!(real_peer(remote, &h).0, "203.0.113.9:5000".parse().unwrap());
         // Missing or malformed: the peer as it is
         let local = PeerAddr("127.0.0.1:5000".parse().unwrap(), false);
-        assert_eq!(real_peer(local, &HeaderMap::new()).0.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(
+            real_peer(local, &HeaderMap::new()).0.ip(),
+            std::net::IpAddr::from([127, 0, 0, 1])
+        );
         h.insert("cf-connecting-ip", "nonsense".parse().unwrap());
         let local = PeerAddr("[::1]:5000".parse().unwrap(), false);
         assert!(real_peer(local, &h).0.ip().is_loopback());

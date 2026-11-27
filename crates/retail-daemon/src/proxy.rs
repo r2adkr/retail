@@ -87,7 +87,14 @@ impl Proxy {
             Kind::Http => 8080,
             Kind::Socks5 => 1080,
         });
-        Some(Proxy { kind, host: host.to_string(), port, auth, sign_in: false, owner: None })
+        Some(Proxy {
+            kind,
+            host: host.to_string(),
+            port,
+            auth,
+            sign_in: false,
+            owner: None,
+        })
     }
 
     /// For logs and status, without the password
@@ -109,20 +116,35 @@ impl Proxy {
         match self.kind {
             Kind::Socks5 => socks5(tcp, self, host, port).await,
             Kind::Http => {
-                let target = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+                let target = if host.contains(':') {
+                    format!("[{host}]:{port}")
+                } else {
+                    format!("{host}:{port}")
+                };
                 let (io, resp) = self
-                    .request(Box::new(tcp), |auth| {
-                        let mut r = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
-                        if let Some(a) = auth {
-                            r.push_str(&format!("Proxy-Authorization: {a}\r\n"));
-                        }
-                        r.push_str("\r\n");
-                        r.into_bytes()
-                    }, true)
+                    .request(
+                        Box::new(tcp),
+                        |auth| {
+                            let mut r = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+                            if let Some(a) = auth {
+                                r.push_str(&format!("Proxy-Authorization: {a}\r\n"));
+                            }
+                            r.push_str("\r\n");
+                            r.into_bytes()
+                        },
+                        true,
+                    )
                     .await?;
                 if !(200..300).contains(&resp.status) {
                     // The network's policy, answering in the server's place
-                    return Err(tagged(Intercepted, format!("proxy {} refused CONNECT {target}: HTTP {}", self.label(), resp.status)));
+                    return Err(tagged(
+                        Intercepted,
+                        format!(
+                            "proxy {} refused CONNECT {target}: HTTP {}",
+                            self.label(),
+                            resp.status
+                        ),
+                    ));
                 }
                 Ok(io)
             }
@@ -142,11 +164,19 @@ impl Proxy {
     /// connection (or a new one if the proxy closes it). `make` gets the
     /// `Proxy-Authorization` value to include. With `connect`, a 2xx answer
     /// has no body and the stream continues as the tunnel.
-    pub async fn request<F>(&self, io: BoxIo, mut make: F, connect: bool) -> Result<(BoxIo, crate::http1::Response)>
+    pub async fn request<F>(
+        &self,
+        io: BoxIo,
+        mut make: F,
+        connect: bool,
+    ) -> Result<(BoxIo, crate::http1::Response)>
     where
         F: FnMut(Option<&str>) -> Vec<u8>,
     {
-        let basic = self.auth.as_ref().map(|(u, p)| format!("Basic {}", B64.encode(format!("{u}:{p}"))));
+        let basic = self
+            .auth
+            .as_ref()
+            .map(|(u, p)| format!("Basic {}", B64.encode(format!("{u}:{p}"))));
         let mut io = io;
         let mut auth = basic.clone();
         let mut negotiator: Option<crate::sspi::Negotiator> = None;
@@ -162,14 +192,21 @@ impl Proxy {
             let pick = |scheme: &str| {
                 challenges.iter().find_map(|c| {
                     let (s, data) = c.split_once(' ').unwrap_or((c.as_str(), ""));
-                    s.eq_ignore_ascii_case(scheme).then(|| data.trim().to_string())
+                    s.eq_ignore_ascii_case(scheme)
+                        .then(|| data.trim().to_string())
                 })
             };
             let next = if let Some(n) = negotiator.as_mut() {
-                let data = pick(n.scheme()).filter(|d| !d.is_empty()).context("proxy rejected the sign-in")?;
-                let token = n.step(Some(&B64.decode(data).context("malformed proxy challenge")?))?;
+                let data = pick(n.scheme())
+                    .filter(|d| !d.is_empty())
+                    .context("proxy rejected the sign-in")?;
+                let token = n.step(Some(
+                    &B64.decode(data).context("malformed proxy challenge")?,
+                ))?;
                 format!("{} {}", n.scheme(), B64.encode(token))
-            } else if let Some(scheme) = ["Negotiate", "NTLM"].into_iter().find(|s| pick(s).is_some())
+            } else if let Some(scheme) = ["Negotiate", "NTLM"]
+                .into_iter()
+                .find(|s| pick(s).is_some())
                 && crate::sspi::available()
                 && self.sign_in
             {
@@ -180,16 +217,25 @@ impl Proxy {
             } else if pick("Basic").is_some() && basic.is_some() && auth.is_none() {
                 basic.clone().unwrap_or_default()
             } else {
-                if !self.sign_in && crate::sspi::available() && ["Negotiate", "NTLM"].into_iter().any(|s| pick(s).is_some()) {
-                    return Err(tagged(ProxyAuth, format!(
-                        "proxy {} asks for the Windows sign-in, which retail gives only to proxies in this computer's settings \
+                if !self.sign_in
+                    && crate::sspi::available()
+                    && ["Negotiate", "NTLM"].into_iter().any(|s| pick(s).is_some())
+                {
+                    return Err(tagged(
+                        ProxyAuth,
+                        format!(
+                            "proxy {} asks for the Windows sign-in, which retail gives only to proxies in this computer's settings \
                          or set by an administrator (`retail set --proxy` in an administrator terminal)",
-                        self.label()
-                    )));
+                            self.label()
+                        ),
+                    ));
                 }
                 return Err(tagged(
                     ProxyAuth,
-                    format!("proxy {} needs a sign-in retail cannot give (set one with `retail set --proxy http://user:password@host:port`)", self.label()),
+                    format!(
+                        "proxy {} needs a sign-in retail cannot give (set one with `retail set --proxy http://user:password@host:port`)",
+                        self.label()
+                    ),
                 ));
             };
             auth = Some(next);
@@ -197,12 +243,19 @@ impl Proxy {
                 io = Box::new(self.dial().await?);
             }
         }
-        Err(tagged(ProxyAuth, format!("proxy {} kept asking for a sign-in", self.label())))
+        Err(tagged(
+            ProxyAuth,
+            format!("proxy {} kept asking for a sign-in", self.label()),
+        ))
     }
 }
 
 async fn socks5(mut tcp: tokio::net::TcpStream, p: &Proxy, host: &str, port: u16) -> Result<BoxIo> {
-    let methods: &[u8] = if p.auth.is_some() { &[5, 2, 0, 2] } else { &[5, 1, 0] };
+    let methods: &[u8] = if p.auth.is_some() {
+        &[5, 2, 0, 2]
+    } else {
+        &[5, 1, 0]
+    };
     tcp.write_all(methods).await?;
     let mut r = [0u8; 2];
     tcp.read_exact(&mut r).await?;
@@ -217,10 +270,21 @@ async fn socks5(mut tcp: tokio::net::TcpStream, p: &Proxy, host: &str, port: u16
             tcp.write_all(&m).await?;
             tcp.read_exact(&mut r).await?;
             if r[1] != 0 {
-                return Err(tagged(ProxyAuth, format!("SOCKS5 proxy {} rejected the user name or password", p.label())));
+                return Err(tagged(
+                    ProxyAuth,
+                    format!(
+                        "SOCKS5 proxy {} rejected the user name or password",
+                        p.label()
+                    ),
+                ));
             }
         }
-        _ => return Err(tagged(ProxyAuth, format!("SOCKS5 proxy {} offers no usable sign-in", p.label()))),
+        _ => {
+            return Err(tagged(
+                ProxyAuth,
+                format!("SOCKS5 proxy {} offers no usable sign-in", p.label()),
+            ));
+        }
     }
     let mut req = vec![5, 1, 0];
     match host.parse::<std::net::IpAddr>() {
@@ -251,7 +315,14 @@ async fn socks5(mut tcp: tokio::net::TcpStream, p: &Proxy, host: &str, port: u16
             6 => Timeout,
             _ => Other,
         };
-        return Err(tagged(reason, format!("SOCKS5 proxy {} could not reach {host}:{port} (code {})", p.label(), head[1])));
+        return Err(tagged(
+            reason,
+            format!(
+                "SOCKS5 proxy {} could not reach {host}:{port} (code {})",
+                p.label(),
+                head[1]
+            ),
+        ));
     }
     let skip = match head[3] {
         1 => 4,
@@ -275,7 +346,9 @@ fn percent_decode(s: &str) -> String {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
-            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
+            && let Some(v) = std::str::from_utf8(&b[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
         {
             out.push(v);
             i += 3;
@@ -316,7 +389,14 @@ pub fn current() -> Vec<Proxy> {
     }
     let mut out: Vec<Proxy> = USER.lock().unwrap().clone();
     // The daemon's environment is the administrator's
-    for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"] {
+    for var in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
         if let Some(p) = std::env::var(var).ok().as_deref().and_then(Proxy::parse) {
             out.push(Proxy { sign_in: true, ..p });
         }
@@ -362,7 +442,11 @@ fn os_proxies() -> Vec<Proxy> {
 fn parse_proxy_list(list: &str) -> Vec<Proxy> {
     let mut https = Vec::new();
     let mut other = Vec::new();
-    for entry in list.split([';', ' ']).map(str::trim).filter(|e| !e.is_empty()) {
+    for entry in list
+        .split([';', ' '])
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         match entry.split_once('=') {
             Some((scheme, addr)) => match scheme.to_ascii_lowercase().as_str() {
                 "https" => https.extend(Proxy::parse(addr)),
@@ -397,11 +481,19 @@ fn read_os_proxies() -> Vec<Proxy> {
     };
     let list = take(info.lpszProxy);
     let _ = take(info.lpszProxyBypass);
-    let mut out = if info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY { parse_proxy_list(&list) } else { Vec::new() };
+    let mut out = if info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY {
+        parse_proxy_list(&list)
+    } else {
+        Vec::new()
+    };
     // The machine's settings are an administrator's, the console user's their own
     out.iter_mut().for_each(|p| p.sign_in = true);
     if let Some((user, sid)) = crate::sspi::console_user_proxy() {
-        out.extend(parse_proxy_list(&user).into_iter().map(|p| Proxy { sign_in: true, owner: sid.clone(), ..p }));
+        out.extend(parse_proxy_list(&user).into_iter().map(|p| Proxy {
+            sign_in: true,
+            owner: sid.clone(),
+            ..p
+        }));
     }
     out
 }
@@ -420,7 +512,9 @@ pub unsafe fn wide_to_string(p: *const u16) -> String {
 /// `scutil --proxy` prints the network settings' proxies
 #[cfg(target_os = "macos")]
 fn read_os_proxies() -> Vec<Proxy> {
-    let Ok(out) = std::process::Command::new("scutil").arg("--proxy").output() else { return Vec::new() };
+    let Ok(out) = std::process::Command::new("scutil").arg("--proxy").output() else {
+        return Vec::new();
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     let get = |key: &str| {
         text.lines().find_map(|l| {
@@ -429,9 +523,11 @@ fn read_os_proxies() -> Vec<Proxy> {
         })
     };
     let mut out = Vec::new();
-    for (enable, host, port, scheme) in
-        [("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http"), ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5"), ("HTTPEnable", "HTTPProxy", "HTTPPort", "http")]
-    {
+    for (enable, host, port, scheme) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort", "http"),
+        ("SOCKSEnable", "SOCKSProxy", "SOCKSPort", "socks5"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort", "http"),
+    ] {
         if get(enable).as_deref() == Some("1")
             && let (Some(h), Some(p)) = (get(host), get(port))
         {
@@ -453,11 +549,17 @@ mod tests {
     #[test]
     fn parsing() {
         let p = Proxy::parse("http://alice:p%40ss@proxy.corp:3128").unwrap();
-        assert_eq!((p.kind, p.host.as_str(), p.port), (Kind::Http, "proxy.corp", 3128));
+        assert_eq!(
+            (p.kind, p.host.as_str(), p.port),
+            (Kind::Http, "proxy.corp", 3128)
+        );
         assert_eq!(p.auth, Some(("alice".into(), "p@ss".into())));
         assert_eq!(p.label(), "http://proxy.corp:3128");
         let p = Proxy::parse("socks5h://[2001:db8::1]:1081").unwrap();
-        assert_eq!((p.kind, p.host.as_str(), p.port), (Kind::Socks5, "2001:db8::1", 1081));
+        assert_eq!(
+            (p.kind, p.host.as_str(), p.port),
+            (Kind::Socks5, "2001:db8::1", 1081)
+        );
         assert_eq!(Proxy::parse("10.0.0.1:8080").unwrap().port, 8080);
         assert!(Proxy::parse("ftp://x:1").is_none());
         let list = parse_proxy_list("http=a:80;https=b:443;socks=c:1080");
@@ -478,9 +580,18 @@ mod tests {
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
             assert!(req.starts_with("CONNECT example.net:443 HTTP/1.1"), "{req}");
             assert!(req.contains("Proxy-Authorization: Basic YTpi"), "{req}");
-            s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\nhello").await.unwrap();
+            s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\nhello")
+                .await
+                .unwrap();
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: Some(("a".into(), "b".into())), sign_in: false, owner: None };
+        let p = Proxy {
+            kind: Kind::Http,
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            auth: Some(("a".into(), "b".into())),
+            sign_in: false,
+            owner: None,
+        };
         let mut io = p.connect("example.net", 443).await.unwrap();
         let mut got = [0u8; 5];
         io.read_exact(&mut got).await.unwrap();
@@ -497,8 +608,20 @@ mod tests {
             let _ = s.read(&mut buf).await.unwrap();
             s.write_all(b"HTTP/1.1 407 Auth\r\nProxy-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\n\r\n").await.unwrap();
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false, owner: None };
-        let err = p.connect("example.net", 443).await.err().unwrap().to_string();
+        let p = Proxy {
+            kind: Kind::Http,
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            auth: None,
+            sign_in: false,
+            owner: None,
+        };
+        let err = p
+            .connect("example.net", 443)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("sign-in"), "{err}");
     }
 
@@ -510,7 +633,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let seen = tokio::spawn(async move {
             let mut requests = Vec::new();
-            while let Ok(Ok((mut s, _))) = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await {
+            while let Ok(Ok((mut s, _))) =
+                tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+            {
                 let mut buf = vec![0u8; 4096];
                 let n = s.read(&mut buf).await.unwrap_or(0);
                 requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
@@ -520,19 +645,50 @@ mod tests {
             }
             requests
         });
-        let p = Proxy { kind: Kind::Http, host: "127.0.0.1".into(), port: addr.port(), auth: None, sign_in: false, owner: None };
-        let err = p.connect("example.net", 443).await.err().unwrap().to_string();
+        let p = Proxy {
+            kind: Kind::Http,
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            auth: None,
+            sign_in: false,
+            owner: None,
+        };
+        let err = p
+            .connect("example.net", 443)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("sign-in"), "{err}");
         let requests = seen.await.unwrap();
-        assert!(requests.iter().all(|r| !r.contains("Proxy-Authorization")), "{requests:?}");
+        assert!(
+            requests.iter().all(|r| !r.contains("Proxy-Authorization")),
+            "{requests:?}"
+        );
         // Settings of the machine, the console user or an administrator may
-        let trusted = dedup(vec![p.clone(), Proxy { sign_in: true, ..p.clone() }]);
+        let trusted = dedup(vec![
+            p.clone(),
+            Proxy {
+                sign_in: true,
+                ..p.clone()
+            },
+        ]);
         assert_eq!(trusted.len(), 1);
         assert!(trusted[0].sign_in);
         // A user's own setting stays bound to that user unless an unbound source names it too
-        let user = Proxy { sign_in: true, owner: Some(vec![1, 2, 3]), ..p.clone() };
-        assert_eq!(dedup(vec![p.clone(), user.clone()])[0].owner, Some(vec![1, 2, 3]));
-        let machine = Proxy { sign_in: true, ..p.clone() };
+        let user = Proxy {
+            sign_in: true,
+            owner: Some(vec![1, 2, 3]),
+            ..p.clone()
+        };
+        assert_eq!(
+            dedup(vec![p.clone(), user.clone()])[0].owner,
+            Some(vec![1, 2, 3])
+        );
+        let machine = Proxy {
+            sign_in: true,
+            ..p.clone()
+        };
         assert_eq!(dedup(vec![user.clone(), machine])[0].owner, None);
     }
 }

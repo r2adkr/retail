@@ -55,13 +55,23 @@ enum Slot {
     Loaded(FontVec),
 }
 
-type Candidates = (&'static [&'static str], &'static [&'static str], &'static [(&'static str, Script)]);
+type Candidates = (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [(&'static str, Script)],
+);
 
 #[cfg(windows)]
 fn candidates() -> Candidates {
     (
-        &["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"],
-        &["C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeuib.ttf"],
+        &[
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+        ],
+        &[
+            "C:\\Windows\\Fonts\\seguisb.ttf",
+            "C:\\Windows\\Fonts\\segoeuib.ttf",
+        ],
         &[
             ("C:\\Windows\\Fonts\\malgun.ttf", Script::Ko),
             ("C:\\Windows\\Fonts\\YuGothR.ttc#1", Script::Ja),
@@ -81,7 +91,10 @@ fn candidates() -> Candidates {
         &[],
         &[
             ("/System/Library/Fonts/AppleSDGothicNeo.ttc", Script::Ko),
-            ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", Script::Ja),
+            (
+                "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+                Script::Ja,
+            ),
             ("/System/Library/Fonts/Hiragino Sans GB.ttc", Script::Zh),
         ],
     )
@@ -108,9 +121,18 @@ fn candidates() -> Candidates {
             "/usr/share/fonts/truetype/cantarell/Cantarell-Bold.otf",
         ],
         &[
-            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", Script::Any),
-            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", Script::Any),
-            ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", Script::Ko),
+            (
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                Script::Any,
+            ),
+            (
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                Script::Any,
+            ),
+            (
+                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                Script::Ko,
+            ),
         ],
     )
 }
@@ -243,7 +265,13 @@ impl Fonts {
                 let key = (face, id, (px * 4.0).round() as u32);
                 let mut cache = self.cache.borrow_mut();
                 let glyph = cache.entry(key).or_insert_with(|| rasterize(font, id, px));
-                blend_coverage(pix, glyph, pen.round() as i32 + glyph.left, baseline + glyph.top, color);
+                blend_coverage(
+                    pix,
+                    glyph,
+                    pen.round() as i32 + glyph.left,
+                    baseline + glyph.top,
+                    color,
+                );
                 pen += scaled.h_advance(id);
             });
             prev = Some(c);
@@ -255,7 +283,13 @@ impl Fonts {
 fn rasterize(font: &FontVec, id: GlyphId, px: f32) -> Glyph {
     let glyph = id.with_scale_and_position(em(font, px), point(0.0, 0.0));
     let Some(outline) = font.outline_glyph(glyph) else {
-        return Glyph { left: 0, top: 0, width: 0, height: 0, coverage: Vec::new() };
+        return Glyph {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+            coverage: Vec::new(),
+        };
     };
     let b = outline.px_bounds();
     let (width, height) = (b.width() as usize, b.height() as usize);
@@ -265,7 +299,13 @@ fn rasterize(font: &FontVec, id: GlyphId, px: f32) -> Glyph {
             *v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     });
-    Glyph { left: b.min.x as i32, top: b.min.y as i32, width, height, coverage }
+    Glyph {
+        left: b.min.x as i32,
+        top: b.min.y as i32,
+        width,
+        height,
+        coverage,
+    }
 }
 
 /// Source-over blend of a coverage mask in `color` at (x, y)
@@ -283,7 +323,8 @@ fn blend_coverage(pix: &mut Pixmap, g: &Glyph, x: i32, y: i32, color: Color) {
             if px < 0 || px >= pw {
                 continue;
             }
-            let cov = g.coverage[(row as usize) * g.width + col as usize] as u32 * c.alpha() as u32 / 255;
+            let cov =
+                g.coverage[(row as usize) * g.width + col as usize] as u32 * c.alpha() as u32 / 255;
             if cov == 0 {
                 continue;
             }
@@ -292,9 +333,14 @@ fn blend_coverage(pix: &mut Pixmap, g: &Glyph, x: i32, y: i32, color: Color) {
             let inv = 255 - cov;
             let mix = |s: u8, d: u8| ((s as u32 * cov + d as u32 * inv + 127) / 255) as u8;
             let a = (cov + d.alpha() as u32 * inv / 255).min(255) as u8;
-            let (r, g, b) = (mix(c.red(), d.red()), mix(c.green(), d.green()), mix(c.blue(), d.blue()));
+            let (r, g, b) = (
+                mix(c.red(), d.red()),
+                mix(c.green(), d.green()),
+                mix(c.blue(), d.blue()),
+            );
             // Keep the premultiplied invariant (channel <= alpha)
-            pixels[i] = PremultipliedColorU8::from_rgba(r.min(a), g.min(a), b.min(a), a).unwrap_or(d);
+            pixels[i] =
+                PremultipliedColorU8::from_rgba(r.min(a), g.min(a), b.min(a), a).unwrap_or(d);
         }
     }
 }

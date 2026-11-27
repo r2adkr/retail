@@ -24,13 +24,18 @@ pub struct DevicePort {
 
 impl Default for DevicePort {
     fn default() -> Self {
-        DevicePort { wanted: watch::channel(false).0, state: Arc::default(), public: watch::channel(None).0 }
+        DevicePort {
+            wanted: watch::channel(false).0,
+            state: Arc::default(),
+            public: watch::channel(None).0,
+        }
     }
 }
 
 impl DevicePort {
     pub fn set_wanted(&self, on: bool) {
-        self.wanted.send_if_modified(|w| std::mem::replace(w, on) != on);
+        self.wanted
+            .send_if_modified(|w| std::mem::replace(w, on) != on);
     }
 
     pub fn state(&self) -> Option<PortState> {
@@ -38,8 +43,16 @@ impl DevicePort {
     }
 
     /// For one session, whose engine listens on `port`
-    pub fn run(&self, port: u16, hosting: watch::Receiver<bool>) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let (wanted, state, public) = (self.wanted.subscribe(), self.state.clone(), self.public.clone());
+    pub fn run(
+        &self,
+        port: u16,
+        hosting: watch::Receiver<bool>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let (wanted, state, public) = (
+            self.wanted.subscribe(),
+            self.state.clone(),
+            self.public.clone(),
+        );
         keep_open(port, wanted, hosting, state, public)
     }
 }
@@ -80,7 +93,11 @@ async fn keep_open(
     if std::env::var_os("RETAIL_NO_PORTMAP").is_some() {
         return;
     }
-    let mut m = Mapped { outcome: None, state, public };
+    let mut m = Mapped {
+        outcome: None,
+        state,
+        public,
+    };
     loop {
         if !*wanted.borrow_and_update() || *hosting.borrow_and_update() {
             m.clear();
@@ -100,8 +117,15 @@ async fn keep_open(
                 if m.outcome.is_none() {
                     tracing::info!(method = o.method_name(), external_ip = ?o.external_ip, ?external, "router port opened for direct connections");
                 }
-                let addr = o.external_ip.filter(|ip| !portmap::is_private(*ip)).zip(external).map(|(ip, p)| SocketAddr::new(ip, p));
-                *m.state.lock().unwrap() = Some(PortState::Opened { method: o.method_name().to_string(), port: external.unwrap_or(port) });
+                let addr = o
+                    .external_ip
+                    .filter(|ip| !portmap::is_private(*ip))
+                    .zip(external)
+                    .map(|(ip, p)| SocketAddr::new(ip, p));
+                *m.state.lock().unwrap() = Some(PortState::Opened {
+                    method: o.method_name().to_string(),
+                    port: external.unwrap_or(port),
+                });
                 m.public.send_replace(addr);
                 m.outcome = Some(o);
                 portmap::LEASE / 2

@@ -70,8 +70,13 @@ pub fn with_alpha(c: Color, a: f32) -> Color {
 }
 
 pub fn shade(c: Color, f: f32) -> Color {
-    Color::from_rgba((c.red() * f).min(1.0), (c.green() * f).min(1.0), (c.blue() * f).min(1.0), c.alpha())
-        .unwrap_or(c)
+    Color::from_rgba(
+        (c.red() * f).min(1.0),
+        (c.green() * f).min(1.0),
+        (c.blue() * f).min(1.0),
+        c.alpha(),
+    )
+    .unwrap_or(c)
 }
 
 /// Drawing helpers in logical coordinates
@@ -92,7 +97,8 @@ impl Canvas<'_> {
     pub fn fill_path(&mut self, pb: PathBuilder, color: Color) {
         if let Some(path) = pb.finish() {
             let ts = Transform::from_scale(self.scale, self.scale);
-            self.pix.fill_path(&path, &Self::paint(color), FillRule::Winding, ts, None);
+            self.pix
+                .fill_path(&path, &Self::paint(color), FillRule::Winding, ts, None);
         }
     }
 
@@ -125,26 +131,44 @@ impl Canvas<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn stroke_rrect_w(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, width: f32, color: Color) {
+    pub fn stroke_rrect_w(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        width: f32,
+        color: Color,
+    ) {
         if let Some(path) = Self::rrect_path(x, y, w, h, r).finish() {
-            let stroke = tiny_skia::Stroke { width, ..Default::default() };
+            let stroke = tiny_skia::Stroke {
+                width,
+                ..Default::default()
+            };
             let ts = Transform::from_scale(self.scale, self.scale);
-            self.pix.stroke_path(&path, &Self::paint(color), &stroke, ts, None);
+            self.pix
+                .stroke_path(&path, &Self::paint(color), &stroke, ts, None);
         }
     }
 
     pub fn stroke_rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, color: Color) {
         if let Some(path) = Self::rrect_path(x, y, w, h, r).finish() {
-            let stroke = tiny_skia::Stroke { width: 1.0, ..Default::default() };
+            let stroke = tiny_skia::Stroke {
+                width: 1.0,
+                ..Default::default()
+            };
             let ts = Transform::from_scale(self.scale, self.scale);
-            self.pix.stroke_path(&path, &Self::paint(color), &stroke, ts, None);
+            self.pix
+                .stroke_path(&path, &Self::paint(color), &stroke, ts, None);
         }
     }
 
     pub fn circle(&mut self, x: f32, y: f32, r: f32, color: Color) {
         if let Some(path) = PathBuilder::from_circle(x, y, r) {
             let ts = Transform::from_scale(self.scale, self.scale);
-            self.pix.fill_path(&path, &Self::paint(color), FillRule::Winding, ts, None);
+            self.pix
+                .fill_path(&path, &Self::paint(color), FillRule::Winding, ts, None);
         }
     }
 
@@ -159,13 +183,18 @@ impl Canvas<'_> {
             let a = i as f32 * step - step / 2.0;
             let rad = if matches!(i % 4, 1 | 2) { outer } else { inner };
             let (x, y) = (cx + rad * a.cos(), cy + rad * a.sin());
-            if i == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
+            if i == 0 {
+                pb.move_to(x, y)
+            } else {
+                pb.line_to(x, y)
+            }
         }
         pb.close();
         pb.push_circle(cx, cy, r * 0.36);
         if let Some(path) = pb.finish() {
             let ts = Transform::from_scale(self.scale, self.scale);
-            self.pix.fill_path(&path, &Self::paint(color), FillRule::EvenOdd, ts, None);
+            self.pix
+                .fill_path(&path, &Self::paint(color), FillRule::EvenOdd, ts, None);
         }
     }
 
@@ -174,9 +203,13 @@ impl Canvas<'_> {
         pb.move_to(a.0, a.1);
         pb.line_to(b.0, b.1);
         if let Some(path) = pb.finish() {
-            let stroke = tiny_skia::Stroke { width, ..Default::default() };
+            let stroke = tiny_skia::Stroke {
+                width,
+                ..Default::default()
+            };
             let ts = Transform::from_scale(self.scale, self.scale);
-            self.pix.stroke_path(&path, &Self::paint(color), &stroke, ts, None);
+            self.pix
+                .stroke_path(&path, &Self::paint(color), &stroke, ts, None);
         }
     }
 
@@ -192,8 +225,26 @@ impl Canvas<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn text(&mut self, text: &str, x: f32, y: f32, px: f32, w: Weight, color: Color, max_w: Option<f32>) -> f32 {
+    pub fn text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        px: f32,
+        w: Weight,
+        color: Color,
+        max_w: Option<f32>,
+    ) -> f32 {
         let s = self.scale;
-        self.fonts.draw(self.pix, text, x * s, y * s, px * s, w, color, max_w.map(|m| m * s)) / s
+        self.fonts.draw(
+            self.pix,
+            text,
+            x * s,
+            y * s,
+            px * s,
+            w,
+            color,
+            max_w.map(|m| m * s),
+        ) / s
     }
 }

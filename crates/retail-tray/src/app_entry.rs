@@ -65,19 +65,26 @@ mod imp {
         if out.status.success() {
             Ok(())
         } else {
-            Err(format!("{program}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+            Err(format!(
+                "{program}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
         }
     }
 
     fn reg(name: &str, kind: &str, value: &str) -> Result<(), String> {
-        run("reg", &["add", KEY, "/v", name, "/t", kind, "/d", value, "/f"])
+        run(
+            "reg",
+            &["add", KEY, "/v", name, "/t", kind, "/d", value, "/f"],
+        )
     }
 
     pub fn add(dir: &Path, version: &str) -> Result<(), String> {
         let tray = dir.join("retail-tray.exe");
         let icon = dir.join("retail.ico");
         if let Some(png) = crate::icon::app_png(256) {
-            std::fs::write(&icon, super::ico(&png)).map_err(|e| format!("writing {}: {e}", icon.display()))?;
+            std::fs::write(&icon, super::ico(&png))
+                .map_err(|e| format!("writing {}: {e}", icon.display()))?;
         }
         // PowerShell's single quotes take everything as it is but a quote
         let q = |p: &Path| p.display().to_string().replace('\'', "''");
@@ -89,18 +96,35 @@ mod imp {
             q(&icon),
             q(dir)
         );
-        run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])?;
+        run(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+        )?;
 
         let size_kb: u64 = std::fs::read_dir(dir)
-            .map(|d| d.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum::<u64>() / 1024)
+            .map(|d| {
+                d.flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .map(|m| m.len())
+                    .sum::<u64>()
+                    / 1024
+            })
             .unwrap_or(0);
         reg("DisplayName", "REG_SZ", "retail")?;
         reg("DisplayVersion", "REG_SZ", version)?;
         reg("Publisher", "REG_SZ", "retail")?;
         reg("DisplayIcon", "REG_SZ", &icon.display().to_string())?;
         reg("InstallLocation", "REG_SZ", &dir.display().to_string())?;
-        reg("UninstallString", "REG_SZ", &format!("\"{}\" --uninstall", tray.display()))?;
-        reg("QuietUninstallString", "REG_SZ", &format!("\"{}\" --uninstall --yes", tray.display()))?;
+        reg(
+            "UninstallString",
+            "REG_SZ",
+            &format!("\"{}\" --uninstall", tray.display()),
+        )?;
+        reg(
+            "QuietUninstallString",
+            "REG_SZ",
+            &format!("\"{}\" --uninstall --yes", tray.display()),
+        )?;
         reg("URLInfoAbout", "REG_SZ", "https://github.com/r2adkr/retail")?;
         reg("EstimatedSize", "REG_DWORD", &size_kb.to_string())?;
         reg("NoModify", "REG_DWORD", "1")?;
@@ -147,14 +171,23 @@ mod imp {
         // A script rather than a copy: the programs in `dir` update
         // themselves, and this keeps opening the current one
         let launcher = app.join("Contents/MacOS/retail");
-        let tray = dir.join("retail-tray").display().to_string().replace('\'', "'\\''");
+        let tray = dir
+            .join("retail-tray")
+            .display()
+            .to_string()
+            .replace('\'', "'\\''");
         std::fs::write(&launcher, format!("#!/bin/sh\nexec '{tray}' --show\n")).map_err(err)?;
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).map_err(err)?;
+            std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+                .map_err(err)?;
         }
         if let Some(png) = crate::icon::app_png(256) {
-            std::fs::write(app.join("Contents/Resources/retail.icns"), super::icns(&png)).map_err(err)?;
+            std::fs::write(
+                app.join("Contents/Resources/retail.icns"),
+                super::icns(&png),
+            )
+            .map_err(err)?;
         }
         // Finder and Launchpad pick up the new app
         let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
@@ -213,7 +246,10 @@ mod tests {
         assert_eq!(&ico[22..], &png[..]);
         let icns = super::icns(&png);
         assert_eq!(&icns[..4], b"icns");
-        assert_eq!(u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize, icns.len());
+        assert_eq!(
+            u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize,
+            icns.len()
+        );
         assert_eq!(&icns[8..12], b"ic08");
     }
 }

@@ -40,21 +40,47 @@ struct Asset {
 
 fn asset() -> Option<Asset> {
     let (name, sha256, tgz) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => {
-            ("cloudflared-windows-amd64.exe", "555b46c85582461d189cac30d14ad05480d612613801be9f110b8ce08c5b2113", false)
-        }
-        ("linux", "x86_64") => ("cloudflared-linux-amd64", "56f13335143ec0e22772963290683a84a04114a35ec64cbc794a4d39ff9bb8cf", false),
-        ("linux", "aarch64") => ("cloudflared-linux-arm64", "04a7b7f08bce85d56b26ffe1fdbfbb21a074495a363d16f0783c40e25b5c5281", false),
-        ("linux", "arm") => ("cloudflared-linux-armhf", "ab8dda127892266ef25d9787ea43be2314832204e2e32272901ae36010454684", false),
-        ("macos", "x86_64") => ("cloudflared-darwin-amd64.tgz", "6153d9ec629174882a3adbff2f7dc5a24b4f3bdd7ccc38eaa84fba26eb890311", true),
-        ("macos", "aarch64") => ("cloudflared-darwin-arm64.tgz", "f6d58eeec91ad1ec5fd1f7e4a587303772929b2625be5d24068033851c36ff55", true),
+        ("windows", "x86_64") => (
+            "cloudflared-windows-amd64.exe",
+            "555b46c85582461d189cac30d14ad05480d612613801be9f110b8ce08c5b2113",
+            false,
+        ),
+        ("linux", "x86_64") => (
+            "cloudflared-linux-amd64",
+            "56f13335143ec0e22772963290683a84a04114a35ec64cbc794a4d39ff9bb8cf",
+            false,
+        ),
+        ("linux", "aarch64") => (
+            "cloudflared-linux-arm64",
+            "04a7b7f08bce85d56b26ffe1fdbfbb21a074495a363d16f0783c40e25b5c5281",
+            false,
+        ),
+        ("linux", "arm") => (
+            "cloudflared-linux-armhf",
+            "ab8dda127892266ef25d9787ea43be2314832204e2e32272901ae36010454684",
+            false,
+        ),
+        ("macos", "x86_64") => (
+            "cloudflared-darwin-amd64.tgz",
+            "6153d9ec629174882a3adbff2f7dc5a24b4f3bdd7ccc38eaa84fba26eb890311",
+            true,
+        ),
+        ("macos", "aarch64") => (
+            "cloudflared-darwin-arm64.tgz",
+            "f6d58eeec91ad1ec5fd1f7e4a587303772929b2625be5d24068033851c36ff55",
+            true,
+        ),
         _ => return None,
     };
     Some(Asset { name, sha256, tgz })
 }
 
 fn program(dir: &Path) -> PathBuf {
-    dir.join(if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" })
+    dir.join(if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    })
 }
 
 /// The cloudflared that runs, with what retaild needs to find it again
@@ -87,7 +113,12 @@ impl Tunnel {
         let status = Arc::new(Mutex::new(TunnelStatus::default()));
         let (tx, url) = watch::channel(None);
         let task = tokio::spawn(supervise(dir.clone(), origin, status.clone(), tx));
-        Tunnel { dir, status, url, task }
+        Tunnel {
+            dir,
+            status,
+            url,
+            task,
+        }
     }
 
     pub fn status(&self) -> TunnelStatus {
@@ -121,15 +152,24 @@ pub async fn end_recorded(dir: &Path) {
 /// `end_recorded`, outside the async runtime's threads (removing retail)
 pub fn end_recorded_now(dir: &Path) {
     if let Some(run) = read_run(dir) {
-        let exe = std::env::var_os("RETAIL_CLOUDFLARED").map_or_else(|| program(dir), PathBuf::from);
+        let exe =
+            std::env::var_os("RETAIL_CLOUDFLARED").map_or_else(|| program(dir), PathBuf::from);
         end(run.pid, &exe);
     }
     let _ = std::fs::remove_file(dir.join("run.json"));
 }
 
-async fn supervise(dir: PathBuf, origin: u16, status: Arc<Mutex<TunnelStatus>>, url: watch::Sender<Option<String>>) {
+async fn supervise(
+    dir: PathBuf,
+    origin: u16,
+    status: Arc<Mutex<TunnelStatus>>,
+    url: watch::Sender<Option<String>>,
+) {
     let set = |u: Option<String>, e: Option<String>| {
-        *status.lock().unwrap() = TunnelStatus { url: u.clone(), error: e };
+        *status.lock().unwrap() = TunnelStatus {
+            url: u.clone(),
+            error: e,
+        };
         url.send_if_modified(|cur| std::mem::replace(cur, u.clone()) != u);
     };
     let mut backoff = Duration::from_secs(10);
@@ -162,7 +202,11 @@ async fn supervise(dir: PathBuf, origin: u16, status: Arc<Mutex<TunnelStatus>>, 
         let mut missed = 0;
         while missed < 3 {
             tokio::time::sleep(CHECK_EVERY).await;
-            missed = if owned_host(metrics).await.is_some() { 0 } else { missed + 1 };
+            missed = if owned_host(metrics).await.is_some() {
+                0
+            } else {
+                missed + 1
+            };
         }
         tracing::warn!("internet tunnel: cloudflared stopped answering; starting it again");
         end_recorded(&dir).await;
@@ -178,7 +222,9 @@ async fn adopt(dir: &Path, origin: u16) -> Option<(u16, String)> {
     }
     // The recorded process, not whatever now listens on its old port
     let exe = std::env::var_os("RETAIL_CLOUDFLARED").map_or_else(|| program(dir), PathBuf::from);
-    let alive = tokio::task::spawn_blocking(move || is(run.pid, &exe)).await.unwrap_or(false);
+    let alive = tokio::task::spawn_blocking(move || is(run.pid, &exe))
+        .await
+        .unwrap_or(false);
     if !alive {
         return None;
     }
@@ -190,7 +236,9 @@ async fn adopt(dir: &Path, origin: u16) -> Option<(u16, String)> {
 /// cloudflared is gone, another user's program can take its port
 async fn owned_host(metrics: u16) -> Option<String> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], metrics));
-    let owned = tokio::task::spawn_blocking(move || retail_proto::listener::check(addr)).await.ok()?;
+    let owned = tokio::task::spawn_blocking(move || retail_proto::listener::check(addr))
+        .await
+        .ok()?;
     if let Err(e) = owned {
         tracing::warn!("internet tunnel: the program on cloudflared's port is not ours: {e}");
         return None;
@@ -220,7 +268,11 @@ async fn launch(dir: &Path, origin: u16) -> Result<(u16, String)> {
         format!("http://127.0.0.1:{origin}"),
     ];
     let mut child = spawn_detached(&exe, &args).context("starting cloudflared")?;
-    let run = Run { pid: child.id(), metrics, origin };
+    let run = Run {
+        pid: child.id(),
+        metrics,
+        origin,
+    };
     if let Err(e) = std::fs::write(dir.join("run.json"), serde_json::to_vec(&run)?) {
         // Unrecorded, nothing could end it later
         let _ = child.kill();
@@ -242,14 +294,21 @@ async fn launch(dir: &Path, origin: u16) -> Result<(u16, String)> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     end_recorded(dir).await;
-    bail!("Cloudflare gave no tunnel address within a minute (is outgoing TCP/UDP 7844 blocked?): {}", last_lines(&log))
+    bail!(
+        "Cloudflare gave no tunnel address within a minute (is outgoing TCP/UDP 7844 blocked?): {}",
+        last_lines(&log)
+    )
 }
 
 fn last_lines(log: &Path) -> String {
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let lines: Vec<&str> = text.lines().rev().take(3).collect();
     let joined = lines.into_iter().rev().collect::<Vec<_>>().join(" / ");
-    if joined.is_empty() { "no log".into() } else { joined.chars().take(400).collect() }
+    if joined.is_empty() {
+        "no log".into()
+    } else {
+        joined.chars().take(400).collect()
+    }
 }
 
 /// The quick tunnel's host name from cloudflared's metrics server
@@ -261,7 +320,11 @@ async fn quick_host(metrics: u16) -> Option<String> {
         hostname: String,
     }
     let q: Quick = serde_json::from_str(&body).ok()?;
-    let host = q.hostname.trim().trim_start_matches("https://").to_ascii_lowercase();
+    let host = q
+        .hostname
+        .trim()
+        .trim_start_matches("https://")
+        .to_ascii_lowercase();
     valid_host(&host).then_some(host)
 }
 
@@ -270,17 +333,23 @@ async fn quick_host(metrics: u16) -> Option<String> {
 /// user's, once cloudflared is gone) must not name a host for every device.
 fn valid_host(host: &str) -> bool {
     host.len() < 254
-        && host
-            .strip_suffix(".trycloudflare.com")
-            .is_some_and(|sub| !sub.is_empty() && sub.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        && host.strip_suffix(".trycloudflare.com").is_some_and(|sub| {
+            !sub.is_empty() && sub.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
         && host.contains('.')
-        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
 
 async fn local_get(port: u16, path: &str) -> Option<String> {
     let work = async {
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
-        s.write_all(format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").as_bytes()).await.ok()?;
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        s.write_all(format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .await
+            .ok()?;
         let mut buf = Vec::new();
         s.take(64 * 1024).read_to_end(&mut buf).await.ok()?;
         let text = String::from_utf8_lossy(&buf).to_string();
@@ -289,7 +358,10 @@ async fn local_get(port: u16, path: &str) -> Option<String> {
         head.split_whitespace().nth(1).filter(|s| *s == "200")?;
         Some(body.to_string())
     };
-    tokio::time::timeout(Duration::from_secs(3), work).await.ok().flatten()
+    tokio::time::timeout(Duration::from_secs(3), work)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn sha256_file(path: &Path) -> Option<String> {
@@ -304,7 +376,13 @@ fn sha256_file(path: &Path) -> Option<String> {
         }
         ctx.update(&buf[..n]);
     }
-    Some(ctx.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
+    Some(
+        ctx.finish()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    )
 }
 
 /// The checked program, fetched when missing or changed. `RETAIL_CLOUDFLARED`
@@ -330,14 +408,24 @@ async fn ensure_program(dir: &Path) -> Result<PathBuf> {
     if good {
         return Ok(exe);
     }
-    tracing::info!(version = VERSION, file = a.name, "internet tunnel: fetching cloudflared");
-    let url = format!("https://github.com/cloudflare/cloudflared/releases/download/{VERSION}/{}", a.name);
+    tracing::info!(
+        version = VERSION,
+        file = a.name,
+        "internet tunnel: fetching cloudflared"
+    );
+    let url = format!(
+        "https://github.com/cloudflare/cloudflared/releases/download/{VERSION}/{}",
+        a.name
+    );
     let download = dir.join(format!("{}.download", a.name));
-    let got = tokio::time::timeout(Duration::from_secs(600), crate::releases::get(&url, Some(&download)))
-        .await
-        .context("fetching cloudflared took too long")?
-        .with_context(|| format!("fetching cloudflared {VERSION}"))?
-        .0;
+    let got = tokio::time::timeout(
+        Duration::from_secs(600),
+        crate::releases::get(&url, Some(&download)),
+    )
+    .await
+    .context("fetching cloudflared took too long")?
+    .with_context(|| format!("fetching cloudflared {VERSION}"))?
+    .0;
     if got != a.sha256 {
         let _ = std::fs::remove_file(&download);
         bail!("cloudflared {VERSION} does not match its published checksum");
@@ -349,13 +437,21 @@ async fn ensure_program(dir: &Path) -> Result<PathBuf> {
         let unpack = dir.join("unpack");
         let _ = std::fs::remove_dir_all(&unpack);
         std::fs::create_dir_all(&unpack)?;
-        let out = std::process::Command::new("tar").arg("-xzf").arg(&download).arg("-C").arg(&unpack).output();
+        let out = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&download)
+            .arg("-C")
+            .arg(&unpack)
+            .output();
         let _ = std::fs::remove_file(&download);
         let found = match out {
             Ok(o) if o.status.success() => find_program(&unpack),
             Ok(o) => {
                 let _ = std::fs::remove_dir_all(&unpack);
-                bail!("unpacking cloudflared: {}", String::from_utf8_lossy(&o.stderr).trim())
+                bail!(
+                    "unpacking cloudflared: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                )
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&unpack);
@@ -364,7 +460,9 @@ async fn ensure_program(dir: &Path) -> Result<PathBuf> {
         };
         let moved = match found {
             Some(f) => std::fs::rename(&f, &exe).context("putting cloudflared in place"),
-            None => Err(anyhow::anyhow!("the cloudflared archive has no cloudflared in it")),
+            None => Err(anyhow::anyhow!(
+                "the cloudflared archive has no cloudflared in it"
+            )),
         };
         let _ = std::fs::remove_dir_all(&unpack);
         moved?;
@@ -387,7 +485,11 @@ fn find_program(dir: &Path) -> Option<PathBuf> {
     if direct.is_file() {
         return Some(direct);
     }
-    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path().join("cloudflared")).find(|p| p.is_file())
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("cloudflared"))
+        .find(|p| p.is_file())
 }
 
 /// Started apart from retaild, so stopping retaild (an update, a restart)
@@ -395,7 +497,10 @@ fn find_program(dir: &Path) -> Option<PathBuf> {
 fn spawn_detached(exe: &Path, args: &[String]) -> std::io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(exe);
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -410,11 +515,15 @@ fn spawn_detached(exe: &Path, args: &[String]) -> std::io::Result<std::process::
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         // Out of the scheduled task's job, which ending the task would end;
         // a job that allows no breakaway refuses, and it starts inside
-        match cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB).spawn() {
+        match cmd
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
+            .spawn()
+        {
             Ok(c) => Ok(c),
             Err(e) => {
                 tracing::debug!("cloudflared outside the job: {e}");
-                cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP).spawn()
+                cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+                    .spawn()
             }
         }
     }
@@ -450,22 +559,33 @@ fn end(pid: u32, exe: &Path) {
 
 /// Whether process `pid` runs `exe`
 fn is(pid: u32, exe: &Path) -> bool {
-    let want = exe.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let want = exe
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
     #[cfg(target_os = "linux")]
     {
         // Started with its full path, which its command line keeps (a
         // script's after its interpreter)
         let _ = &want;
         let exe = exe.to_string_lossy();
-        std::fs::read(format!("/proc/{pid}/cmdline"))
-            .is_ok_and(|c| c.split(|b| *b == 0).take(2).any(|arg| arg == exe.as_bytes()))
+        std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| {
+            c.split(|b| *b == 0)
+                .take(2)
+                .any(|arg| arg == exe.as_bytes())
+        })
     }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
             .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase().ends_with(&want))
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .to_ascii_lowercase()
+                    .ends_with(&want)
+            })
     }
     #[cfg(windows)]
     {
@@ -474,7 +594,11 @@ fn is(pid: u32, exe: &Path) -> bool {
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .creation_flags(0x0800_0000)
             .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains(&format!("\"{want}\"")))
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .to_ascii_lowercase()
+                    .contains(&format!("\"{want}\""))
+            })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -516,7 +640,9 @@ mod tests {
     fn every_release_system_has_a_pinned_file() {
         if matches!(
             (std::env::consts::OS, std::env::consts::ARCH),
-            ("windows", "x86_64") | ("linux", "x86_64" | "aarch64" | "arm") | ("macos", "x86_64" | "aarch64")
+            ("windows", "x86_64")
+                | ("linux", "x86_64" | "aarch64" | "arm")
+                | ("macos", "x86_64" | "aarch64")
         ) {
             let a = asset().unwrap();
             assert_eq!(a.sha256.len(), 64);
@@ -530,16 +656,25 @@ mod tests {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();
         tokio::spawn(async move {
-            for body in [r#"{"hostname":""}"#, r#"{"hostname":"sunny-river-1234.trycloudflare.com"}"#] {
+            for body in [
+                r#"{"hostname":""}"#,
+                r#"{"hostname":"sunny-river-1234.trycloudflare.com"}"#,
+            ] {
                 let (mut s, _) = l.accept().await.unwrap();
                 let mut buf = [0u8; 512];
                 let _ = s.read(&mut buf).await;
-                let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
                 s.write_all(resp.as_bytes()).await.unwrap();
             }
         });
         assert_eq!(quick_host(port).await, None, "not up yet");
-        assert_eq!(quick_host(port).await.as_deref(), Some("sunny-river-1234.trycloudflare.com"));
+        assert_eq!(
+            quick_host(port).await.as_deref(),
+            Some("sunny-river-1234.trycloudflare.com")
+        );
         assert_eq!(quick_host(port).await, None, "nothing listening");
     }
 
@@ -550,16 +685,30 @@ mod tests {
         let metrics = l.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = l.accept().await else { return };
+                let Ok((mut s, _)) = l.accept().await else {
+                    return;
+                };
                 let mut buf = [0u8; 512];
                 let _ = s.read(&mut buf).await;
                 let body = r#"{"hostname":"someone-else-1234.trycloudflare.com"}"#;
-                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
+                let _ = s
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
             }
         });
         let dir = std::env::temp_dir().join(format!("retail-cf-adopt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let run = Run { pid: std::process::id(), metrics, origin: 8443 };
+        let run = Run {
+            pid: std::process::id(),
+            metrics,
+            origin: 8443,
+        };
         std::fs::write(dir.join("run.json"), serde_json::to_vec(&run).unwrap()).unwrap();
         assert_eq!(adopt(&dir, 8443).await, None);
         let _ = std::fs::remove_dir_all(&dir);

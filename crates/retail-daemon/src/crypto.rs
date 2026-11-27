@@ -17,7 +17,10 @@ pub const OVERHEAD: usize = 32;
 /// `first..first + packets.len()`. Packet `i` grows by `OVERHEAD` bytes.
 pub fn encrypt_batch(session: &Session, first: u64, packets: &[&[u8]], out: &mut Vec<u8>) {
     let mut at = out.len();
-    out.resize(at + packets.iter().map(|p| p.len() + OVERHEAD).sum::<usize>(), 0);
+    out.resize(
+        at + packets.iter().map(|p| p.len() + OVERHEAD).sum::<usize>(),
+        0,
+    );
     for (i, p) in packets.iter().enumerate() {
         let len = p.len() + OVERHEAD;
         session.encrypt_with_counter(first + i as u64, p, &mut out[at..at + len]);
@@ -50,7 +53,9 @@ pub struct AllowedSrc<'a> {
 impl AllowedSrc<'_> {
     pub fn permits(self, src: Ipv4Addr) -> bool {
         src == self.ip
-            || (self.internet && crate::filter::is_internet(src) && !self.foreign.iter().any(|r| r.contains(src)))
+            || (self.internet
+                && crate::filter::is_internet(src)
+                && !self.foreign.iter().any(|r| r.contains(src)))
             || self.routes.iter().any(|r| r.contains(src))
     }
 }
@@ -71,7 +76,13 @@ pub fn decrypt_batch(
     }
 }
 
-fn decrypt_one(session: &Session, dgram: &[u8], buf: &mut Vec<u8>, offset: usize, allowed: AllowedSrc<'_>) -> Decrypted {
+fn decrypt_one(
+    session: &Session,
+    dgram: &[u8],
+    buf: &mut Vec<u8>,
+    offset: usize,
+    allowed: AllowedSrc<'_>,
+) -> Decrypted {
     let need = offset + dgram.len();
     if buf.len() < need {
         buf.resize(need, 0);
@@ -131,7 +142,10 @@ mod tests {
             r => panic!("no keepalive: {r:?}"),
         };
         // The responder switches to the new session on the first packet
-        assert!(matches!(b.decapsulate(None, &keepalive, &mut buf_b), TunnResult::Done));
+        assert!(matches!(
+            b.decapsulate(None, &keepalive, &mut buf_b),
+            TunnResult::Done
+        ));
         (a, b)
     }
 
@@ -153,7 +167,9 @@ mod tests {
     fn concurrent_round_trip_and_replay() {
         let (mut a, mut b) = pair();
         let a_ip = Ipv4Addr::new(100, 64, 0, 1);
-        let packets: Vec<Vec<u8>> = (0..1000u16).map(|n| ip_packet(a_ip, n, 60 + (n as usize % 1200))).collect();
+        let packets: Vec<Vec<u8>> = (0..1000u16)
+            .map(|n| ip_packet(a_ip, n, 60 + (n as usize % 1200)))
+            .collect();
         let refs: Vec<&[u8]> = packets.iter().map(|p| p.as_slice()).collect();
 
         let tx = a.current_send_session().expect("initiator has a session");
@@ -176,7 +192,10 @@ mod tests {
             dgrams.push(&wire[at..at + p.len() + OVERHEAD]);
             at += p.len() + OVERHEAD;
         }
-        let counters: Vec<u64> = dgrams.iter().map(|d| u64::from_le_bytes(d[8..16].try_into().unwrap())).collect();
+        let counters: Vec<u64> = dgrams
+            .iter()
+            .map(|d| u64::from_le_bytes(d[8..16].try_into().unwrap()))
+            .collect();
         assert!(counters.windows(2).all(|w| w[1] == w[0] + 1));
 
         let idx = receiver_index(dgrams[0]);
@@ -198,10 +217,22 @@ mod tests {
         let mut spoofed = ip_packet(Ipv4Addr::new(100, 64, 0, 9), 1, 80);
         spoofed[21] = 7;
         let mut wire2 = Vec::new();
-        encrypt_batch(&tx, tx.reserve_counters(2), &[&spoofed, &packets[0]], &mut wire2);
+        encrypt_batch(
+            &tx,
+            tx.reserve_counters(2),
+            &[&spoofed, &packets[0]],
+            &mut wire2,
+        );
         let mut tampered = wire2[80 + OVERHEAD..].to_vec();
         *tampered.last_mut().unwrap() ^= 1;
-        decrypt_batch(&rx, &[&wire2[..80 + OVERHEAD], &tampered], &mut bufs, 10, only(a_ip), &mut results);
+        decrypt_batch(
+            &rx,
+            &[&wire2[..80 + OVERHEAD], &tampered],
+            &mut bufs,
+            10,
+            only(a_ip),
+            &mut results,
+        );
         assert_eq!(results, vec![Decrypted::Authenticated, Decrypted::Rejected]);
     }
 
@@ -214,28 +245,59 @@ mod tests {
         let rx = b.session_for(receiver_index(&wire)).unwrap();
         let mut bufs = vec![vec![0u8; 64]];
         let mut results = Vec::new();
-        decrypt_batch(&rx, &[&wire], &mut bufs, 0, only(Ipv4Addr::new(100, 64, 0, 1)), &mut results);
+        decrypt_batch(
+            &rx,
+            &[&wire],
+            &mut bufs,
+            0,
+            only(Ipv4Addr::new(100, 64, 0, 1)),
+            &mut results,
+        );
         assert_eq!(results, vec![Decrypted::Authenticated]);
     }
 
     fn only(ip: Ipv4Addr) -> AllowedSrc<'static> {
-        AllowedSrc { ip, internet: false, routes: &[], foreign: &[] }
+        AllowedSrc {
+            ip,
+            internet: false,
+            routes: &[],
+            foreign: &[],
+        }
     }
 
     #[test]
     fn exit_node_may_send_from_internet_but_not_other_mesh_addresses() {
         let me = Ipv4Addr::new(100, 64, 0, 2);
         let foreign = ["203.0.113.0/24".parse().unwrap()];
-        let exit = AllowedSrc { ip: me, internet: true, routes: &[], foreign: &foreign };
+        let exit = AllowedSrc {
+            ip: me,
+            internet: true,
+            routes: &[],
+            foreign: &foreign,
+        };
         assert!(exit.permits(me));
         let routes = ["192.168.7.0/24".parse().unwrap()];
-        let router = AllowedSrc { ip: me, internet: false, routes: &routes, foreign: &[] };
+        let router = AllowedSrc {
+            ip: me,
+            internet: false,
+            routes: &routes,
+            foreign: &[],
+        };
         assert!(router.permits(Ipv4Addr::new(192, 168, 7, 9)));
         assert!(!router.permits(Ipv4Addr::new(192, 168, 8, 9)));
         assert!(exit.permits(Ipv4Addr::new(93, 184, 216, 34)));
-        assert!(!exit.permits(Ipv4Addr::new(100, 64, 0, 9)), "mesh addresses stay bound to their node");
-        assert!(!exit.permits(Ipv4Addr::new(203, 0, 113, 5)), "another peer routes it");
-        assert!(!exit.permits(Ipv4Addr::new(192, 168, 1, 1)), "not from the internet");
+        assert!(
+            !exit.permits(Ipv4Addr::new(100, 64, 0, 9)),
+            "mesh addresses stay bound to their node"
+        );
+        assert!(
+            !exit.permits(Ipv4Addr::new(203, 0, 113, 5)),
+            "another peer routes it"
+        );
+        assert!(
+            !exit.permits(Ipv4Addr::new(192, 168, 1, 1)),
+            "not from the internet"
+        );
         assert!(!only(me).permits(Ipv4Addr::new(93, 184, 216, 34)));
     }
 

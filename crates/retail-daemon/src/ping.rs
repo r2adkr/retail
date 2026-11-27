@@ -57,20 +57,32 @@ pub fn build(msg: Msg, src: Ipv4Addr, dst: Ipv4Addr) -> [u8; LEN] {
 }
 
 pub fn parse(p: &[u8]) -> Option<Msg> {
-    if p.len() != LEN || p[0] != 0x45 || p[9] != 17 || p[20..22] != PORT.to_be_bytes() || p[22..24] != PORT.to_be_bytes() || p[28..32] != MAGIC {
+    if p.len() != LEN
+        || p[0] != 0x45
+        || p[9] != 17
+        || p[20..22] != PORT.to_be_bytes()
+        || p[22..24] != PORT.to_be_bytes()
+        || p[28..32] != MAGIC
+    {
         return None;
     }
     let word = u32::from_be_bytes(p[40..44].try_into().unwrap());
     match p[32] {
         0 => Some(Msg::Request(word)),
         1 => Some(Msg::Reply(word)),
-        2 => Some(Msg::Wake(p[34..40].try_into().unwrap(), Ipv4Addr::from(word))),
+        2 => Some(Msg::Wake(
+            p[34..40].try_into().unwrap(),
+            Ipv4Addr::from(word),
+        )),
         _ => None,
     }
 }
 
 fn checksum(h: &[u8]) -> u16 {
-    let mut sum: u32 = h.chunks(2).map(|c| u32::from(u16::from_be_bytes([c[0], c[1]]))).sum();
+    let mut sum: u32 = h
+        .chunks(2)
+        .map(|c| u32::from(u16::from_be_bytes([c[0], c[1]])))
+        .sum();
     while sum > 0xffff {
         sum = (sum & 0xffff) + (sum >> 16);
     }
@@ -98,7 +110,11 @@ impl Log {
             self.active_until = Some(now + ACTIVE_FOR);
         }
         self.bytes_seen = bytes;
-        if self.active_until.is_none_or(|t| now >= t) || self.last_sent.is_some_and(|at| now.duration_since(at) < INTERVAL) {
+        if self.active_until.is_none_or(|t| now >= t)
+            || self
+                .last_sent
+                .is_some_and(|at| now.duration_since(at) < INTERVAL)
+        {
             return None;
         }
         if self.sent.is_some() {
@@ -130,7 +146,10 @@ impl Log {
 
     /// The latest round trip if recent, and the samples, oldest first
     pub fn snapshot(&self) -> (Option<u32>, Vec<u16>) {
-        let now = self.last.filter(|(_, at)| at.elapsed() < Duration::from_secs(30)).map(|(ms, _)| u32::from(ms));
+        let now = self
+            .last
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(30))
+            .map(|(ms, _)| u32::from(ms));
         (now, self.history.iter().copied().collect())
     }
 }

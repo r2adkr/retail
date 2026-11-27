@@ -99,7 +99,12 @@ pub async fn dial(target: &Target) -> Result<Dialed> {
 /// fails: the slowest way can take long to give up
 pub async fn dial_reporting(target: &Target, report: impl Fn(&anyhow::Error)) -> Result<Dialed> {
     let ways = ways(target, &proxy::current());
-    let last = LAST.lock().unwrap().iter().find(|(u, _)| *u == target.url).map(|(_, l)| l.clone());
+    let last = LAST
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(u, _)| *u == target.url)
+        .map(|(_, l)| l.clone());
     let mut ways = ways;
     if let Some(last) = last
         && let Some(i) = ways.iter().position(|w| w.label() == last)
@@ -142,7 +147,11 @@ pub async fn dial_reporting(target: &Target, report: impl Fn(&anyhow::Error)) ->
                 last.push((target.url.clone(), label.clone()));
                 tracing::debug!(via = %label, "connected to the server");
                 // Dropping the set cancels the other attempts
-                return Ok(Dialed { io, via: label, server_addr });
+                return Ok(Dialed {
+                    io,
+                    via: label,
+                    server_addr,
+                });
             }
             Err(e) => {
                 tracing::debug!(via = %label, "{e:#}");
@@ -161,8 +170,12 @@ pub async fn dial_reporting(target: &Target, report: impl Fn(&anyhow::Error)) ->
 }
 
 fn ways(target: &Target, proxies: &[Proxy]) -> Vec<Way> {
-    let Ok(url) = parse_url(&target.url) else { return Vec::new() };
-    let carriers: Vec<Carrier> = std::iter::once(Carrier::Direct).chain(proxies.iter().cloned().map(Carrier::Proxy)).collect();
+    let Ok(url) = parse_url(&target.url) else {
+        return Vec::new();
+    };
+    let carriers: Vec<Carrier> = std::iter::once(Carrier::Direct)
+        .chain(proxies.iter().cloned().map(Carrier::Proxy))
+        .collect();
     let mut tunnels = Vec::new();
     if url.tls {
         let authority = url.authority_string();
@@ -171,26 +184,51 @@ fn ways(target: &Target, proxies: &[Proxy]) -> Vec<Way> {
         if url.port != 80 {
             tunnels.push(format!("http://{}", host_port(url.host, 80)));
         }
-        tunnels.extend(target.fronts.iter().map(|f| f.trim_end_matches('/').to_string()));
+        tunnels.extend(
+            target
+                .fronts
+                .iter()
+                .map(|f| f.trim_end_matches('/').to_string()),
+        );
     }
     let mut out = Vec::new();
     for c in &carriers {
-        out.push(Way { carrier: c.clone(), mode: Mode::Direct, delay: Duration::ZERO });
+        out.push(Way {
+            carrier: c.clone(),
+            mode: Mode::Direct,
+            delay: Duration::ZERO,
+        });
         if url.tls && target.reality.is_some() {
-            out.push(Way { carrier: c.clone(), mode: Mode::Reality, delay: REALITY_DELAY });
+            out.push(Way {
+                carrier: c.clone(),
+                mode: Mode::Reality,
+                delay: REALITY_DELAY,
+            });
         }
         for t in &tunnels {
-            out.push(Way { carrier: c.clone(), mode: Mode::WebSocket(t.clone()), delay: TUNNEL_DELAY });
+            out.push(Way {
+                carrier: c.clone(),
+                mode: Mode::WebSocket(t.clone()),
+                delay: TUNNEL_DELAY,
+            });
         }
         for t in &tunnels {
-            out.push(Way { carrier: c.clone(), mode: Mode::Poll(t.clone()), delay: POLL_DELAY });
+            out.push(Way {
+                carrier: c.clone(),
+                mode: Mode::Poll(t.clone()),
+                delay: POLL_DELAY,
+            });
         }
     }
     out
 }
 
 fn host_port(host: &str, port: u16) -> String {
-    if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 /// The server's other addresses, on `port`
@@ -198,12 +236,21 @@ fn alts_on(target: &Target, port: u16) -> Vec<String> {
     target
         .alts
         .iter()
-        .filter_map(|a| a.parse::<SocketAddr>().ok().map(|s| SocketAddr::new(s.ip(), port).to_string()))
+        .filter_map(|a| {
+            a.parse::<SocketAddr>()
+                .ok()
+                .map(|s| SocketAddr::new(s.ip(), port).to_string())
+        })
         .collect()
 }
 
 /// A byte stream to `host:port`, and the address when direct
-async fn carry(carrier: &Carrier, host: &str, port: u16, alts: &[String]) -> Result<(BoxIo, Option<SocketAddr>)> {
+async fn carry(
+    carrier: &Carrier,
+    host: &str,
+    port: u16,
+    alts: &[String],
+) -> Result<(BoxIo, Option<SocketAddr>)> {
     match carrier {
         Carrier::Direct => {
             let tcp = crate::happy::connect_many(host, port, alts).await?;
@@ -229,7 +276,9 @@ async fn attempt(target: &Target, way: &Way) -> Result<(BoxIo, Option<SocketAddr
         Mode::Reality => {
             let params = target.reality.as_ref().context("no REALITY")?;
             let (io, peer) = carry(&way.carrier, url.host, url.port, &target.alts).await?;
-            let stream = crate::reality::connect(io, params).await.context("REALITY handshake")?;
+            let stream = crate::reality::connect(io, params)
+                .await
+                .context("REALITY handshake")?;
             Ok((Box::new(stream), peer))
         }
         Mode::WebSocket(t) => {
@@ -244,9 +293,15 @@ async fn attempt(target: &Target, way: &Way) -> Result<(BoxIo, Option<SocketAddr
 }
 
 async fn tls(io: BoxIo, config: Arc<rustls::ClientConfig>, host: &str) -> Result<BoxIo> {
-    let name = rustls::pki_types::ServerName::try_from(host.to_string()).context("invalid TLS server name")?;
-    let mut stream = tokio_rustls::TlsConnector::from(config).connect(name, io).await?;
-    stream.get_mut().1.set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .context("invalid TLS server name")?;
+    let mut stream = tokio_rustls::TlsConnector::from(config)
+        .connect(name, io)
+        .await?;
+    stream
+        .get_mut()
+        .1
+        .set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
     Ok(Box::new(stream))
 }
 
@@ -256,16 +311,29 @@ async fn tls(io: BoxIo, config: Arc<rustls::ClientConfig>, host: &str) -> Result
 async fn outer(target: &Target, carrier: &Carrier, t: &str) -> Result<BoxIo> {
     let u = parse_url(t)?;
     let server = parse_url(&target.url)?;
-    let alts = if u.host == server.host { alts_on(target, u.port) } else { Vec::new() };
+    let alts = if u.host == server.host {
+        alts_on(target, u.port)
+    } else {
+        Vec::new()
+    };
     let (io, _) = carry(carrier, u.host, u.port, &alts).await?;
-    if u.tls { tls(io, any_cert(), u.host).await } else { Ok(io) }
+    if u.tls {
+        tls(io, any_cert(), u.host).await
+    } else {
+        Ok(io)
+    }
 }
 
 async fn websocket(target: &Target, carrier: &Carrier, t: &str) -> Result<DuplexStream> {
     let u = parse_url(t)?;
     let io = outer(target, carrier, t).await?;
     let scheme = if u.tls { "wss" } else { "ws" };
-    let req = format!("{scheme}://{}{}/api/v1/tunnel", u.authority_string(), u.base).into_client_request()?;
+    let req = format!(
+        "{scheme}://{}{}/api/v1/tunnel",
+        u.authority_string(),
+        u.base
+    )
+    .into_client_request()?;
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .read_buffer_size(TUNNEL_CHUNK)
         .write_buffer_size(0)
@@ -298,7 +366,11 @@ async fn websocket(target: &Target, carrier: &Carrier, t: &str) -> Result<Duplex
                 match pipe_rx.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                        if tx
+                            .send(Message::Binary(buf[..n].to_vec().into()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -327,7 +399,11 @@ impl HttpLink {
     /// proxies pass more readily than `CONNECT` to port 80
     fn forward_proxy(&self) -> Option<&Proxy> {
         match &self.carrier {
-            Carrier::Proxy(p) if p.kind == proxy::Kind::Http && !self.url.starts_with("https://") => Some(p),
+            Carrier::Proxy(p)
+                if p.kind == proxy::Kind::Http && !self.url.starts_with("https://") =>
+            {
+                Some(p)
+            }
             _ => None,
         }
     }
@@ -400,13 +476,21 @@ impl HttpLink {
 }
 
 async fn poll(target: &Target, carrier: &Carrier, t: &str) -> Result<DuplexStream> {
-    let link = HttpLink { target: target.clone(), carrier: carrier.clone(), url: t.to_string() };
+    let link = HttpLink {
+        target: target.clone(),
+        carrier: carrier.clone(),
+        url: t.to_string(),
+    };
     let mut down_conn = None;
-    let resp = link.request(&mut down_conn, "POST", "/api/v1/tunnel/poll", &[]).await?;
+    let resp = link
+        .request(&mut down_conn, "POST", "/api/v1/tunnel/poll", &[])
+        .await?;
     if resp.status != 200 {
         bail!("tunnel refused: HTTP {}", resp.status);
     }
-    let id = String::from_utf8(resp.body).ok().filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    let id = String::from_utf8(resp.body)
+        .ok()
+        .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
     let id = id.context("malformed tunnel id")?;
     let (ours, theirs) = tokio::io::duplex(PIPE);
     let (mut pipe_rx, mut pipe_tx) = tokio::io::split(ours);
@@ -419,7 +503,10 @@ async fn poll(target: &Target, carrier: &Carrier, t: &str) -> Result<DuplexStrea
             let mut errors = 0;
             loop {
                 n += 1;
-                match link.request(&mut down_conn, "GET", &format!("{down_path}?n={n}"), &[]).await {
+                match link
+                    .request(&mut down_conn, "GET", &format!("{down_path}?n={n}"), &[])
+                    .await
+                {
                     Ok(r) if r.status == 200 => {
                         errors = 0;
                         if pipe_tx.write_all(&r.body).await.is_err() {
@@ -505,7 +592,12 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -514,7 +606,12 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -543,7 +640,11 @@ mod tests {
         .await
         .unwrap();
         let base = format!("127.0.0.1:{}", server.port());
-        let target = Target { url: format!("https://{base}"), pin: server.pin(), ..Default::default() };
+        let target = Target {
+            url: format!("https://{base}"),
+            pin: server.pin(),
+            ..Default::default()
+        };
         let modes = [
             Mode::Direct,
             Mode::WebSocket(format!("http://{base}")),
@@ -552,23 +653,49 @@ mod tests {
             Mode::Poll(format!("https://{base}")),
         ];
         for mode in modes {
-            let way = Way { carrier: Carrier::Direct, mode, delay: Duration::ZERO };
-            let (mut io, _) = attempt(&target, &way).await.unwrap_or_else(|e| panic!("{}: {e:#}", way.label()));
-            io.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+            let way = Way {
+                carrier: Carrier::Direct,
+                mode,
+                delay: Duration::ZERO,
+            };
+            let (mut io, _) = attempt(&target, &way)
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e:#}", way.label()));
+            io.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
             let mut resp = Vec::new();
-            tokio::time::timeout(Duration::from_secs(10), io.read_to_end(&mut resp)).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), io.read_to_end(&mut resp))
+                .await
+                .unwrap()
+                .unwrap();
             let text = String::from_utf8_lossy(&resp);
-            assert!(text.starts_with("HTTP/1.1 200") && text.ends_with("ok"), "{}: {text}", way.label());
+            assert!(
+                text.starts_with("HTTP/1.1 200") && text.ends_with("ok"),
+                "{}: {text}",
+                way.label()
+            );
         }
         // Plain HTTP reaches only the tunnel endpoints
         let mut plain = tokio::net::TcpStream::connect(&base).await.unwrap();
         plain.write_all(b"POST /api/v1/register HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
         let mut resp = Vec::new();
         plain.read_to_end(&mut resp).await.unwrap();
-        assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 403"), "{}", String::from_utf8_lossy(&resp));
+        assert!(
+            String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 403"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
         // And a pin mismatch inside a tunnel fails
-        let wrong = Target { pin: Some([9; 32]), ..target.clone() };
-        let way = Way { carrier: Carrier::Direct, mode: Mode::WebSocket(format!("http://{base}")), delay: Duration::ZERO };
+        let wrong = Target {
+            pin: Some([9; 32]),
+            ..target.clone()
+        };
+        let way = Way {
+            carrier: Carrier::Direct,
+            mode: Mode::WebSocket(format!("http://{base}")),
+            delay: Duration::ZERO,
+        };
         assert!(attempt(&wrong, &way).await.is_err());
         server.stop().await;
         let _ = std::fs::remove_dir_all(dir);

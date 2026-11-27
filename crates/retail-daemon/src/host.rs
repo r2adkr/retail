@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use retail_proto::DEFAULT_STUN_PORT;
-use retail_proto::api::{InviteRequest, InviteResponse, ServerInvite, ServerNode, ServerStartRequest, ServerStatus};
+use retail_proto::api::{
+    InviteRequest, InviteResponse, ServerInvite, ServerNode, ServerStartRequest, ServerStatus,
+};
 use retail_proto::invite::{Invite, encode_pin};
 use serde::{Deserialize, Serialize};
 
@@ -79,7 +81,12 @@ impl HostReality {
         let mut id = [0u8; 8];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
-        Ok(HostReality { private_key: encode_pin(&key), short_id: hex(&id), server_name: name.to_ascii_lowercase(), dest })
+        Ok(HostReality {
+            private_key: encode_pin(&key),
+            short_id: hex(&id),
+            server_name: name.to_ascii_lowercase(),
+            dest,
+        })
     }
 
     fn server_config(&self) -> Option<retail_control::reality::ServerConfig> {
@@ -92,7 +99,9 @@ impl HostReality {
     }
 
     fn invite(&self) -> Option<retail_proto::invite::RealityInvite> {
-        let secret = boringtun::x25519::StaticSecret::from(retail_proto::invite::decode_pin(&self.private_key)?);
+        let secret = boringtun::x25519::StaticSecret::from(retail_proto::invite::decode_pin(
+            &self.private_key,
+        )?);
         let public = boringtun::x25519::PublicKey::from(&secret).to_bytes();
         Some(retail_proto::invite::RealityInvite {
             public_key: encode_pin(&public),
@@ -225,7 +234,8 @@ impl Host {
         if running.is_some() {
             return Ok(());
         }
-        std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating {}", self.dir.display()))?;
         crate::state::secure_dir(&self.dir);
         let saved = self.config();
         // Left out, the port and domain stay as they were (a restored backup's)
@@ -235,19 +245,31 @@ impl Host {
             Some(d) => Some(d.to_string()),
             None => saved.domain.clone(),
         };
-        let tls = if req.insecure_http { retail_control::Tls::Off } else { retail_control::Tls::SelfSigned };
+        let tls = if req.insecure_http {
+            retail_control::Tls::Off
+        } else {
+            retail_control::Tls::SelfSigned
+        };
         let previous = self.config().reality;
         let reality = match req.reality.as_deref().map(str::trim) {
             Some("off") | Some("") => None,
             Some(site) => match previous {
                 // Same site keeps the keys so earlier invites still work
-                Some(r) if HostReality::new(site).is_ok_and(|n| n.server_name == r.server_name && n.dest == r.dest) => Some(r),
+                Some(r)
+                    if HostReality::new(site)
+                        .is_ok_and(|n| n.server_name == r.server_name && n.dest == r.dest) =>
+                {
+                    Some(r)
+                }
                 _ => Some(HostReality::new(site)?),
             },
             None => previous,
         };
         let fronts = match &req.fronts {
-            Some(f) => f.iter().map(|u| normalize_front(u)).collect::<Result<Vec<_>>>()?,
+            Some(f) => f
+                .iter()
+                .map(|u| normalize_front(u))
+                .collect::<Result<Vec<_>>>()?,
             None => saved.fronts.clone(),
         };
         let helper_code = match req.helper.as_deref().map(str::trim) {
@@ -256,7 +278,9 @@ impl Host {
             None => saved.helper.clone(),
         };
         let helper = match &helper_code {
-            Some(code) => Some(retail_proto::invite::HelperCode::decode(code).map_err(anyhow::Error::msg)?),
+            Some(code) => {
+                Some(retail_proto::invite::HelperCode::decode(code).map_err(anyhow::Error::msg)?)
+            }
             None => None,
         };
         let any = |p: u16| SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, p));
@@ -311,20 +335,41 @@ impl Host {
         // RETAIL_NO_PORTMAP leaves the router alone (tests, or a VPS with a public address)
         let use_portmap = !req.insecure_http && std::env::var_os("RETAIL_NO_PORTMAP").is_none();
         let portmap = use_portmap.then(|| {
-            let mut ports = vec![(Proto::Tcp, server.port()), (Proto::Udp, server.stun_port()), (Proto::Udp, wg_port)];
+            let mut ports = vec![
+                (Proto::Tcp, server.port()),
+                (Proto::Udp, server.stun_port()),
+                (Proto::Udp, wg_port),
+            ];
             ports.extend(server.extra_ports().iter().map(|p| (Proto::Tcp, *p)));
             let public_wg = self.public_wg.clone();
-            tokio::spawn(keep_ports_open(ports, alt_port, reach.clone(), mapped.clone(), stun.clone(), public_wg))
+            tokio::spawn(keep_ports_open(
+                ports,
+                alt_port,
+                reach.clone(),
+                mapped.clone(),
+                stun.clone(),
+                public_wg,
+            ))
         });
         let helper_linked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let helper_link = match (&helper, server.injector()) {
-            (Some(h), Some(inject)) => Some(tokio::spawn(crate::helper_link::run(h.clone(), inject, helper_linked.clone()))),
+            (Some(h), Some(inject)) => Some(tokio::spawn(crate::helper_link::run(
+                h.clone(),
+                inject,
+                helper_linked.clone(),
+            ))),
             _ => None,
         };
         let device_helper = Arc::new(Mutex::new(None));
         let device_linked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let device_watch = server.injector().map(|inject| {
-            tokio::spawn(follow_device_helper(server.helper_device_code(), inject, device_helper.clone(), device_linked.clone(), stun.clone()))
+            tokio::spawn(follow_device_helper(
+                server.helper_device_code(),
+                inject,
+                device_helper.clone(),
+                device_linked.clone(),
+                stun.clone(),
+            ))
         });
         self.hosting.send_replace(true);
         *running = Some(Running {
@@ -395,7 +440,8 @@ impl Host {
             // From memory, which has the latest last-seen times
             Some(r) => files.insert(retail_control::DATA_FILE, &r.server.snapshot()?),
             None => {
-                let data = std::fs::read(self.dir.join(retail_control::DATA_FILE)).context("this device has no server to back up")?;
+                let data = std::fs::read(self.dir.join(retail_control::DATA_FILE))
+                    .context("this device has no server to back up")?;
                 files.insert(retail_control::DATA_FILE, &data);
             }
         }
@@ -410,7 +456,9 @@ impl Host {
             bail!("stop the server first (retail server stop)");
         }
         let files = crate::backup::open(backup, passphrase)?;
-        let data = files.get(retail_control::DATA_FILE).context("the backup has no server data")?;
+        let data = files
+            .get(retail_control::DATA_FILE)
+            .context("the backup has no server data")?;
         retail_control::check_data(&data)?;
         let parent = self.dir.parent().context("no state directory")?;
         let incoming = parent.join("server.restore");
@@ -424,7 +472,8 @@ impl Host {
         }
         let _ = std::fs::remove_dir_all(&previous);
         if self.dir.exists() {
-            std::fs::rename(&self.dir, &previous).with_context(|| format!("moving {} aside", self.dir.display()))?;
+            std::fs::rename(&self.dir, &previous)
+                .with_context(|| format!("moving {} aside", self.dir.display()))?;
         }
         if let Err(e) = std::fs::rename(&incoming, &self.dir) {
             let _ = std::fs::rename(&previous, &self.dir);
@@ -439,7 +488,10 @@ impl Host {
         Ok(())
     }
 
-    async fn with_server<T>(&self, f: impl FnOnce(&retail_control::Server) -> Result<T>) -> Result<T> {
+    async fn with_server<T>(
+        &self,
+        f: impl FnOnce(&retail_control::Server) -> Result<T>,
+    ) -> Result<T> {
         let running = self.running.lock().await;
         let r = running.as_ref().context("the server is not running")?;
         f(&r.server)
@@ -466,8 +518,13 @@ impl Host {
         self.with_server(|s| s.keep_forever(id, key)).await
     }
 
-    pub async fn set_expiry(&self, key_days: Option<u32>, inactive_days: Option<u32>) -> Result<()> {
-        self.with_server(|s| s.set_expiry_settings(key_days, inactive_days)).await
+    pub async fn set_expiry(
+        &self,
+        key_days: Option<u32>,
+        inactive_days: Option<u32>,
+    ) -> Result<()> {
+        self.with_server(|s| s.set_expiry_settings(key_days, inactive_days))
+            .await
     }
 
     pub async fn renew(&self, id: i64, never: bool) -> Result<()> {
@@ -520,7 +577,13 @@ impl Host {
         slot: &Arc<Mutex<Option<String>>>,
     ) -> (crate::cloudflared::Tunnel, tokio::task::JoinHandle<()>) {
         let tunnel = crate::cloudflared::Tunnel::start(self.tunnel_dir(), server.port());
-        let watch = tokio::spawn(follow_tunnel(tunnel.url(), fronts.to_vec(), server.front_setter(), slot.clone(), stun.clone()));
+        let watch = tokio::spawn(follow_tunnel(
+            tunnel.url(),
+            fronts.to_vec(),
+            server.front_setter(),
+            slot.clone(),
+            stun.clone(),
+        ));
         (tunnel, watch)
     }
 
@@ -555,7 +618,9 @@ impl Host {
             }
             *r.tunnel_url.lock().unwrap() = None;
             r.server.set_fronts(r.fronts.clone());
-            r.stun.public.store(false, std::sync::atomic::Ordering::Relaxed);
+            r.stun
+                .public
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             r.stun.advertise();
         }
         Ok(())
@@ -598,10 +663,15 @@ impl Host {
         let reach = r.reach.lock().unwrap().clone();
         let public = match (&r.domain, reach.public_ip, reach.tcp) {
             (Some(d), _, _) => Some(format!("{d}:{port}")),
-            (None, Some(ip), Some(p)) if !portmap::is_private(ip) => Some(SocketAddr::new(ip, p).to_string()),
+            (None, Some(ip), Some(p)) if !portmap::is_private(ip) => {
+                Some(SocketAddr::new(ip, p).to_string())
+            }
             _ => None,
         };
-        let lan = lan_ips().into_iter().map(|ip| SocketAddr::new(ip, port).to_string()).collect();
+        let lan = lan_ips()
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port).to_string())
+            .collect();
         (public, lan)
     }
 
@@ -611,15 +681,27 @@ impl Host {
     fn invite_addrs(r: &Running) -> Vec<String> {
         let (_, lan) = Self::addresses(r);
         let reach = r.reach.lock().unwrap().clone();
-        let (public, guessed) = public_addrs(r.domain.as_deref(), r.server.port(), r.alt_port, &reach);
+        let (public, guessed) =
+            public_addrs(r.domain.as_deref(), r.server.port(), r.alt_port, &reach);
         let helper = r.helper.iter().flat_map(|h| h.addrs.iter().cloned());
         let device = r.device_helper.lock().unwrap().clone();
-        let device = device.iter().flat_map(|h| h.addrs.iter().cloned()).collect::<Vec<_>>();
+        let device = device
+            .iter()
+            .flat_map(|h| h.addrs.iter().cloned())
+            .collect::<Vec<_>>();
         let (global, private): (Vec<String>, Vec<String>) = lan.into_iter().partition(|a| {
-            a.parse::<SocketAddr>().is_ok_and(|sa| sa.is_ipv6() && !portmap::is_private(sa.ip()))
+            a.parse::<SocketAddr>()
+                .is_ok_and(|sa| sa.is_ipv6() && !portmap::is_private(sa.ip()))
         });
         let mut out: Vec<String> = Vec::new();
-        for a in public.into_iter().chain(helper).chain(device).chain(guessed).chain(global).chain(private) {
+        for a in public
+            .into_iter()
+            .chain(helper)
+            .chain(device)
+            .chain(guessed)
+            .chain(global)
+            .chain(private)
+        {
             if !out.contains(&a) {
                 out.push(a);
             }
@@ -631,7 +713,10 @@ impl Host {
         let running = self.running.lock().await;
         let last_error = self.last_error.lock().unwrap().clone();
         let Some(r) = running.as_ref() else {
-            return ServerStatus { last_error, ..Default::default() };
+            return ServerStatus {
+                last_error,
+                ..Default::default()
+            };
         };
         let (public, lan) = Self::addresses(r);
         let reach = r.reach.lock().unwrap().clone();
@@ -705,12 +790,17 @@ impl Host {
         let max = |h: u64| Duration::from_secs(h.clamp(1, 24 * 365) * 3600);
         let (key, expires_at) = match req.name.as_deref().map(str::trim) {
             Some(name) => {
-                if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+                if name.is_empty()
+                    || name.chars().count() > 40
+                    || name.chars().any(char::is_control)
+                {
                     bail!("an invite name is 1 to 40 characters");
                 }
                 let ttl = req.ttl_hours.map(max);
                 let (_, key) = r.server.set_named_key(name, ttl).await?;
-                let expires = ttl.map_or(i64::MAX, |t| retail_control::now_unix() + t.as_secs() as i64);
+                let expires = ttl.map_or(i64::MAX, |t| {
+                    retail_control::now_unix() + t.as_secs() as i64
+                });
                 (key, expires)
             }
             None => {
@@ -719,7 +809,10 @@ impl Host {
                 (key, retail_control::now_unix() + ttl.as_secs() as i64)
             }
         };
-        Ok(InviteResponse { code: Self::invite_code(r, key)?, expires_at })
+        Ok(InviteResponse {
+            code: Self::invite_code(r, key)?,
+            expires_at,
+        })
     }
 
     fn invite_code(r: &Running, key: String) -> Result<String> {
@@ -728,7 +821,13 @@ impl Host {
             bail!("this device has no network address to invite others to");
         }
         let reality = r.reality.as_ref().and_then(HostReality::invite);
-        let invite = Invite { addrs, pin: r.server.pin().as_ref().map(encode_pin), key, reality, fronts: Self::all_fronts(r) };
+        let invite = Invite {
+            addrs,
+            pin: r.server.pin().as_ref().map(encode_pin),
+            key,
+            reality,
+            fronts: Self::all_fronts(r),
+        };
         Ok(invite.encode())
     }
 
@@ -743,19 +842,29 @@ impl Host {
     pub async fn named_code(&self, id: i64) -> Result<String> {
         let running = self.running.lock().await;
         let r = running.as_ref().context("the server is not running")?;
-        let key = r.server.named_key(id).await?.context("no such named invite, or it expired")?;
+        let key = r
+            .server
+            .named_key(id)
+            .await?
+            .context("no such named invite, or it expired")?;
         Self::invite_code(r, key)
     }
 
     /// The pin of the running server's certificate
     pub async fn pin(&self) -> Option<String> {
         let running = self.running.lock().await;
-        running.as_ref().and_then(|r| r.server.pin()).as_ref().map(encode_pin)
+        running
+            .as_ref()
+            .and_then(|r| r.server.pin())
+            .as_ref()
+            .map(encode_pin)
     }
 
     pub async fn local_url(&self) -> Option<String> {
         let running = self.running.lock().await;
-        running.as_ref().map(|r| format!("https://127.0.0.1:{}", r.server.port()))
+        running
+            .as_ref()
+            .map(|r| format!("https://127.0.0.1:{}", r.server.port()))
     }
 
     pub async fn self_invite(&self) -> Result<String> {
@@ -774,12 +883,22 @@ impl Host {
 
     pub async fn delete_node(&self, id: i64, revoke_invite: bool) -> Result<bool> {
         let running = self.running.lock().await;
-        running.as_ref().context("the server is not running")?.server.delete_node(id, revoke_invite).await
+        running
+            .as_ref()
+            .context("the server is not running")?
+            .server
+            .delete_node(id, revoke_invite)
+            .await
     }
 
     pub async fn revoke_invite(&self, id: i64) -> Result<bool> {
         let running = self.running.lock().await;
-        running.as_ref().context("the server is not running")?.server.revoke_key(id).await
+        running
+            .as_ref()
+            .context("the server is not running")?
+            .server
+            .revoke_key(id)
+            .await
     }
 }
 
@@ -793,14 +912,21 @@ async fn follow_device_helper(
 ) {
     let mut link: Option<tokio::task::JoinHandle<()>> = None;
     loop {
-        let decoded = code.borrow_and_update().as_deref().and_then(|c| retail_proto::invite::HelperCode::decode(c).ok());
+        let decoded = code
+            .borrow_and_update()
+            .as_deref()
+            .and_then(|c| retail_proto::invite::HelperCode::decode(c).ok());
         if let Some(t) = link.take() {
             t.abort();
         }
         linked.store(false, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = &decoded {
             tracing::info!(helper = ?h.addrs.first(), "linking to the helper device");
-            link = Some(tokio::spawn(crate::helper_link::run(h.clone(), inject.clone(), linked.clone())));
+            link = Some(tokio::spawn(crate::helper_link::run(
+                h.clone(),
+                inject.clone(),
+                linked.clone(),
+            )));
         }
         *stun.device.lock().unwrap() = decoded.iter().flat_map(helper_stun).collect();
         stun.advertise();
@@ -847,7 +973,8 @@ async fn follow_tunnel(
         let mut all = fronts.clone();
         all.extend(now.clone());
         setter.set(all);
-        stun.public.store(now.is_some(), std::sync::atomic::Ordering::Relaxed);
+        stun.public
+            .store(now.is_some(), std::sync::atomic::Ordering::Relaxed);
         stun.advertise();
         if url.changed().await.is_err() {
             break;
@@ -859,7 +986,10 @@ impl Stun {
     fn advertise(&self) {
         let reach = self.reach.lock().unwrap().clone();
         let mut stun = Vec::new();
-        if let (Some(ip), Some(port)) = (reach.public_ip.filter(|ip| !portmap::is_private(*ip)), reach.stun) {
+        if let (Some(ip), Some(port)) = (
+            reach.public_ip.filter(|ip| !portmap::is_private(*ip)),
+            reach.stun,
+        ) {
             stun.push(SocketAddr::new(ip, port).to_string());
         }
         stun.extend(self.helper.iter().cloned());
@@ -867,20 +997,32 @@ impl Stun {
         if self.public.load(std::sync::atomic::Ordering::Relaxed) {
             stun.push(PUBLIC_STUN.to_string());
         }
-        stun.extend(lan_ips().into_iter().map(|ip| SocketAddr::new(ip, self.port).to_string()));
+        stun.extend(
+            lan_ips()
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, self.port).to_string()),
+        );
         self.adv.set(stun);
     }
 }
 
 /// `host:3478` for each address of a helper code
 fn helper_stun(code: &retail_proto::invite::HelperCode) -> Vec<String> {
-    code.addrs.iter().filter_map(|a| a.rsplit_once(':').map(|(host, _)| format!("{host}:{DEFAULT_STUN_PORT}"))).collect()
+    code.addrs
+        .iter()
+        .filter_map(|a| {
+            a.rsplit_once(':')
+                .map(|(host, _)| format!("{host}:{DEFAULT_STUN_PORT}"))
+        })
+        .collect()
 }
 
 /// An `https://` URL without a trailing slash
 fn normalize_front(url: &str) -> Result<String> {
     let url = url.trim().trim_end_matches('/');
-    let rest = url.strip_prefix("https://").context("a CDN address starts with https://")?;
+    let rest = url
+        .strip_prefix("https://")
+        .context("a CDN address starts with https://")?;
     if rest.is_empty() || rest.contains(['/', '?', '#', ' ']) {
         bail!("a CDN address is https://name, with no path");
     }
@@ -897,10 +1039,18 @@ fn tcp_ports(tcp: u16, alt: Option<u16>) -> String {
 
 /// Where other networks may reach the server: what is known to be open,
 /// and what may be (the router's address on ports forwarded by hand)
-fn public_addrs(domain: Option<&str>, port: u16, alt: Option<u16>, reach: &Reach) -> (Vec<String>, Vec<String>) {
+fn public_addrs(
+    domain: Option<&str>,
+    port: u16,
+    alt: Option<u16>,
+    reach: &Reach,
+) -> (Vec<String>, Vec<String>) {
     let mut open = Vec::new();
     let mut guessed = Vec::new();
-    match (domain, reach.public_ip.filter(|ip| !portmap::is_private(*ip))) {
+    match (
+        domain,
+        reach.public_ip.filter(|ip| !portmap::is_private(*ip)),
+    ) {
         // A domain (a VPS, or ports forwarded to the same numbers)
         (Some(d), _) => {
             open.push(format!("{d}:{port}"));
@@ -978,7 +1128,10 @@ async fn keep_ports_open(
                 *mapped.lock().unwrap() = Some(o);
                 *reach.lock().unwrap() = now.clone();
                 stun_servers.advertise();
-                let wg = now.public_ip.filter(|ip| !portmap::is_private(*ip)).zip(now.wg);
+                let wg = now
+                    .public_ip
+                    .filter(|ip| !portmap::is_private(*ip))
+                    .zip(now.wg);
                 public_wg.send_replace(wg.map(|(ip, port)| SocketAddr::new(ip, port)));
                 tokio::time::sleep(portmap::LEASE / 2).await;
                 continue;
@@ -1016,16 +1169,23 @@ async fn keep_ports_open(
 pub fn is_own(ip: std::net::Ipv4Addr) -> bool {
     static CACHE: Mutex<Option<(std::time::Instant, Vec<IpAddr>)>> = Mutex::new(None);
     let mut c = CACHE.lock().unwrap();
-    if c.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(5)) {
-        let all = if_addrs::get_if_addrs().map(|v| v.into_iter().map(|i| i.ip()).collect()).unwrap_or_default();
+    if c.as_ref()
+        .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(5))
+    {
+        let all = if_addrs::get_if_addrs()
+            .map(|v| v.into_iter().map(|i| i.ip()).collect())
+            .unwrap_or_default();
         *c = Some((std::time::Instant::now(), all));
     }
-    c.as_ref().is_some_and(|(_, all)| all.contains(&IpAddr::V4(ip)))
+    c.as_ref()
+        .is_some_and(|(_, all)| all.contains(&IpAddr::V4(ip)))
 }
 
 /// The IPv4 networks this machine's interfaces are on, outside the mesh
 pub fn local_networks() -> Vec<retail_proto::route::Ipv4Net> {
-    let Ok(ifaces) = if_addrs::get_if_addrs() else { return Vec::new() };
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
     ifaces
         .into_iter()
         .filter_map(|i| match i.addr {
@@ -1039,18 +1199,26 @@ pub fn local_networks() -> Vec<retail_proto::route::Ipv4Net> {
 }
 
 pub fn lan_ips() -> Vec<IpAddr> {
-    let Ok(ifaces) = if_addrs::get_if_addrs() else { return Vec::new() };
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
     let mut ips: Vec<IpAddr> = ifaces
         .into_iter()
         .map(|i| i.ip())
         .filter(|ip| match ip {
-            IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local() && !retail_proto::in_mesh(*v4),
-            IpAddr::V6(v6) => !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80 && !v6.is_unspecified(),
+            IpAddr::V4(v4) => {
+                !v4.is_loopback() && !v4.is_link_local() && !retail_proto::in_mesh(*v4)
+            }
+            IpAddr::V6(v6) => {
+                !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80 && !v6.is_unspecified()
+            }
         })
         .collect();
     // The default-route address first (not a VM or container adapter), then
     // IPv4 before IPv6, the common case for devices nearby
-    let primary = portmap::default_gateway().and_then(|gw| portmap::local_ipv4_towards(IpAddr::V4(gw))).map(IpAddr::V4);
+    let primary = portmap::default_gateway()
+        .and_then(|gw| portmap::local_ipv4_towards(IpAddr::V4(gw)))
+        .map(IpAddr::V4);
     ips.sort_by_key(|ip| (Some(*ip) != primary, ip.is_ipv6(), *ip));
     ips.dedup();
     ips
@@ -1060,7 +1228,12 @@ pub fn lan_ips() -> Vec<IpAddr> {
 mod tests {
     use super::*;
 
-    fn reach(public: Option<&str>, tcp: Option<u16>, alt: Option<u16>, unmapped: Option<&str>) -> Reach {
+    fn reach(
+        public: Option<&str>,
+        tcp: Option<u16>,
+        alt: Option<u16>,
+        unmapped: Option<&str>,
+    ) -> Reach {
         Reach {
             public_ip: public.map(|s| s.parse().unwrap()),
             tcp,
@@ -1074,13 +1247,25 @@ mod tests {
     fn invites_name_every_open_port() {
         // Both ports mapped (UPnP may give the second another number)
         let r = reach(Some("203.0.113.9"), Some(443), Some(24581), None);
-        assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec!["203.0.113.9:443".into(), "203.0.113.9:24581".into()], vec![]));
+        assert_eq!(
+            public_addrs(None, 443, Some(21000), &r),
+            (
+                vec!["203.0.113.9:443".into(), "203.0.113.9:24581".into()],
+                vec![]
+            )
+        );
         // Only the first mapped
         let r = reach(Some("203.0.113.9"), Some(443), None, None);
-        assert_eq!(public_addrs(None, 443, Some(21000), &r).0, ["203.0.113.9:443"]);
+        assert_eq!(
+            public_addrs(None, 443, Some(21000), &r).0,
+            ["203.0.113.9:443"]
+        );
         // A domain names both ports
         let r = reach(None, None, None, None);
-        assert_eq!(public_addrs(Some("vpn.example.com"), 443, Some(21000), &r).0, ["vpn.example.com:443", "vpn.example.com:21000"]);
+        assert_eq!(
+            public_addrs(Some("vpn.example.com"), 443, Some(21000), &r).0,
+            ["vpn.example.com:443", "vpn.example.com:21000"]
+        );
         // Behind CGNAT nothing is public
         let r = reach(Some("100.64.3.4"), Some(443), Some(21000), None);
         assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec![], vec![]));
@@ -1091,7 +1276,13 @@ mod tests {
     #[test]
     fn invites_guess_hand_forwarded_ports() {
         let r = reach(None, None, None, Some("203.0.113.9"));
-        assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec![], vec!["203.0.113.9:443".into(), "203.0.113.9:21000".into()]));
+        assert_eq!(
+            public_addrs(None, 443, Some(21000), &r),
+            (
+                vec![],
+                vec!["203.0.113.9:443".into(), "203.0.113.9:21000".into()]
+            )
+        );
         let r = reach(None, None, None, Some("192.168.0.1"));
         assert_eq!(public_addrs(None, 443, Some(21000), &r), (vec![], vec![]));
     }
@@ -1099,8 +1290,19 @@ mod tests {
     /// The second port is new: a status from an older daemon still reads
     #[test]
     fn router_state_without_the_second_port() {
-        let old: retail_proto::api::RouterState = serde_json::from_str(r#"{"kind":"opened","method":"UPnP","tcp":443,"udp":3478}"#).unwrap();
-        assert_eq!(old, retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: None, wg: None });
+        let old: retail_proto::api::RouterState =
+            serde_json::from_str(r#"{"kind":"opened","method":"UPnP","tcp":443,"udp":3478}"#)
+                .unwrap();
+        assert_eq!(
+            old,
+            retail_proto::api::RouterState::Opened {
+                method: "UPnP".into(),
+                tcp: 443,
+                udp: 3478,
+                alt: None,
+                wg: None
+            }
+        );
         const { assert!(ALT_PORTS.start > 1024 && ALT_PORTS.end <= 32768) };
     }
 }

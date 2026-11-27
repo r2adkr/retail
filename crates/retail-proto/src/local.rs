@@ -56,7 +56,9 @@ pub fn read_admin_token() -> Option<String> {
 /// daemon hands out. Whatever answers on the local API port could be another
 /// program, and a browser launcher also opens files and programs.
 pub fn is_local_web_link(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else { return false };
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
     let port_len = rest.bytes().take_while(u8::is_ascii_digit).count();
     (1..=5).contains(&port_len)
         && rest[port_len..].starts_with('/')
@@ -73,7 +75,11 @@ pub fn sign_in_page(link: &str) -> std::io::Result<PathBuf> {
         return Err(bad());
     }
     let (action, token) = link.split_once("?t=").ok_or_else(bad)?;
-    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if token.is_empty()
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err(bad());
     }
     let html = format!(
@@ -81,8 +87,13 @@ pub fn sign_in_page(link: &str) -> std::io::Result<PathBuf> {
          <form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"t\" value=\"{token}\"></form>\
          <script>document.forms[0].submit()</script>\n"
     );
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
-    let path = std::env::temp_dir().join(format!("retail-sign-in-{}-{nanos}.html", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let path = std::env::temp_dir().join(format!(
+        "retail-sign-in-{}-{nanos}.html",
+        std::process::id()
+    ));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -108,9 +119,18 @@ mod tests {
     fn sign_in_pages() {
         let page = super::sign_in_page("http://127.0.0.1:41180/login?t=abc_-9").unwrap();
         let html = std::fs::read_to_string(&page).unwrap();
-        assert!(html.contains("action=\"http://127.0.0.1:41180/login\"") && html.contains("value=\"abc_-9\""), "{html}");
+        assert!(
+            html.contains("action=\"http://127.0.0.1:41180/login\"")
+                && html.contains("value=\"abc_-9\""),
+            "{html}"
+        );
         #[cfg(unix)]
-        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&page).unwrap().permissions()) & 0o777, 0o600);
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&page).unwrap().permissions()
+            ) & 0o777,
+            0o600
+        );
         let _ = std::fs::remove_file(page);
         assert!(super::sign_in_page("http://127.0.0.1:41180/login?t=a\"><script>").is_err());
         assert!(super::sign_in_page("https://example.com/login?t=abc").is_err());

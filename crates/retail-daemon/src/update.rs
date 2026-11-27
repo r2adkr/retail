@@ -21,7 +21,14 @@ const FIRST_CHECK: Duration = Duration::from_secs(60);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// Systems with official builds
-const OFFICIAL: [&str; 6] = ["windows-x86_64", "linux-x86_64", "linux-aarch64", "linux-arm", "macos-aarch64", "macos-x86_64"];
+const OFFICIAL: [&str; 6] = [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "linux-arm",
+    "macos-aarch64",
+    "macos-x86_64",
+];
 
 pub struct Updater {
     status: Mutex<UpdateStatus>,
@@ -36,19 +43,30 @@ fn variant() -> String {
 }
 
 fn exe(name: &str) -> String {
-    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
 }
 
 /// The programs an update replaces, in the folder of the running daemon
 fn programs() -> Vec<String> {
-    ["retaild", "retail", "retail-tray"].into_iter().map(exe).collect()
+    ["retaild", "retail", "retail-tray"]
+        .into_iter()
+        .map(exe)
+        .collect()
 }
 
 impl Updater {
     pub fn new(state_dir: &Path) -> Self {
         let supported = OFFICIAL.contains(&variant().as_str()) && releases::base().is_some();
         Updater {
-            status: Mutex::new(UpdateStatus { current: env!("CARGO_PKG_VERSION").into(), supported, ..Default::default() }),
+            status: Mutex::new(UpdateStatus {
+                current: env!("CARGO_PKG_VERSION").into(),
+                supported,
+                ..Default::default()
+            }),
             state_dir: state_dir.to_path_buf(),
             restarting: AtomicBool::new(false),
             restart: Notify::new(),
@@ -141,15 +159,24 @@ impl Updater {
     }
 
     async fn install_version(&self, version: &str) -> Result<()> {
-        let bin = std::env::current_exe()?.parent().context("the daemon has no folder")?.to_path_buf();
+        let bin = std::env::current_exe()?
+            .parent()
+            .context("the daemon has no folder")?
+            .to_path_buf();
         // What lands there runs as root: not in a folder someone else can change
         #[cfg(target_os = "macos")]
         if unsafe { libc::geteuid() } == 0 && !retail_proto::programs::root_only(&bin) {
-            bail!("other users can change {}; run the installer from the releases page once", bin.display());
+            bail!(
+                "other users can change {}; run the installer from the releases page once",
+                bin.display()
+            );
         }
         let dir = self.state_dir.join("update").join(format!("v{version}"));
         // Only the programs that are installed here: a server-only machine may have no tray
-        let files: Vec<String> = programs().into_iter().filter(|f| bin.join(f).is_file()).collect();
+        let files: Vec<String> = programs()
+            .into_iter()
+            .filter(|f| bin.join(f).is_file())
+            .collect();
         // Every file is fetched and checked now; none already there is trusted
         let _ = std::fs::remove_dir_all(&dir);
         let stage = |st: UpdateStage, done: u64, total: Option<u64>| {
@@ -159,13 +186,19 @@ impl Updater {
             s.total_bytes = total;
         };
         stage(UpdateStage::Downloading, 0, None);
-        releases::fetch_version_with(version, &variant(), &files, &dir, &|d, t| stage(UpdateStage::Downloading, d, t), || {
-            stage(UpdateStage::Checking, 0, None)
-        })
+        releases::fetch_version_with(
+            version,
+            &variant(),
+            &files,
+            &dir,
+            &|d, t| stage(UpdateStage::Downloading, d, t),
+            || stage(UpdateStage::Checking, 0, None),
+        )
         .await?;
         stage(UpdateStage::Replacing, 0, None);
         for f in &files {
-            replace(&dir.join(f), &bin.join(f)).with_context(|| format!("replacing {}", bin.join(f).display()))?;
+            replace(&dir.join(f), &bin.join(f))
+                .with_context(|| format!("replacing {}", bin.join(f).display()))?;
         }
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
@@ -197,9 +230,16 @@ fn replace(new: &Path, target: &Path) -> std::io::Result<()> {
 
 /// Removes what an earlier update or installer left behind
 pub fn clean_up(state_dir: &Path) {
-    if let Some(bin) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+    if let Some(bin) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
         for f in programs() {
-            let _ = std::fs::remove_file(bin.join(&f).with_extension(if cfg!(windows) { "exe.old" } else { "old" }));
+            let _ = std::fs::remove_file(bin.join(&f).with_extension(if cfg!(windows) {
+                "exe.old"
+            } else {
+                "old"
+            }));
         }
         // The installer moves it aside while a daemon still has it loaded
         #[cfg(windows)]
@@ -249,7 +289,10 @@ pub fn restart_after_exit() -> ! {
         // should this not.
         let restart = || {
             let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "ping -n 3 127.0.0.1 >NUL & schtasks /Run /TN retail\\retaild"]);
+            c.args([
+                "/C",
+                "ping -n 3 127.0.0.1 >NUL & schtasks /Run /TN retail\\retaild",
+            ]);
             c
         };
         match restart().creation_flags(DETACHED | BREAKAWAY).spawn() {
@@ -257,7 +300,9 @@ pub fn restart_after_exit() -> ! {
             Err(e) => {
                 tracing::info!("restarting through Task Scheduler, inside the task's job ({e})");
                 if let Err(e) = restart().creation_flags(DETACHED).spawn() {
-                    tracing::warn!("could not ask Task Scheduler to restart: {e}; its one-minute trigger will");
+                    tracing::warn!(
+                        "could not ask Task Scheduler to restart: {e}; its one-minute trigger will"
+                    );
                 }
             }
         }

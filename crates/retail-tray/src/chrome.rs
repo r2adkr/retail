@@ -34,7 +34,10 @@ pub fn attributes(attrs: WindowAttributes) -> WindowAttributes {
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::WindowAttributesExtMacOS;
-        attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true)
+        attrs
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_fullsize_content_view(true)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -55,8 +58,14 @@ fn rects(width: f32) -> [(Rect, Button); 2] {
     let close_x = width - 10.0 - SIZE;
     let min_x = close_x - SIZE - 2.0;
     [
-        (Rect::from_xywh(min_x, y, SIZE, SIZE).unwrap(), Button::Minimize),
-        (Rect::from_xywh(close_x, y, SIZE, SIZE).unwrap(), Button::Close),
+        (
+            Rect::from_xywh(min_x, y, SIZE, SIZE).unwrap(),
+            Button::Minimize,
+        ),
+        (
+            Rect::from_xywh(close_x, y, SIZE, SIZE).unwrap(),
+            Button::Close,
+        ),
     ]
 }
 
@@ -65,7 +74,10 @@ pub fn button_at(width: f32, pointer: (f32, f32)) -> Option<Button> {
     if !drawn() {
         return None;
     }
-    rects(width).into_iter().find(|(r, _)| contains(r, pointer.0, pointer.1)).map(|(_, b)| b)
+    rects(width)
+        .into_iter()
+        .find(|(r, _)| contains(r, pointer.0, pointer.1))
+        .map(|(_, b)| b)
 }
 
 /// Whether a press at `pointer` (window coordinates) that hit nothing in
@@ -98,14 +110,26 @@ pub fn frame(
     let inset = (top() * scale).round() as u32;
     if inset == 0 {
         render(pix);
-    } else if let Some(mut content) = Pixmap::new(pix.width(), pix.height().saturating_sub(inset).max(1)) {
+    } else if let Some(mut content) =
+        Pixmap::new(pix.width(), pix.height().saturating_sub(inset).max(1))
+    {
         render(&mut content);
         // The strip above takes the content's background
-        let bg = content.pixel(0, 0).map(|p| p.demultiply()).map_or(Color::WHITE, |c| {
-            Color::from_rgba8(c.red(), c.green(), c.blue(), 255)
-        });
+        let bg = content
+            .pixel(0, 0)
+            .map(|p| p.demultiply())
+            .map_or(Color::WHITE, |c| {
+                Color::from_rgba8(c.red(), c.green(), c.blue(), 255)
+            });
         pix.fill(bg);
-        pix.draw_pixmap(0, inset as i32, content.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        pix.draw_pixmap(
+            0,
+            inset as i32,
+            content.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
     }
     if !drawn() {
         return;
@@ -115,9 +139,24 @@ pub fn frame(
     for (r, button) in rects(width) {
         let hover = pointer.is_some_and(|(x, y)| contains(&r, x, y));
         if hover {
-            c.fill_rrect(r.x(), r.y(), SIZE, SIZE, 6.0, if button == Button::Close { t.red } else { t.hover });
+            c.fill_rrect(
+                r.x(),
+                r.y(),
+                SIZE,
+                SIZE,
+                6.0,
+                if button == Button::Close {
+                    t.red
+                } else {
+                    t.hover
+                },
+            );
         }
-        let fg = if hover && button == Button::Close { Color::WHITE } else { with_alpha(t.dim, 1.0) };
+        let fg = if hover && button == Button::Close {
+            Color::WHITE
+        } else {
+            with_alpha(t.dim, 1.0)
+        };
         let (cx, cy) = (r.x() + SIZE / 2.0, r.y() + SIZE / 2.0);
         match button {
             Button::Close => {

@@ -16,7 +16,11 @@ pub fn check(addr: SocketAddr) -> Result<(), String> {
 /// `server`, from the kernel's socket table (Linux)
 #[cfg(target_os = "linux")]
 pub fn peer_uid(client: SocketAddr, server: SocketAddr) -> Option<u32> {
-    let table = if server.is_ipv4() { "/proc/net/tcp" } else { "/proc/net/tcp6" };
+    let table = if server.is_ipv4() {
+        "/proc/net/tcp"
+    } else {
+        "/proc/net/tcp6"
+    };
     imp::socket_uid(&std::fs::read_to_string(table).ok()?, client, server)
 }
 
@@ -29,19 +33,37 @@ mod imp {
     use super::*;
 
     pub fn check(addr: SocketAddr) -> Result<(), String> {
-        let table = if addr.is_ipv4() { "/proc/net/tcp" } else { "/proc/net/tcp6" };
+        let table = if addr.is_ipv4() {
+            "/proc/net/tcp"
+        } else {
+            "/proc/net/tcp6"
+        };
         let text = std::fs::read_to_string(table).map_err(|e| format!("reading {table}: {e}"))?;
-        let uid = listener_uid(&text, addr).ok_or_else(|| format!("nothing is listening on {addr}"))?;
+        let uid =
+            listener_uid(&text, addr).ok_or_else(|| format!("nothing is listening on {addr}"))?;
         let me = unsafe { libc::geteuid() };
-        if uid == 0 || uid == me { Ok(()) } else { Err(refuse(addr, &format!("user id {uid}"))) }
+        if uid == 0 || uid == me {
+            Ok(())
+        } else {
+            Err(refuse(addr, &format!("user id {uid}")))
+        }
     }
 
     /// How `/proc/net/tcp` writes an address
     fn hex(addr: SocketAddr) -> String {
         match addr {
-            SocketAddr::V4(a) => format!("{:08X}:{:04X}", u32::from_ne_bytes(a.ip().octets()), a.port()),
+            SocketAddr::V4(a) => format!(
+                "{:08X}:{:04X}",
+                u32::from_ne_bytes(a.ip().octets()),
+                a.port()
+            ),
             SocketAddr::V6(a) => {
-                let words: String = a.ip().octets().chunks(4).map(|c| format!("{:08X}", u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))).collect();
+                let words: String = a
+                    .ip()
+                    .octets()
+                    .chunks(4)
+                    .map(|c| format!("{:08X}", u32::from_ne_bytes([c[0], c[1], c[2], c[3]])))
+                    .collect();
                 format!("{words}:{:04X}", a.port())
             }
         }
@@ -52,7 +74,9 @@ mod imp {
         let (l, r) = (hex(local), hex(remote));
         table.lines().skip(1).find_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
-            (f.len() > 7 && f[1] == l && f[2] == r).then(|| f[7].parse().ok()).flatten()
+            (f.len() > 7 && f[1] == l && f[2] == r)
+                .then(|| f[7].parse().ok())
+                .flatten()
         })
     }
 
@@ -62,7 +86,9 @@ mod imp {
         table.lines().skip(1).find_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
             // local, remote, state (0A is LISTEN), ..., uid
-            (f.len() > 7 && f[1] == want && f[3] == "0A").then(|| f[7].parse().ok()).flatten()
+            (f.len() > 7 && f[1] == want && f[3] == "0A")
+                .then(|| f[7].parse().ok())
+                .flatten()
         })
     }
 }
@@ -88,10 +114,18 @@ mod imp {
 
     fn lsof_uids(addr: SocketAddr) -> Result<Vec<u32>, String> {
         let out = std::process::Command::new("/usr/sbin/lsof")
-            .args(["-nP", &format!("-iTCP@{}:{}", addr.ip(), addr.port()), "-sTCP:LISTEN", "-Fu"])
+            .args([
+                "-nP",
+                &format!("-iTCP@{}:{}", addr.ip(), addr.port()),
+                "-sTCP:LISTEN",
+                "-Fu",
+            ])
             .output()
             .map_err(|e| format!("lsof: {e}"))?;
-        Ok(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.strip_prefix('u')?.parse().ok()).collect())
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.strip_prefix('u')?.parse().ok())
+            .collect())
     }
 
     fn netstat_pids(addr: SocketAddr) -> Result<Vec<u32>, String> {
@@ -99,11 +133,17 @@ mod imp {
             .args(["-anv", "-p", "tcp"])
             .output()
             .map_err(|e| format!("netstat: {e}"))?;
-        Ok(super::netstat_listeners(&String::from_utf8_lossy(&out.stdout), addr))
+        Ok(super::netstat_listeners(
+            &String::from_utf8_lossy(&out.stdout),
+            addr,
+        ))
     }
 
     fn uid_of(pid: u32) -> Option<u32> {
-        let out = std::process::Command::new("/bin/ps").args(["-o", "uid=", "-p", &pid.to_string()]).output().ok()?;
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-o", "uid=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
         String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 }
@@ -125,7 +165,10 @@ fn netstat_listeners(text: &str, addr: SocketAddr) -> Vec<u32> {
             if f.len() < 6 || f[3] != local || !f.contains(&"LISTEN") {
                 return None;
             }
-            let named = f.iter().find_map(|t| t.rsplit_once(':').and_then(|(name, pid)| (!name.is_empty()).then(|| pid.parse().ok()).flatten()));
+            let named = f.iter().find_map(|t| {
+                t.rsplit_once(':')
+                    .and_then(|(name, pid)| (!name.is_empty()).then(|| pid.parse().ok()).flatten())
+            });
             named.or_else(|| f.get(pid_col?)?.parse().ok())
         })
         .collect()
@@ -134,10 +177,14 @@ fn netstat_listeners(text: &str, addr: SocketAddr) -> Vec<u32> {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    };
     use windows_sys::Win32::Networking::WinSock::AF_INET;
     use windows_sys::Win32::Security::{EqualSid, IsValidSid, IsWellKnownSid, WinLocalSystemSid};
-    use windows_sys::Win32::System::RemoteDesktop::{WTS_PROCESS_INFOW, WTSEnumerateProcessesW, WTSFreeMemory};
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_PROCESS_INFOW, WTSEnumerateProcessesW, WTSFreeMemory,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
     /// The service runs as SYSTEM. Otherwise it must be this user's own
@@ -145,12 +192,19 @@ mod imp {
     /// a user can have one started there (through WMI, say), and then its
     /// user is theirs to see, where a service's is not.
     pub fn check(addr: SocketAddr) -> Result<(), String> {
-        let SocketAddr::V4(v4) = addr else { return Err(format!("{addr}: only IPv4 local API addresses can be checked")) };
+        let SocketAddr::V4(v4) = addr else {
+            return Err(format!(
+                "{addr}: only IPv4 local API addresses can be checked"
+            ));
+        };
         let pid = owner(v4).ok_or_else(|| format!("nothing is listening on {addr}"))?;
         if trusted(pid, unsafe { GetCurrentProcessId() }) {
             Ok(())
         } else {
-            Err(refuse(addr, &format!("process {pid}, neither the service nor this user's")))
+            Err(refuse(
+                addr,
+                &format!("process {pid}, neither the service nor this user's"),
+            ))
         }
     }
 
@@ -163,17 +217,27 @@ mod imp {
         let mut count = 0u32;
         // SAFETY: the list comes from the call and is freed once read
         unsafe {
-            if WTSEnumerateProcessesW(std::ptr::null_mut(), 0, 1, &mut list, &mut count) == 0 || list.is_null() {
+            if WTSEnumerateProcessesW(std::ptr::null_mut(), 0, 1, &mut list, &mut count) == 0
+                || list.is_null()
+            {
                 return false;
             }
             let procs = std::slice::from_raw_parts(list, count as usize);
             let find = |pid: u32| procs.iter().find(|p| p.ProcessId == pid);
-            let sid_ok = |p: &WTS_PROCESS_INFOW| !p.pUserSid.is_null() && IsValidSid(p.pUserSid) != 0;
+            let sid_ok =
+                |p: &WTS_PROCESS_INFOW| !p.pUserSid.is_null() && IsValidSid(p.pUserSid) != 0;
             let out = match (find(theirs), find(mine)) {
-                (Some(t), _) if sid_ok(t) && IsWellKnownSid(t.pUserSid, WinLocalSystemSid) != 0 => true,
+                (Some(t), _) if sid_ok(t) && IsWellKnownSid(t.pUserSid, WinLocalSystemSid) != 0 => {
+                    true
+                }
                 // A service of an account this user may not look into
                 (Some(t), _) if t.pUserSid.is_null() => t.SessionId == 0,
-                (Some(t), Some(m)) => sid_ok(t) && sid_ok(m) && t.SessionId == m.SessionId && EqualSid(t.pUserSid, m.pUserSid) != 0,
+                (Some(t), Some(m)) => {
+                    sid_ok(t)
+                        && sid_ok(m)
+                        && t.SessionId == m.SessionId
+                        && EqualSid(t.pUserSid, m.pUserSid) != 0
+                }
                 _ => false,
             };
             WTSFreeMemory(list.cast());
@@ -183,22 +247,46 @@ mod imp {
 
     fn owner(addr: std::net::SocketAddrV4) -> Option<u32> {
         let mut size = 0u32;
-        unsafe { GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_LISTENER, 0) };
+        unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET as u32,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
         // Room for a few more rows appearing between the two calls
         let mut buf = vec![0u64; (size as usize + 1024) / 8 + 1];
         size = (buf.len() * 8) as u32;
-        let rc = unsafe { GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_LISTENER, 0) };
+        let rc = unsafe {
+            GetExtendedTcpTable(
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                0,
+                AF_INET as u32,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
         if rc != 0 {
             return None;
         }
         let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-        let rows = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize) };
+        let rows = unsafe {
+            std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
+        };
         let ip = u32::from_ne_bytes(addr.ip().octets());
-        let on = |r: &&windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID, local: u32| {
+        let on = |r: &&windows_sys::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID,
+                  local: u32| {
             u16::from_be((r.dwLocalPort & 0xFFFF) as u16) == addr.port() && r.dwLocalAddr == local
         };
         // The exact address first: it is the one connections reach
-        rows.iter().find(|r| on(r, ip)).or_else(|| rows.iter().find(|r| on(r, 0))).map(|r| r.dwOwningPid)
+        rows.iter()
+            .find(|r| on(r, ip))
+            .or_else(|| rows.iter().find(|r| on(r, 0)))
+            .map(|r| r.dwOwningPid)
     }
 }
 
@@ -224,10 +312,16 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:41128".parse().unwrap();
         assert_eq!(imp::listener_uid(table, addr), Some(1000));
         // Not listening (state 01): no owner
-        assert_eq!(imp::listener_uid(table, "127.0.0.1:41129".parse().unwrap()), None);
+        assert_eq!(
+            imp::listener_uid(table, "127.0.0.1:41129".parse().unwrap()),
+            None
+        );
         let conn = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
              0: 0100007F:D431 0100007F:A0A8 01 00000000:00000000 00:00000000 00000000  1001        0 12347 1\n";
-        let (client, server) = ("127.0.0.1:54321".parse().unwrap(), "127.0.0.1:41128".parse().unwrap());
+        let (client, server) = (
+            "127.0.0.1:54321".parse().unwrap(),
+            "127.0.0.1:41128".parse().unwrap(),
+        );
         assert_eq!(imp::socket_uid(conn, client, server), Some(1001));
         assert_eq!(imp::socket_uid(conn, server, client), None);
     }
@@ -264,4 +358,3 @@ mod tests {
         assert!(check(addr).is_err());
     }
 }
-

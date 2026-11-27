@@ -138,7 +138,10 @@ impl LanPort {
 
     /// A usable private address on a real network card
     pub fn valid(&self) -> bool {
-        (8..=30).contains(&self.prefix) && self.addr.is_private() && self.mac != [0; 6] && self.mac[0] & 1 == 0
+        (8..=30).contains(&self.prefix)
+            && self.addr.is_private()
+            && self.mac != [0; 6]
+            && self.mac[0] & 1 == 0
     }
 }
 
@@ -186,7 +189,9 @@ impl FailReason {
             FailReason::Reset => "cut on the way: the network may block VPN connections",
             FailReason::Dns => "the server's name could not be looked up",
             FailReason::Unreachable => "no route to the server: is this device online?",
-            FailReason::Intercepted => "something answered in the server's place (a filtering proxy or a sign-in page)",
+            FailReason::Intercepted => {
+                "something answered in the server's place (a filtering proxy or a sign-in page)"
+            }
             FailReason::Rejected => "the server turned this device away: ask for a new invite",
             FailReason::ProxyAuth => "the network's proxy wants a sign-in (retail set --proxy)",
             FailReason::ServerError => "the server answered with an error",
@@ -471,6 +476,9 @@ pub struct StatusResponse {
     /// How long this connection has been up
     #[serde(default)]
     pub connected_secs: Option<u64>,
+    /// Files other devices want to send, waiting for an answer
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_offers: Vec<FileOffer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,6 +778,17 @@ pub struct PeerStatus {
     pub can_wake: bool,
 }
 
+/// A file another device wants to send this one (see `retaild` files.rs)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileOffer {
+    pub id: u64,
+    /// The sending device's name
+    pub from: String,
+    /// A plain file name, already made safe
+    pub name: String,
+    pub size: u64,
+}
+
 /// `POST /wake`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeRequest {
@@ -818,8 +837,16 @@ mod tests {
             r#"{"current":"1.0.1","latest":"1.0.2","available":true,"installing":true,"error":null,"supported":true}"#,
         )
         .unwrap();
-        assert_eq!((old.stage, old.done_bytes, old.total_bytes), (None, 0, None));
-        let new = UpdateStatus { stage: Some(UpdateStage::Downloading), done_bytes: 5, total_bytes: Some(9), ..old };
+        assert_eq!(
+            (old.stage, old.done_bytes, old.total_bytes),
+            (None, 0, None)
+        );
+        let new = UpdateStatus {
+            stage: Some(UpdateStage::Downloading),
+            done_bytes: 5,
+            total_bytes: Some(9),
+            ..old
+        };
         let s = serde_json::to_string(&new).unwrap();
         assert!(s.contains(r#""stage":"downloading""#), "{s}");
         assert_eq!(serde_json::from_str::<UpdateStatus>(&s).unwrap(), new);
@@ -830,9 +857,14 @@ mod tests {
         let old: ApiError = serde_json::from_str(r#"{"error":"x"}"#).unwrap();
         assert_eq!(old.reason, None);
         // A reason this version does not know
-        let new: ApiError = serde_json::from_str(r#"{"error":"x","reason":"solar_flare"}"#).unwrap();
+        let new: ApiError =
+            serde_json::from_str(r#"{"error":"x","reason":"solar_flare"}"#).unwrap();
         assert_eq!(new.reason, Some(FailReason::Other));
-        let s = serde_json::to_string(&ApiError { error: "x".into(), reason: Some(FailReason::ProxyAuth) }).unwrap();
+        let s = serde_json::to_string(&ApiError {
+            error: "x".into(),
+            reason: Some(FailReason::ProxyAuth),
+        })
+        .unwrap();
         assert!(s.contains(r#""reason":"proxy_auth""#), "{s}");
     }
 
@@ -855,9 +887,15 @@ mod tests {
             online: true,
             exit_node: false,
             dns_name: "a.retail.internal".into(),
-            accept: crate::acl::Accept::Ports { ports: vec![crate::acl::PortRule::parse("tcp:22").unwrap()] },
+            accept: crate::acl::Accept::Ports {
+                ports: vec![crate::acl::PortRule::parse("tcp:22").unwrap()],
+            },
             routes: vec!["192.168.1.0/24".parse().unwrap()],
-            lan: vec![LanPort { mac: [2, 0, 0, 0, 0, 1], addr: Ipv4Addr::new(192, 168, 1, 5), prefix: 24 }],
+            lan: vec![LanPort {
+                mac: [2, 0, 0, 0, 0, 1],
+                addr: Ipv4Addr::new(192, 168, 1, 5),
+                prefix: 24,
+            }],
         };
         let nm = ServerMessage::NetMap(NetMap {
             self_node: node.clone(),
@@ -878,11 +916,20 @@ mod tests {
         let ServerMessage::NetMap(nm) = serde_json::from_str::<ServerMessage>(old).unwrap();
         assert_eq!(nm.self_node.accept, crate::acl::Accept::All);
         assert!(!nm.helper);
-        assert!(!nm.expired && nm.expires_at.is_none() && nm.server_addrs.is_empty() && nm.self_node.routes.is_empty());
+        assert!(
+            !nm.expired
+                && nm.expires_at.is_none()
+                && nm.server_addrs.is_empty()
+                && nm.self_node.routes.is_empty()
+        );
         // None: keep the invite's fronts
         assert!(nm.server_fronts.is_none());
         // And an older client's hostinfo
-        let ClientMessage::Hostinfo { routes, .. } = serde_json::from_str(r#"{"type":"hostinfo","exit_node":true}"#).unwrap() else { panic!() };
+        let ClientMessage::Hostinfo { routes, .. } =
+            serde_json::from_str(r#"{"type":"hostinfo","exit_node":true}"#).unwrap()
+        else {
+            panic!()
+        };
         assert!(routes.is_empty());
     }
 }

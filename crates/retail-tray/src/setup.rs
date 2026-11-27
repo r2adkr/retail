@@ -136,7 +136,11 @@ impl Setup {
     }
 
     pub fn action_at(&self, x: f32, y: f32) -> Option<SetupAction> {
-        self.regions.iter().rev().find(|(r, _)| contains(r, x, y)).map(|(_, a)| a.clone())
+        self.regions
+            .iter()
+            .rev()
+            .find(|(r, _)| contains(r, x, y))
+            .map(|(_, a)| a.clone())
     }
 
     fn hovered(&self, r: &Rect) -> bool {
@@ -183,7 +187,11 @@ impl Setup {
             let enabled = !(working && action == SetupAction::Quit);
             let hover = enabled && self.hovered(&r);
             if hover {
-                let bg = if action == SetupAction::Quit { t.red } else { t.hover };
+                let bg = if action == SetupAction::Quit {
+                    t.red
+                } else {
+                    t.hover
+                };
                 c.fill_rrect(x, y, size, size, 6.0, bg);
             }
             let fg = if !enabled {
@@ -230,19 +238,55 @@ impl Setup {
                 _ => t.gray,
             };
             c.circle(x + 4.0, 32.0, 4.0, color);
-            let weight = if i == current { Weight::Semibold } else { Weight::Regular };
-            let w = c.text(name, x + 14.0, 36.5, 12.0, weight, if i == current { t.text } else { t.dim }, None);
+            let weight = if i == current {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
+            let w = c.text(
+                name,
+                x + 14.0,
+                36.5,
+                12.0,
+                weight,
+                if i == current { t.text } else { t.dim },
+                None,
+            );
             x += 14.0 + w + 14.0;
             if i + 1 < names.len() {
-                c.fill_rect(x - 6.0, 31.5, 18.0, 1.0, if i < current { t.accent } else { t.border });
+                c.fill_rect(
+                    x - 6.0,
+                    31.5,
+                    18.0,
+                    1.0,
+                    if i < current { t.accent } else { t.border },
+                );
                 x += 18.0;
             }
         }
     }
 
     fn title(&self, c: &mut Canvas, t: &Theme, title: &str, body: &str) -> f32 {
-        c.text(title, PAD, 152.0, 22.0, Weight::Semibold, t.text, Some(WIDTH - 2.0 * PAD));
-        paragraph(c, body, PAD, 180.0, WIDTH - 2.0 * PAD, 13.5, 20.0, Weight::Regular, t.dim)
+        c.text(
+            title,
+            PAD,
+            152.0,
+            22.0,
+            Weight::Semibold,
+            t.text,
+            Some(WIDTH - 2.0 * PAD),
+        );
+        paragraph(
+            c,
+            body,
+            PAD,
+            180.0,
+            WIDTH - 2.0 * PAD,
+            13.5,
+            20.0,
+            Weight::Regular,
+            t.dim,
+        )
     }
 
     fn welcome(&mut self, c: &mut Canvas, t: &Theme) {
@@ -250,17 +294,24 @@ impl Setup {
         let (title, body, go) = match &self.kind {
             Kind::Install => (
                 tr("Install retail").to_string(),
-                tr("retail connects your devices into one private network, wherever they are.").to_string(),
+                tr("retail connects your devices into one private network, wherever they are.")
+                    .to_string(),
                 tr("Install").to_string(),
             ),
             Kind::Update => (
                 tr("Update retail").to_string(),
-                trf("This updates retail on this computer to version {version}. Your network and settings stay.", &[("version", &v)]),
+                trf(
+                    "This updates retail on this computer to version {version}. Your network and settings stay.",
+                    &[("version", &v)],
+                ),
                 tr("Update").to_string(),
             ),
             Kind::Join { network } => (
                 trf("Join {network}", &[("network", network)]),
-                trf("This installs retail and connects this computer to {network}.", &[("network", network)]),
+                trf(
+                    "This installs retail and connects this computer to {network}.",
+                    &[("network", network)],
+                ),
                 tr("Install and join").to_string(),
             ),
             Kind::Switch { current, network } => (
@@ -276,8 +327,14 @@ impl Setup {
         // What gets installed
         let card_y = y + 18.0;
         let rows = [
-            (tr("Background service"), tr("Keeps the connection and starts with the computer")),
-            (tr("Tray app"), tr("Status, devices and settings, from an icon")),
+            (
+                tr("Background service"),
+                tr("Keeps the connection and starts with the computer"),
+            ),
+            (
+                tr("Tray app"),
+                tr("Status, devices and settings, from an icon"),
+            ),
             (tr("Command line"), tr("retail, for scripts and servers")),
         ];
         let card_h = 22.0 + rows.len() as f32 * 46.0;
@@ -285,14 +342,61 @@ impl Setup {
         for (i, (name, what)) in rows.iter().enumerate() {
             let ry = card_y + 16.0 + i as f32 * 46.0;
             c.circle(PAD + 22.0, ry + 15.0, 4.0, t.accent);
-            c.text(name, PAD + 38.0, ry + 13.0, 13.5, Weight::Semibold, t.text, Some(WIDTH - 2.0 * PAD - 54.0));
-            c.text(what, PAD + 38.0, ry + 31.0, 12.0, Weight::Regular, t.dim, Some(WIDTH - 2.0 * PAD - 54.0));
+            c.text(
+                name,
+                PAD + 38.0,
+                ry + 13.0,
+                13.5,
+                Weight::Semibold,
+                t.text,
+                Some(WIDTH - 2.0 * PAD - 54.0),
+            );
+            c.text(
+                what,
+                PAD + 38.0,
+                ry + 31.0,
+                12.0,
+                Weight::Regular,
+                t.dim,
+                Some(WIDTH - 2.0 * PAD - 54.0),
+            );
         }
-        let foot = trf("Version {version} · {dir}", &[("version", &v), ("dir", &self.dir)]);
-        c.text(&foot, PAD, HEIGHT - 82.0, 11.5, Weight::Regular, t.dim, Some(WIDTH - 2.0 * PAD));
+        let foot = trf(
+            "Version {version} · {dir}",
+            &[("version", &v), ("dir", &self.dir)],
+        );
+        c.text(
+            &foot,
+            PAD,
+            HEIGHT - 82.0,
+            11.5,
+            Weight::Regular,
+            t.dim,
+            Some(WIDTH - 2.0 * PAD),
+        );
         let bw = 128.0;
-        self.button(c, t, tr("Cancel"), WIDTH - PAD - 2.0 * bw - 10.0, HEIGHT - PAD - BUTTON_H, bw, Style::Secondary, true, SetupAction::Cancel);
-        self.button(c, t, &go, WIDTH - PAD - bw, HEIGHT - PAD - BUTTON_H, bw, Style::Primary, true, SetupAction::Next);
+        self.button(
+            c,
+            t,
+            tr("Cancel"),
+            WIDTH - PAD - 2.0 * bw - 10.0,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Secondary,
+            true,
+            SetupAction::Cancel,
+        );
+        self.button(
+            c,
+            t,
+            &go,
+            WIDTH - PAD - bw,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Primary,
+            true,
+            SetupAction::Next,
+        );
     }
 
     fn network(&mut self, c: &mut Canvas, t: &Theme) {
@@ -305,15 +409,55 @@ impl Setup {
         let fy = y + 22.0;
         self.field(c, t, PAD, fy, WIDTH - 2.0 * PAD);
         if let Some(e) = self.error.clone() {
-            paragraph(c, &e, PAD + 2.0, fy + FIELD_H + 22.0, WIDTH - 2.0 * PAD, 12.5, 18.0, Weight::Regular, t.red);
+            paragraph(
+                c,
+                &e,
+                PAD + 2.0,
+                fy + FIELD_H + 22.0,
+                WIDTH - 2.0 * PAD,
+                12.5,
+                18.0,
+                Weight::Regular,
+                t.red,
+            );
         } else {
             let hint = tr("Codes start with retail1. A server's installer joins on its own.");
-            paragraph(c, hint, PAD + 2.0, fy + FIELD_H + 22.0, WIDTH - 2.0 * PAD, 12.0, 18.0, Weight::Regular, t.dim);
+            paragraph(
+                c,
+                hint,
+                PAD + 2.0,
+                fy + FIELD_H + 22.0,
+                WIDTH - 2.0 * PAD,
+                12.0,
+                18.0,
+                Weight::Regular,
+                t.dim,
+            );
         }
         let bw = 128.0;
         let has_code = !self.input.trimmed().is_empty();
-        self.button(c, t, tr("Skip"), WIDTH - PAD - 2.0 * bw - 10.0, HEIGHT - PAD - BUTTON_H, bw, Style::Secondary, true, SetupAction::Skip);
-        self.button(c, t, tr("Join"), WIDTH - PAD - bw, HEIGHT - PAD - BUTTON_H, bw, Style::Primary, has_code, SetupAction::Join);
+        self.button(
+            c,
+            t,
+            tr("Skip"),
+            WIDTH - PAD - 2.0 * bw - 10.0,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Secondary,
+            true,
+            SetupAction::Skip,
+        );
+        self.button(
+            c,
+            t,
+            tr("Join"),
+            WIDTH - PAD - bw,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Primary,
+            has_code,
+            SetupAction::Join,
+        );
     }
 
     fn working(&mut self, c: &mut Canvas, t: &Theme) {
@@ -323,62 +467,188 @@ impl Setup {
             _ => tr("Installing retail…"),
         };
         let hint = match self.os {
-            Os::Windows => tr("Allow retail to make changes when Windows asks, and keep this window open."),
+            Os::Windows => {
+                tr("Allow retail to make changes when Windows asks, and keep this window open.")
+            }
             Os::Macos => tr("Enter your password when macOS asks, and keep this window open."),
             Os::Linux => tr("Enter your password when asked, and keep this window open."),
         };
         let y = self.title(c, t, title, hint);
-        spinner(c, WIDTH / 2.0, y + 90.0, 18.0, t, self.started.elapsed().as_secs_f32());
-        let note = if self.input.trimmed().is_empty() && matches!(self.kind, Kind::Install | Kind::Update) {
+        spinner(
+            c,
+            WIDTH / 2.0,
+            y + 90.0,
+            18.0,
+            t,
+            self.started.elapsed().as_secs_f32(),
+        );
+        let note = if self.input.trimmed().is_empty()
+            && matches!(self.kind, Kind::Install | Kind::Update)
+        {
             tr("Copying the programs and starting the service")
         } else {
             tr("Copying the programs, starting the service and joining the network")
         };
-        let w = c.measure(note, 12.5, Weight::Regular).min(WIDTH - 2.0 * PAD);
-        c.text(note, (WIDTH - w) / 2.0, y + 140.0, 12.5, Weight::Regular, t.dim, Some(WIDTH - 2.0 * PAD));
+        let w = c
+            .measure(note, 12.5, Weight::Regular)
+            .min(WIDTH - 2.0 * PAD);
+        c.text(
+            note,
+            (WIDTH - w) / 2.0,
+            y + 140.0,
+            12.5,
+            Weight::Regular,
+            t.dim,
+            Some(WIDTH - 2.0 * PAD),
+        );
     }
 
     fn done(&mut self, c: &mut Canvas, t: &Theme) {
         let (title, body) = match (&self.kind, &self.network) {
-            (Kind::Update, None) => (tr("retail is updated").to_string(), trf("This computer runs retail {version}.", &[("version", &self.version)])),
-            (Kind::Switch { .. }, Some(n)) | (_, Some(n)) => {
-                (tr("You're connected").to_string(), trf("retail is installed and this computer joined {network}.", &[("network", n)]))
-            }
-            (_, None) if self.joined => (tr("retail is installed").to_string(), tr("This computer stays in its network.").to_string()),
-            (_, None) => (tr("retail is installed").to_string(), tr("Join a network whenever you're ready, from retail's icon.").to_string()),
+            (Kind::Update, None) => (
+                tr("retail is updated").to_string(),
+                trf(
+                    "This computer runs retail {version}.",
+                    &[("version", &self.version)],
+                ),
+            ),
+            (Kind::Switch { .. }, Some(n)) | (_, Some(n)) => (
+                tr("You're connected").to_string(),
+                trf(
+                    "retail is installed and this computer joined {network}.",
+                    &[("network", n)],
+                ),
+            ),
+            (_, None) if self.joined => (
+                tr("retail is installed").to_string(),
+                tr("This computer stays in its network.").to_string(),
+            ),
+            (_, None) => (
+                tr("retail is installed").to_string(),
+                tr("Join a network whenever you're ready, from retail's icon.").to_string(),
+            ),
         };
         let y = self.title(c, t, &title, &body);
         let card_y = y + 18.0;
         let card_h = 150.0;
         c.fill_rrect(PAD, card_y, WIDTH - 2.0 * PAD, card_h, 12.0, t.surface);
-        picture(c, t, self.os, PAD + 16.0, card_y + 16.0, WIDTH - 2.0 * PAD - 32.0, 74.0, self.dark);
+        picture(
+            c,
+            t,
+            self.os,
+            PAD + 16.0,
+            card_y + 16.0,
+            WIDTH - 2.0 * PAD - 32.0,
+            74.0,
+            self.dark,
+        );
         let caption = match self.os {
-            Os::Windows => tr("retail lives in the corner of the taskbar, by the clock (it may be under ^). Click it to connect, see your devices or open settings."),
-            Os::Macos => tr("retail lives in the menu bar at the top right. Click it to connect, see your devices or open settings."),
-            Os::Linux => tr("retail lives in your desktop's tray or top bar. Click it to connect, see your devices or open settings."),
+            Os::Windows => tr(
+                "retail lives in the corner of the taskbar, by the clock (it may be under ^). Click it to connect, see your devices or open settings.",
+            ),
+            Os::Macos => tr(
+                "retail lives in the menu bar at the top right. Click it to connect, see your devices or open settings.",
+            ),
+            Os::Linux => tr(
+                "retail lives in your desktop's tray or top bar. Click it to connect, see your devices or open settings.",
+            ),
         };
-        paragraph(c, caption, PAD + 16.0, card_y + 110.0, WIDTH - 2.0 * PAD - 32.0, 12.0, 17.0, Weight::Regular, t.dim);
+        paragraph(
+            c,
+            caption,
+            PAD + 16.0,
+            card_y + 110.0,
+            WIDTH - 2.0 * PAD - 32.0,
+            12.0,
+            17.0,
+            Weight::Regular,
+            t.dim,
+        );
         let bw = 128.0;
-        self.button(c, t, tr("Done"), WIDTH - PAD - bw, HEIGHT - PAD - BUTTON_H, bw, Style::Primary, true, SetupAction::Close);
+        self.button(
+            c,
+            t,
+            tr("Done"),
+            WIDTH - PAD - bw,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Primary,
+            true,
+            SetupAction::Close,
+        );
     }
 
     fn failed(&mut self, c: &mut Canvas, t: &Theme, error: &str) {
-        let y = self.title(c, t, tr("The installation didn't finish"), tr("This is what went wrong. You can try again."));
+        let y = self.title(
+            c,
+            t,
+            tr("The installation didn't finish"),
+            tr("This is what went wrong. You can try again."),
+        );
         let card_y = y + 18.0;
-        c.fill_rrect(PAD, card_y, WIDTH - 2.0 * PAD, 120.0, 12.0, with_alpha(t.red, 0.10));
-        paragraph(c, error, PAD + 16.0, card_y + 26.0, WIDTH - 2.0 * PAD - 32.0, 12.5, 18.0, Weight::Regular, t.red);
+        c.fill_rrect(
+            PAD,
+            card_y,
+            WIDTH - 2.0 * PAD,
+            120.0,
+            12.0,
+            with_alpha(t.red, 0.10),
+        );
+        paragraph(
+            c,
+            error,
+            PAD + 16.0,
+            card_y + 26.0,
+            WIDTH - 2.0 * PAD - 32.0,
+            12.5,
+            18.0,
+            Weight::Regular,
+            t.red,
+        );
         let bw = 128.0;
-        self.button(c, t, tr("Close"), WIDTH - PAD - 2.0 * bw - 10.0, HEIGHT - PAD - BUTTON_H, bw, Style::Secondary, true, SetupAction::Close);
-        self.button(c, t, tr("Try again"), WIDTH - PAD - bw, HEIGHT - PAD - BUTTON_H, bw, Style::Primary, true, SetupAction::Retry);
+        self.button(
+            c,
+            t,
+            tr("Close"),
+            WIDTH - PAD - 2.0 * bw - 10.0,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Secondary,
+            true,
+            SetupAction::Close,
+        );
+        self.button(
+            c,
+            t,
+            tr("Try again"),
+            WIDTH - PAD - bw,
+            HEIGHT - PAD - BUTTON_H,
+            bw,
+            Style::Primary,
+            true,
+            SetupAction::Retry,
+        );
     }
 
     fn field(&mut self, c: &mut Canvas, t: &Theme, x: f32, y: f32, w: f32) {
         let r = Rect::from_xywh(x, y, w, FIELD_H).unwrap();
         c.fill_rrect(x, y, w, FIELD_H, 8.0, t.bg);
         if self.focus {
-            c.stroke_rrect_w(x + 0.75, y + 0.75, w - 1.5, FIELD_H - 1.5, 8.0, 1.5, t.accent);
+            c.stroke_rrect_w(
+                x + 0.75,
+                y + 0.75,
+                w - 1.5,
+                FIELD_H - 1.5,
+                8.0,
+                1.5,
+                t.accent,
+            );
         } else {
-            let border = if self.hovered(&r) { shade(t.border, if self.dark { 1.4 } else { 0.85 }) } else { t.border };
+            let border = if self.hovered(&r) {
+                shade(t.border, if self.dark { 1.4 } else { 0.85 })
+            } else {
+                t.border
+            };
             c.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, FIELD_H - 1.0, 8.0, border);
         }
         self.regions.push((r, SetupAction::Focus));
@@ -386,7 +656,15 @@ impl Setup {
         let (px, tx, avail) = (13.5, x + 12.0, w - 24.0);
         let baseline = y + FIELD_H / 2.0 + 5.0;
         if shown.is_empty() {
-            c.text(tr(self.input.placeholder), tx, baseline, px, Weight::Regular, with_alpha(t.dim, 0.7), Some(avail));
+            c.text(
+                tr(self.input.placeholder),
+                tx,
+                baseline,
+                px,
+                Weight::Regular,
+                with_alpha(t.dim, 0.7),
+                Some(avail),
+            );
             if self.focus {
                 c.fill_rect(tx, y + 10.0, 1.5, FIELD_H - 20.0, t.text);
             }
@@ -397,7 +675,14 @@ impl Setup {
         let shift = (c.measure(&before, px, Weight::Regular) - avail + 2.0).max(0.0);
         if self.input.is_all_selected() {
             let sw = c.measure(&shown, px, Weight::Regular).min(avail);
-            c.fill_rrect(tx - 2.0, y + 9.0, sw + 4.0, FIELD_H - 18.0, 3.0, with_alpha(t.accent, 0.28));
+            c.fill_rrect(
+                tx - 2.0,
+                y + 9.0,
+                sw + 4.0,
+                FIELD_H - 18.0,
+                3.0,
+                with_alpha(t.accent, 0.28),
+            );
         }
         let (mut dropped, mut skipped) = (0, 0.0);
         for ch in shown.chars() {
@@ -408,30 +693,75 @@ impl Setup {
             dropped += 1;
         }
         let visible: String = shown.chars().skip(dropped).collect();
-        c.text(&visible, tx, baseline, px, Weight::Regular, t.text, Some(avail));
+        c.text(
+            &visible,
+            tx,
+            baseline,
+            px,
+            Weight::Regular,
+            t.text,
+            Some(avail),
+        );
         if self.focus {
-            let upto: String = visible.chars().take(caret.saturating_sub(dropped)).collect();
+            let upto: String = visible
+                .chars()
+                .take(caret.saturating_sub(dropped))
+                .collect();
             let cx = tx + c.measure(&upto, px, Weight::Regular);
             c.fill_rect(cx, y + 10.0, 1.5, FIELD_H - 20.0, t.text);
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn button(&mut self, c: &mut Canvas, t: &Theme, label: &str, x: f32, y: f32, w: f32, style: Style, enabled: bool, action: SetupAction) {
+    fn button(
+        &mut self,
+        c: &mut Canvas,
+        t: &Theme,
+        label: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        style: Style,
+        enabled: bool,
+        action: SetupAction,
+    ) {
         let r = Rect::from_xywh(x, y, w, BUTTON_H).unwrap();
         let hover = enabled && self.hovered(&r);
         let (bg, fg, border) = match style {
             Style::Primary => (t.accent, Color::WHITE, None),
             Style::Secondary => (t.bg, t.text, Some(t.border)),
         };
-        let bg = if hover { shade(bg, if self.dark || style == Style::Primary { 1.1 } else { 0.96 }) } else { bg };
-        let (bg, fg) = if enabled { (bg, fg) } else { (with_alpha(bg, 0.5), with_alpha(fg, 0.6)) };
+        let bg = if hover {
+            shade(
+                bg,
+                if self.dark || style == Style::Primary {
+                    1.1
+                } else {
+                    0.96
+                },
+            )
+        } else {
+            bg
+        };
+        let (bg, fg) = if enabled {
+            (bg, fg)
+        } else {
+            (with_alpha(bg, 0.5), with_alpha(fg, 0.6))
+        };
         c.fill_rrect(x, y, w, BUTTON_H, 8.0, bg);
         if let Some(b) = border {
             c.stroke_rrect(x + 0.5, y + 0.5, w - 1.0, BUTTON_H - 1.0, 8.0, b);
         }
         let lw = c.measure(label, 13.0, Weight::Semibold).min(w - 16.0);
-        c.text(label, x + (w - lw) / 2.0, y + BUTTON_H / 2.0 + 4.5, 13.0, Weight::Semibold, fg, Some(w - 16.0));
+        c.text(
+            label,
+            x + (w - lw) / 2.0,
+            y + BUTTON_H / 2.0 + 4.5,
+            13.0,
+            Weight::Semibold,
+            fg,
+            Some(w - 16.0),
+        );
         if enabled {
             self.regions.push((r, action));
         }
@@ -447,7 +777,17 @@ enum Style {
 /// Text wrapped to `w`, at spaces where it has them (otherwise anywhere, as
 /// in Chinese and Japanese). Returns the baseline after the last line.
 #[allow(clippy::too_many_arguments)]
-fn paragraph(c: &mut Canvas, text: &str, x: f32, y: f32, w: f32, px: f32, line: f32, weight: Weight, color: Color) -> f32 {
+fn paragraph(
+    c: &mut Canvas,
+    text: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    px: f32,
+    line: f32,
+    weight: Weight,
+    color: Color,
+) -> f32 {
     let mut y = y;
     for l in wrap(c, text, px, w, weight) {
         c.text(&l, x, y, px, weight, color, None);
@@ -490,7 +830,14 @@ fn wrap(c: &Canvas, text: &str, px: f32, w: f32, weight: Weight) -> Vec<String> 
 pub fn logo(c: &mut Canvas, x: f32, y: f32, size: f32, tile: bool) {
     let s = size / 32.0;
     let glyph = if tile {
-        c.fill_rrect(x + 2.0 * s, y + 2.0 * s, 28.0 * s, 28.0 * s, 8.0 * s, crate::draw::rgb(0x2563eb));
+        c.fill_rrect(
+            x + 2.0 * s,
+            y + 2.0 * s,
+            28.0 * s,
+            28.0 * s,
+            8.0 * s,
+            crate::draw::rgb(0x2563eb),
+        );
         Color::WHITE
     } else {
         crate::draw::rgb(0x2563eb)
@@ -514,7 +861,12 @@ fn spinner(c: &mut Canvas, cx: f32, cy: f32, r: f32, t: &Theme, secs: f32) {
         let a0 = start + i as f32 / steps as f32 * std::f32::consts::PI * 1.2;
         let a1 = start + (i + 1) as f32 / steps as f32 * std::f32::consts::PI * 1.2;
         let rr = r - 1.75;
-        c.line((cx + rr * a0.cos(), cy + rr * a0.sin()), (cx + rr * a1.cos(), cy + rr * a1.sin()), 3.5, t.accent);
+        c.line(
+            (cx + rr * a0.cos(), cy + rr * a0.sin()),
+            (cx + rr * a1.cos(), cy + rr * a1.sin()),
+            3.5,
+            t.accent,
+        );
     }
 }
 
@@ -522,11 +874,23 @@ fn spinner(c: &mut Canvas, cx: f32, cy: f32, r: f32, t: &Theme, secs: f32) {
 /// menu bar (macOS) or top bar (Linux), with retail's icon ringed
 #[allow(clippy::too_many_arguments)]
 fn picture(c: &mut Canvas, t: &Theme, os: Os, x: f32, y: f32, w: f32, h: f32, dark: bool) {
-    let desk = if dark { crate::draw::rgb(0x2b3a55) } else { crate::draw::rgb(0xdbe6fb) };
+    let desk = if dark {
+        crate::draw::rgb(0x2b3a55)
+    } else {
+        crate::draw::rgb(0xdbe6fb)
+    };
     c.fill_rrect(x, y, w, h, 8.0, desk);
     let bar_h = 26.0;
-    let bar = if dark { crate::draw::rgb(0x18181b) } else { crate::draw::rgb(0xf7f7f9) };
-    let fg = if dark { crate::draw::rgb(0xd4d4d8) } else { crate::draw::rgb(0x3f3f46) };
+    let bar = if dark {
+        crate::draw::rgb(0x18181b)
+    } else {
+        crate::draw::rgb(0xf7f7f9)
+    };
+    let fg = if dark {
+        crate::draw::rgb(0xd4d4d8)
+    } else {
+        crate::draw::rgb(0x3f3f46)
+    };
     let (bar_y, top) = match os {
         Os::Windows => (y + h - bar_h, false),
         Os::Macos | Os::Linux => (y, true),
@@ -557,28 +921,59 @@ fn picture(c: &mut Canvas, t: &Theme, os: Os, x: f32, y: f32, w: f32, h: f32, da
         Os::Windows => {
             let sx = x + w / 2.0 - 54.0;
             for i in 0..5 {
-                let color = if i == 0 { crate::draw::rgb(0x2563eb) } else { with_alpha(fg, 0.45) };
+                let color = if i == 0 {
+                    crate::draw::rgb(0x2563eb)
+                } else {
+                    with_alpha(fg, 0.45)
+                };
                 c.fill_rrect(sx + i as f32 * 22.0, mid - 7.0, 14.0, 14.0, 3.0, color);
             }
         }
         Os::Macos => {
             c.circle(x + 16.0, mid, 5.0, fg);
             for (i, wdt) in [30.0, 24.0, 28.0].iter().enumerate() {
-                c.fill_rrect(x + 30.0 + i as f32 * 38.0, mid - 3.0, *wdt, 6.0, 3.0, with_alpha(fg, 0.35));
+                c.fill_rrect(
+                    x + 30.0 + i as f32 * 38.0,
+                    mid - 3.0,
+                    *wdt,
+                    6.0,
+                    3.0,
+                    with_alpha(fg, 0.35),
+                );
             }
         }
         Os::Linux => {
             c.fill_rrect(x + 12.0, mid - 3.0, 46.0, 6.0, 3.0, with_alpha(fg, 0.35));
-            c.fill_rrect(x + w / 2.0 - 22.0, mid - 3.0, 44.0, 6.0, 3.0, with_alpha(fg, 0.5));
+            c.fill_rrect(
+                x + w / 2.0 - 22.0,
+                mid - 3.0,
+                44.0,
+                6.0,
+                3.0,
+                with_alpha(fg, 0.5),
+            );
         }
     }
     // Right end: other icons, retail's, the clock
     let clock = "12:30";
     let cw = c.measure(clock, 11.0, Weight::Semibold);
-    c.text(clock, x + w - 12.0 - cw, mid + 4.0, 11.0, Weight::Semibold, fg, None);
+    c.text(
+        clock,
+        x + w - 12.0 - cw,
+        mid + 4.0,
+        11.0,
+        Weight::Semibold,
+        fg,
+        None,
+    );
     let icon_x = x + w - 12.0 - cw - 30.0;
     for i in 1..3 {
-        c.circle(icon_x - i as f32 * 22.0 + 8.0, mid, 4.5, with_alpha(fg, 0.45));
+        c.circle(
+            icon_x - i as f32 * 22.0 + 8.0,
+            mid,
+            4.5,
+            with_alpha(fg, 0.45),
+        );
     }
     if os == Os::Windows {
         // The ^ that hides more icons
@@ -590,11 +985,25 @@ fn picture(c: &mut Canvas, t: &Theme, os: Os, x: f32, y: f32, w: f32, h: f32, da
     c.stroke_rrect_w(icon_x - 5.0, mid - 13.0, 26.0, 26.0, 13.0, 1.5, t.accent);
     logo(c, icon_x, mid - 8.0, 16.0, true);
     // A pointer to it from the open desktop
-    let (tip_y, from_y) = if top { (bar_y + bar_h + 6.0, bar_y + bar_h + 26.0) } else { (bar_y - 6.0, bar_y - 26.0) };
+    let (tip_y, from_y) = if top {
+        (bar_y + bar_h + 6.0, bar_y + bar_h + 26.0)
+    } else {
+        (bar_y - 6.0, bar_y - 26.0)
+    };
     c.line((icon_x + 8.0, from_y), (icon_x + 8.0, tip_y), 2.0, t.accent);
     let d = if top { -5.0 } else { 5.0 };
-    c.line((icon_x + 3.0, tip_y - d), (icon_x + 8.0, tip_y), 2.0, t.accent);
-    c.line((icon_x + 13.0, tip_y - d), (icon_x + 8.0, tip_y), 2.0, t.accent);
+    c.line(
+        (icon_x + 3.0, tip_y - d),
+        (icon_x + 8.0, tip_y),
+        2.0,
+        t.accent,
+    );
+    c.line(
+        (icon_x + 13.0, tip_y - d),
+        (icon_x + 8.0, tip_y),
+        2.0,
+        t.accent,
+    );
 }
 
 /// What the window hands back when installing ends
@@ -725,7 +1134,10 @@ mod window {
             match retail_proto::invite::Invite::decode(&code) {
                 Ok(invite) => {
                     self.setup.error = None;
-                    self.setup.network = invite.addrs.first().map(|a| crate::settings::server_label(&format!("https://{a}")));
+                    self.setup.network = invite
+                        .addrs
+                        .first()
+                        .map(|a| crate::settings::server_label(&format!("https://{a}")));
                     self.start(Some(code));
                 }
                 Err(_) => {
@@ -765,7 +1177,10 @@ mod window {
             #[cfg(target_os = "macos")]
             {
                 use winit::platform::macos::WindowAttributesExtMacOS;
-                attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
+                attrs = attrs
+                    .with_titlebar_transparent(true)
+                    .with_title_hidden(true)
+                    .with_fullsize_content_view(true);
             }
             if let Some(m) = el.primary_monitor() {
                 let ms = m.size().to_logical::<f64>(m.scale_factor());
@@ -795,10 +1210,13 @@ mod window {
             let SetupEvent::Finished(r) = event;
             match r {
                 Ok(()) => {
-                    if let Kind::Join { network } | Kind::Switch { network, .. } = &self.setup.kind {
+                    if let Kind::Join { network } | Kind::Switch { network, .. } = &self.setup.kind
+                    {
                         self.setup.network = Some(network.clone());
                     }
-                    if self.invite.is_none() && matches!(self.setup.kind, Kind::Install | Kind::Update) {
+                    if self.invite.is_none()
+                        && matches!(self.setup.kind, Kind::Install | Kind::Update)
+                    {
                         self.setup.network = None;
                     }
                     self.setup.step = Step::Done;
@@ -820,15 +1238,23 @@ mod window {
                     self.redraw();
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    self.setup.cursor = Some(((position.x / scale) as f32, (position.y / scale) as f32));
+                    self.setup.cursor =
+                        Some(((position.x / scale) as f32, (position.y / scale) as f32));
                     self.redraw();
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.setup.cursor = None;
                     self.redraw();
                 }
-                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    let action = self.setup.cursor.and_then(|(x, y)| self.setup.action_at(x, y));
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    let action = self
+                        .setup
+                        .cursor
+                        .and_then(|(x, y)| self.setup.action_at(x, y));
                     // The top strip moves a window without a frame
                     if action.is_none()
                         && self.setup.chrome()
@@ -846,13 +1272,19 @@ mod window {
                     }
                     self.redraw();
                 }
-                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                    if event.logical_key == Key::Named(NamedKey::Escape) && self.setup.step != Step::Network {
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
+                    if event.logical_key == Key::Named(NamedKey::Escape)
+                        && self.setup.step != Step::Network
+                    {
                         self.quit(el);
                         return;
                     }
                     if self.setup.step != Step::Network {
-                        if event.logical_key == Key::Named(NamedKey::Enter) && self.setup.step == Step::Welcome {
+                        if event.logical_key == Key::Named(NamedKey::Enter)
+                            && self.setup.step == Step::Welcome
+                        {
                             self.act(el, SetupAction::Next);
                             self.redraw();
                         }
@@ -863,7 +1295,11 @@ mod window {
                         Key::Named(NamedKey::Escape) => self.setup.focus = false,
                         _ => {
                             self.setup.focus = true;
-                            let shortcut = if cfg!(target_os = "macos") { self.mods.super_key() } else { self.mods.control_key() };
+                            let shortcut = if cfg!(target_os = "macos") {
+                                self.mods.super_key()
+                            } else {
+                                self.mods.control_key()
+                            };
                             crate::edit_input(&mut self.setup.input, &event, shortcut);
                             self.setup.error = None;
                         }
@@ -880,7 +1316,9 @@ mod window {
                 if let Some(c) = &self.canvas {
                     c.window.request_redraw();
                 }
-                el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(33)));
+                el.set_control_flow(ControlFlow::WaitUntil(
+                    Instant::now() + Duration::from_millis(33),
+                ));
             } else {
                 el.set_control_flow(ControlFlow::Wait);
             }

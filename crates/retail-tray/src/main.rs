@@ -19,6 +19,7 @@ mod chrome;
 mod config;
 mod dashboard;
 mod draw;
+mod files;
 mod i18n;
 mod icon;
 mod input;
@@ -47,10 +48,10 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Theme, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::api::{ActionKind, ApiEvent, Command, Origin, ServerCommand};
-use crate::dashboard::{DashAction, Dashboard};
 use crate::config::{Config, ThemePref};
-use crate::settings::{AUTH_KEY, DEVICE, SERVER, Settings, SettingsAction};
+use crate::dashboard::{DashAction, Dashboard};
 use crate::i18n::{LangPref, tr, trf};
+use crate::settings::{AUTH_KEY, DEVICE, SERVER, Settings, SettingsAction};
 use crate::text::Fonts;
 use crate::tray::{Anchor, Tray};
 use crate::ui::{Action, Ui, View};
@@ -75,8 +76,14 @@ impl Canvas {
     fn new(el: &ActiveEventLoop, attrs: WindowAttributes) -> Result<Self, String> {
         let window = Rc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let context = softbuffer::Context::new(window.clone()).map_err(|e| e.to_string())?;
-        let surface = softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
-        Ok(Canvas { window, surface, _context: context, pixmap: None })
+        let surface =
+            softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?;
+        Ok(Canvas {
+            window,
+            surface,
+            _context: context,
+            pixmap: None,
+        })
     }
 
     fn id(&self) -> WindowId {
@@ -94,7 +101,9 @@ impl Canvas {
             let _ = self.window.request_inner_size(want);
         }
         let (w, h) = (inner.width.max(1), inner.height.max(1));
-        let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else { return };
+        let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
+            return;
+        };
         if self.surface.resize(nw, nh).is_err() {
             return;
         }
@@ -103,7 +112,9 @@ impl Canvas {
             slot => slot.insert(Pixmap::new(w, h).expect("non-zero size")),
         };
         render(pix, self.window.scale_factor() as f32);
-        let Ok(mut buf) = self.surface.buffer_mut() else { return };
+        let Ok(mut buf) = self.surface.buffer_mut() else {
+            return;
+        };
         for (dst, src) in buf.iter_mut().zip(pix.pixels()) {
             *dst = (src.red() as u32) << 16 | (src.green() as u32) << 8 | src.blue() as u32;
         }
@@ -123,6 +134,7 @@ struct App {
     dashboard_win: Option<Canvas>,
     tray: Option<Tray>,
     commands: mpsc::Sender<Command>,
+    api: SocketAddr,
     fast_poll: Arc<AtomicBool>,
     dashboard_poll: Arc<AtomicBool>,
     hidden_at: Option<Instant>,
@@ -140,13 +152,17 @@ struct App {
 
 impl App {
     fn popup_visible(&self) -> bool {
-        self.popup.as_ref().is_some_and(|p| p.window.is_visible().unwrap_or(false))
+        self.popup
+            .as_ref()
+            .is_some_and(|p| p.window.is_visible().unwrap_or(false))
     }
 
     fn update_poll_rate(&self) {
-        let windows = self.popup_visible() || self.settings_win.is_some() || self.dashboard_win.is_some();
+        let windows =
+            self.popup_visible() || self.settings_win.is_some() || self.dashboard_win.is_some();
         self.fast_poll.store(windows, Ordering::Relaxed);
-        self.dashboard_poll.store(self.dashboard_win.is_some(), Ordering::Relaxed);
+        self.dashboard_poll
+            .store(self.dashboard_win.is_some(), Ordering::Relaxed);
     }
 
     fn dark(&self) -> bool {
@@ -168,7 +184,10 @@ impl App {
             ThemePref::Light => Some(Theme::Light),
             ThemePref::Dark => Some(Theme::Dark),
         };
-        for w in [&self.settings_win, &self.dashboard_win].into_iter().flatten() {
+        for w in [&self.settings_win, &self.dashboard_win]
+            .into_iter()
+            .flatten()
+        {
             w.window.set_theme(theme);
         }
         self.redraw_all();
@@ -198,7 +217,8 @@ impl App {
 
     fn show_popup(&mut self, anchor: Anchor) {
         let Some(p) = &self.popup else { return };
-        let size = LogicalSize::new(ui::WIDTH as f64, self.ui.height() as f64).to_physical(p.scale());
+        let size =
+            LogicalSize::new(ui::WIDTH as f64, self.ui.height() as f64).to_physical(p.scale());
         let _ = p.window.request_inner_size(size);
         p.window.set_outer_position(place(&p.window, anchor, size));
         p.window.set_visible(true);
@@ -234,25 +254,44 @@ impl App {
     fn run_action(&mut self, el: &ActiveEventLoop, action: Action) {
         match action {
             Action::Toggle => {
-                let View::Status(s) = &self.ui.view else { return };
+                let View::Status(s) = &self.ui.view else {
+                    return;
+                };
                 let on = s.state == BackendState::Running;
                 if on {
                     let _ = self.commands.send(Command::Down);
                 } else if let Some(server) = s.server.clone() {
-                    let cmd = Command::Up { server, auth_key: None, hostname: None, invite: None, origin: Origin::Popup };
+                    let cmd = Command::Up {
+                        server,
+                        auth_key: None,
+                        hostname: None,
+                        invite: None,
+                        origin: Origin::Popup,
+                    };
                     let _ = self.commands.send(cmd);
                 }
                 self.ui.pending = Some((!on, Instant::now()));
             }
             Action::Copy(text) => {
                 self.ui.menu = None;
-                let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.clone())).is_ok();
-                let msg = if ok { trf("Copied {text}", &[("text", &text)]) } else { tr("Can't use the clipboard").into() };
+                let ok = arboard::Clipboard::new()
+                    .and_then(|mut c| c.set_text(text.clone()))
+                    .is_ok();
+                let msg = if ok {
+                    trf("Copied {text}", &[("text", &text)])
+                } else {
+                    tr("Can't use the clipboard").into()
+                };
                 self.ui.toast = Some((msg, Instant::now()));
             }
             Action::Wake(name) => {
                 self.ui.menu = None;
                 let _ = self.commands.send(Command::Wake(name));
+            }
+            Action::SendFile(ip, name) => {
+                self.ui.menu = None;
+                self.hide_popup();
+                std::thread::spawn(move || files::send_to(ip, name));
             }
             Action::OpenSettings => {
                 self.ui.gear = false;
@@ -272,7 +311,11 @@ impl App {
             }
             Action::Menu(key) => {
                 self.ui.gear = false;
-                self.ui.menu = if self.ui.menu == Some(key) { None } else { Some(key) };
+                self.ui.menu = if self.ui.menu == Some(key) {
+                    None
+                } else {
+                    Some(key)
+                };
             }
             Action::Gear => {
                 self.ui.menu = None;
@@ -288,8 +331,14 @@ impl App {
             Action::StartDaemon => self.start_daemon(),
             Action::SetExit(key) => {
                 self.ui.menu = None;
-                let req = retail_proto::api::PrefsRequest { exit_node: Some(key), ..Default::default() };
-                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Popup });
+                let req = retail_proto::api::PrefsRequest {
+                    exit_node: Some(key),
+                    ..Default::default()
+                };
+                let _ = self.commands.send(Command::Prefs {
+                    req,
+                    origin: Origin::Popup,
+                });
             }
         }
     }
@@ -309,7 +358,10 @@ impl App {
             .with_title("retail Settings")
             .with_resizable(false)
             .with_theme(theme)
-            .with_inner_size(LogicalSize::new(settings::WIDTH as f64, (self.settings.height() + chrome::top()) as f64));
+            .with_inner_size(LogicalSize::new(
+                settings::WIDTH as f64,
+                (self.settings.height() + chrome::top()) as f64,
+            ));
         attrs = chrome::attributes(attrs);
         if let Some(m) = el.primary_monitor() {
             let ms = m.size().to_logical::<f64>(m.scale_factor());
@@ -350,7 +402,9 @@ impl App {
         let (dark, pointer) = (st.dark, st.cursor.map(chrome::to_window));
         if let Some(w) = &mut self.settings_win {
             w.present(settings::WIDTH, h, |pix, scale| {
-                chrome::frame(pix, fonts, scale, settings::WIDTH, dark, pointer, |pix| st.render(fonts, pix, scale))
+                chrome::frame(pix, fonts, scale, settings::WIDTH, dark, pointer, |pix| {
+                    st.render(fonts, pix, scale)
+                })
             });
         }
     }
@@ -375,7 +429,10 @@ impl App {
             .with_title("retail Server")
             .with_resizable(false)
             .with_theme(theme)
-            .with_inner_size(LogicalSize::new(dashboard::WIDTH as f64, (self.dashboard.height() + chrome::top()) as f64));
+            .with_inner_size(LogicalSize::new(
+                dashboard::WIDTH as f64,
+                (self.dashboard.height() + chrome::top()) as f64,
+            ));
         attrs = chrome::attributes(attrs);
         if let Some(m) = el.primary_monitor() {
             let ms = m.size().to_logical::<f64>(m.scale_factor());
@@ -417,9 +474,15 @@ impl App {
         if let Some(w) = &mut self.dashboard_win {
             let mut changed = false;
             let (dark, pointer) = (d.dark, d.cursor.map(chrome::to_window));
-            w.present(dashboard::WIDTH, d.height() + chrome::top(), |pix, scale| {
-                chrome::frame(pix, fonts, scale, dashboard::WIDTH, dark, pointer, |pix| changed = d.render(fonts, pix, scale))
-            });
+            w.present(
+                dashboard::WIDTH,
+                d.height() + chrome::top(),
+                |pix, scale| {
+                    chrome::frame(pix, fonts, scale, dashboard::WIDTH, dark, pointer, |pix| {
+                        changed = d.render(fonts, pix, scale)
+                    })
+                },
+            );
             if changed {
                 w.window.request_redraw();
             }
@@ -454,12 +517,16 @@ impl App {
                 let _ = self.commands.send(Command::Server(ServerCommand::OpenWeb));
             }
             DashAction::Tunnel(on) => {
-                let _ = self.commands.send(Command::Server(ServerCommand::Tunnel(on)));
+                let _ = self
+                    .commands
+                    .send(Command::Server(ServerCommand::Tunnel(on)));
             }
             DashAction::Remove(id) => {
                 if d.remove_armed(id) {
                     d.confirm_remove = None;
-                    let _ = self.commands.send(Command::Server(ServerCommand::Remove(id)));
+                    let _ = self
+                        .commands
+                        .send(Command::Server(ServerCommand::Remove(id)));
                 } else {
                     d.confirm_remove = Some((id, Instant::now()));
                 }
@@ -494,10 +561,14 @@ impl App {
             DashAction::CreateInvite => self.create_invite(),
             DashAction::InviteMenu(id) => d.invite_menu = (menu != Some(id)).then_some(id),
             DashAction::ShowCode(id) => {
-                let _ = self.commands.send(Command::Server(ServerCommand::Code { id, copy: false }));
+                let _ = self
+                    .commands
+                    .send(Command::Server(ServerCommand::Code { id, copy: false }));
             }
             DashAction::CopyCode(id) => {
-                let _ = self.commands.send(Command::Server(ServerCommand::Code { id, copy: true }));
+                let _ = self
+                    .commands
+                    .send(Command::Server(ServerCommand::Code { id, copy: true }));
             }
             DashAction::NewCode(id) => {
                 if let Some(name) = d.invite_name(id) {
@@ -505,15 +576,22 @@ impl App {
                     d.creating = Some((trf("Invite '{name}'", &[("name", &name)]), false));
                     d.invite_note = Some((tr("New code made. The old code and the installers that contain it no longer work.").into(), false));
                     d.saved = None;
-                    let req = retail_proto::api::InviteRequest { name: Some(name), ..Default::default() };
-                    let _ = self.commands.send(Command::Server(ServerCommand::CreateInvite(req)));
+                    let req = retail_proto::api::InviteRequest {
+                        name: Some(name),
+                        ..Default::default()
+                    };
+                    let _ = self
+                        .commands
+                        .send(Command::Server(ServerCommand::CreateInvite(req)));
                 }
             }
             DashAction::Revoke(id) => {
                 if d.revoke_armed(id) {
                     d.confirm_revoke = None;
                     d.shown = None;
-                    let _ = self.commands.send(Command::Server(ServerCommand::Revoke(id)));
+                    let _ = self
+                        .commands
+                        .send(Command::Server(ServerCommand::Revoke(id)));
                 } else {
                     // Keep the menu open to show the armed item
                     d.confirm_revoke = Some((id, Instant::now()));
@@ -524,12 +602,22 @@ impl App {
                 d.saved = None;
                 d.invite_note = Some((tr("Preparing the installer… The first one for another system is fetched from GitHub and takes a while.").into(), false));
                 let dir = crate::api::downloads_dir();
-                let _ = self.commands.send(Command::Server(ServerCommand::Package { id, variant: variant.to_string(), dir }));
+                let _ = self.commands.send(Command::Server(ServerCommand::Package {
+                    id,
+                    variant: variant.to_string(),
+                    dir,
+                }));
             }
             DashAction::CopyShown => {
                 if let Some(shown) = &d.shown {
-                    let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(shown.code.clone())).is_ok();
-                    d.invite_note = Some(if ok { (tr("Invite code copied.").into(), false) } else { (tr("Can't use the clipboard").into(), true) });
+                    let ok = arboard::Clipboard::new()
+                        .and_then(|mut c| c.set_text(shown.code.clone()))
+                        .is_ok();
+                    d.invite_note = Some(if ok {
+                        (tr("Invite code copied.").into(), false)
+                    } else {
+                        (tr("Can't use the clipboard").into(), true)
+                    });
                 }
             }
             DashAction::CloseShown => d.shown = None,
@@ -554,17 +642,27 @@ impl App {
                 d.invite_note = Some((tr("An invite with this name exists: its code was replaced, and the old one no longer works.").into(), false));
             }
             d.creating = Some((trf("Invite '{name}'", &[("name", &name)]), false));
-            retail_proto::api::InviteRequest { name: Some(name), ttl_hours: draft.ttl, ..Default::default() }
+            retail_proto::api::InviteRequest {
+                name: Some(name),
+                ttl_hours: draft.ttl,
+                ..Default::default()
+            }
         } else {
             d.creating = Some((tr("One-time invite").into(), true));
             retail_proto::api::InviteRequest::default()
         };
         d.busy = Some(Instant::now());
-        let _ = self.commands.send(Command::Server(ServerCommand::CreateInvite(req)));
+        let _ = self
+            .commands
+            .send(Command::Server(ServerCommand::CreateInvite(req)));
     }
 
     fn dashboard_key(&mut self, event: &KeyEvent) {
-        let shortcut = if cfg!(target_os = "macos") { self.mods.super_key() } else { self.mods.control_key() };
+        let shortcut = if cfg!(target_os = "macos") {
+            self.mods.super_key()
+        } else {
+            self.mods.control_key()
+        };
         let d = &mut self.dashboard;
         if event.logical_key == Key::Named(NamedKey::Escape) {
             if d.invite_menu.take().is_none() && d.draft.take().is_none() {
@@ -572,7 +670,9 @@ impl App {
             }
             return;
         }
-        let Some(draft) = d.draft.as_mut().filter(|dr| dr.focused) else { return };
+        let Some(draft) = d.draft.as_mut().filter(|dr| dr.focused) else {
+            return;
+        };
         if event.logical_key == Key::Named(NamedKey::Enter) {
             self.create_invite();
             return;
@@ -582,9 +682,12 @@ impl App {
 
     /// Host of the server this device uses, unless it is the network hosted here
     fn other_network(&self) -> Option<String> {
-        let View::Status(s) = &self.ui.view else { return None };
+        let View::Status(s) = &self.ui.view else {
+            return None;
+        };
         let server = s.server.as_deref()?;
-        (!server.starts_with("https://127.0.0.1:")).then(|| server.split("://").nth(1).unwrap_or(server).to_string())
+        (!server.starts_with("https://127.0.0.1:"))
+            .then(|| server.split("://").nth(1).unwrap_or(server).to_string())
     }
 
     fn run_settings_action(&mut self, action: SettingsAction) {
@@ -668,20 +771,44 @@ impl App {
                 let _ = self.commands.send(Command::InstallUpdate);
             }
             SettingsAction::AutoUpdate(on) => {
-                let req = retail_proto::api::PrefsRequest { auto_update: Some(on), ..Default::default() };
-                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+                let req = retail_proto::api::PrefsRequest {
+                    auto_update: Some(on),
+                    ..Default::default()
+                };
+                let _ = self.commands.send(Command::Prefs {
+                    req,
+                    origin: Origin::Settings,
+                });
             }
             SettingsAction::AdvertiseExit(on) => {
-                let req = retail_proto::api::PrefsRequest { advertise_exit_node: Some(on), ..Default::default() };
-                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+                let req = retail_proto::api::PrefsRequest {
+                    advertise_exit_node: Some(on),
+                    ..Default::default()
+                };
+                let _ = self.commands.send(Command::Prefs {
+                    req,
+                    origin: Origin::Settings,
+                });
             }
             SettingsAction::OpenRouterPort(on) => {
-                let req = retail_proto::api::PrefsRequest { open_router_port: Some(on), ..Default::default() };
-                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+                let req = retail_proto::api::PrefsRequest {
+                    open_router_port: Some(on),
+                    ..Default::default()
+                };
+                let _ = self.commands.send(Command::Prefs {
+                    req,
+                    origin: Origin::Settings,
+                });
             }
             SettingsAction::UploadLimit(mbit) => {
-                let req = retail_proto::api::PrefsRequest { upload_limit_mbit: Some(mbit), ..Default::default() };
-                let _ = self.commands.send(Command::Prefs { req, origin: Origin::Settings });
+                let req = retail_proto::api::PrefsRequest {
+                    upload_limit_mbit: Some(mbit),
+                    ..Default::default()
+                };
+                let _ = self.commands.send(Command::Prefs {
+                    req,
+                    origin: Origin::Settings,
+                });
             }
         }
     }
@@ -691,7 +818,10 @@ impl App {
         if st.is_busy() {
             return;
         }
-        let server = st.inputs[SERVER].trimmed().trim_end_matches('/').to_string();
+        let server = st.inputs[SERVER]
+            .trimmed()
+            .trim_end_matches('/')
+            .to_string();
         let auth_key = st.inputs[AUTH_KEY].trimmed().to_string();
         let hostname = st.inputs[DEVICE].trimmed().to_string();
         let hostname = (!hostname.is_empty()).then_some(hostname);
@@ -700,12 +830,22 @@ impl App {
             st.message = None;
             st.focus = None;
             let invite = Some(server);
-            let cmd = Command::Up { server: String::new(), auth_key: None, hostname, invite, origin: Origin::Settings };
+            let cmd = Command::Up {
+                server: String::new(),
+                auth_key: None,
+                hostname,
+                invite,
+                origin: Origin::Settings,
+            };
             let _ = self.commands.send(cmd);
             return;
         }
         if !(server.starts_with("https://") || server.starts_with("http://")) {
-            st.message = Some((tr("Paste an invite code (retail1.…) or a server address starting with https://").into(), true));
+            st.message = Some((
+                tr("Paste an invite code (retail1.…) or a server address starting with https://")
+                    .into(),
+                true,
+            ));
             st.focus = Some(SERVER);
             return;
         }
@@ -717,12 +857,22 @@ impl App {
         st.busy = Some(Instant::now());
         st.message = None;
         st.focus = None;
-        let cmd = Command::Up { server, auth_key: Some(auth_key), hostname, invite: None, origin: Origin::Settings };
+        let cmd = Command::Up {
+            server,
+            auth_key: Some(auth_key),
+            hostname,
+            invite: None,
+            origin: Origin::Settings,
+        };
         let _ = self.commands.send(cmd);
     }
 
     fn settings_key(&mut self, event: &KeyEvent) {
-        let shortcut = if cfg!(target_os = "macos") { self.mods.super_key() } else { self.mods.control_key() };
+        let shortcut = if cfg!(target_os = "macos") {
+            self.mods.super_key()
+        } else {
+            self.mods.control_key()
+        };
         let form = self.settings.show_form();
         let st = &mut self.settings;
         match &event.logical_key {
@@ -739,12 +889,14 @@ impl App {
                 let fields = st.form_fields();
                 let n = fields.len();
                 let at = st.focus.and_then(|f| fields.iter().position(|&i| i == f));
-                st.focus = Some(fields[match (at, self.mods.shift_key()) {
-                    (None, false) => 0,
-                    (None, true) => n - 1,
-                    (Some(i), false) => (i + 1) % n,
-                    (Some(i), true) => (i + n - 1) % n,
-                }]);
+                st.focus = Some(
+                    fields[match (at, self.mods.shift_key()) {
+                        (None, false) => 0,
+                        (None, true) => n - 1,
+                        (Some(i), false) => (i + 1) % n,
+                        (Some(i), true) => (i + n - 1) % n,
+                    }],
+                );
                 return;
             }
             Key::Named(NamedKey::Enter) if form => {
@@ -771,20 +923,31 @@ impl App {
         };
         self.settings.view = self.ui.view.clone();
         if let View::Status(s) = &self.ui.view {
+            files::on_offers(self.api, &s.file_offers);
             let update = s.update.clone();
             let auto = s.prefs.auto_update;
             self.after_update();
             // Tell the user about each new release once, unless it installs itself
-            if update.available && !auto && !update.installing && update.latest.is_some() && update.latest != self.config.notified_update {
+            if update.available
+                && !auto
+                && !update.installing
+                && update.latest.is_some()
+                && update.latest != self.config.notified_update
+            {
                 self.config.notified_update = update.latest.clone();
                 self.config.save();
                 self.notice_pending = true;
             }
         }
-        if std::mem::take(&mut self.notice_pending) && self.popup.is_some() && !self.popup_visible() {
+        if std::mem::take(&mut self.notice_pending) && self.popup.is_some() && !self.popup_visible()
+        {
             self.show_popup(self.last_anchor);
         }
-        if self.ui.pending.is_some_and(|(target, _)| target == self.ui.is_running()) {
+        if self
+            .ui
+            .pending
+            .is_some_and(|(target, _)| target == self.ui.is_running())
+        {
             self.ui.pending = None;
         }
         if let Some(tray) = &self.tray {
@@ -821,17 +984,38 @@ impl App {
     /// new one in its place. Not by version: a reinstall of the same version
     /// brings changes too. The daemon answering means the copying is done.
     fn after_update(&mut self) {
-        let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) else { return };
-        let me = dir.join(if cfg!(windows) { "retail-tray.exe" } else { "retail-tray" });
-        let replaced = std::fs::metadata(&me).and_then(|m| m.modified()).is_ok_and(|t| t > self.started);
+        let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        else {
+            return;
+        };
+        let me = dir.join(if cfg!(windows) {
+            "retail-tray.exe"
+        } else {
+            "retail-tray"
+        });
+        let replaced = std::fs::metadata(&me)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t > self.started);
         // The new one waits for this one to end before it takes over
-        if replaced && std::process::Command::new(&me).arg(single::REPLACING).spawn().is_ok() {
+        if replaced
+            && std::process::Command::new(&me)
+                .arg(single::REPLACING)
+                .spawn()
+                .is_ok()
+        {
             self.tray = None;
             std::process::exit(0);
         }
     }
 
-    fn on_action(&mut self, origin: Origin, kind: ActionKind, result: Result<StatusResponse, String>) {
+    fn on_action(
+        &mut self,
+        origin: Origin,
+        kind: ActionKind,
+        result: Result<StatusResponse, String>,
+    ) {
         match (origin, result) {
             (Origin::Settings, Ok(s)) if kind == ActionKind::Update => {
                 self.settings.checking = None;
@@ -843,11 +1027,25 @@ impl App {
                 let st = &mut self.settings;
                 st.busy = None;
                 st.message = Some(match kind {
-                    ActionKind::Logout => (tr("Logged out. This device's keys were deleted.").into(), false),
+                    ActionKind::Logout => (
+                        tr("Logged out. This device's keys were deleted.").into(),
+                        false,
+                    ),
                     ActionKind::Forget => (tr("Removed from the list.").into(), false),
                     // The update row says how it went
                     ActionKind::Update => (String::new(), false),
-                    _ => (trf("Connected to {server}", &[("server", &s.server.as_deref().map_or(tr("the server").to_string(), settings::server_label))]), false),
+                    _ => (
+                        trf(
+                            "Connected to {server}",
+                            &[(
+                                "server",
+                                &s.server
+                                    .as_deref()
+                                    .map_or(tr("the server").to_string(), settings::server_label),
+                            )],
+                        ),
+                        false,
+                    ),
                 });
                 if kind != ActionKind::Forget {
                     st.changing = false;
@@ -910,7 +1108,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.last_anchor = anchor;
                 // Clicking the icon first takes focus from the popup and hides it,
                 // so don't reopen it right away
-                let just_hidden = self.hidden_at.is_some_and(|t| t.elapsed() < Duration::from_millis(300));
+                let just_hidden = self
+                    .hidden_at
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(300));
                 if self.popup_visible() {
                     self.hide_popup();
                 } else if !just_hidden {
@@ -921,7 +1121,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_status(result);
                 self.redraw_all();
             }
-            UserEvent::Api(ApiEvent::Action { origin, kind, result }) => {
+            UserEvent::Api(ApiEvent::Action {
+                origin,
+                kind,
+                result,
+            }) => {
                 self.on_action(origin, kind, result);
                 self.redraw_all();
             }
@@ -938,7 +1142,9 @@ impl ApplicationHandler<UserEvent> for App {
                         d.status = Some(Ok(s));
                     }
                     // A failed command keeps the last status and shows why
-                    Err(e) if was_busy || matches!(d.status, Some(Ok(_))) => d.message = Some((e, true)),
+                    Err(e) if was_busy || matches!(d.status, Some(Ok(_))) => {
+                        d.message = Some((e, true))
+                    }
                     Err(e) => d.status = Some(Err(e)),
                 }
                 self.dashboard.other_network = self.other_network();
@@ -949,8 +1155,15 @@ impl ApplicationHandler<UserEvent> for App {
                 d.busy = None;
                 match result {
                     Ok(inv) => {
-                        let (title, one_time) = d.creating.take().unwrap_or_else(|| (tr("One-time invite").into(), true));
-                        d.shown = Some(dashboard::Shown { title, code: inv.code, expires_at: one_time.then_some(inv.expires_at) });
+                        let (title, one_time) = d
+                            .creating
+                            .take()
+                            .unwrap_or_else(|| (tr("One-time invite").into(), true));
+                        d.shown = Some(dashboard::Shown {
+                            title,
+                            code: inv.code,
+                            expires_at: one_time.then_some(inv.expires_at),
+                        });
                         d.draft = None;
                         d.message = None;
                     }
@@ -965,12 +1178,22 @@ impl ApplicationHandler<UserEvent> for App {
                 let d = &mut self.dashboard;
                 match result {
                     Ok(code) if copy => {
-                        let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(code)).is_ok();
-                        d.invite_note = Some(if ok { (tr("Invite code copied.").into(), false) } else { (tr("Can't use the clipboard").into(), true) });
+                        let ok = arboard::Clipboard::new()
+                            .and_then(|mut c| c.set_text(code))
+                            .is_ok();
+                        d.invite_note = Some(if ok {
+                            (tr("Invite code copied.").into(), false)
+                        } else {
+                            (tr("Can't use the clipboard").into(), true)
+                        });
                     }
                     Ok(code) => {
                         let name = d.invite_name(id).unwrap_or_default();
-                        d.shown = Some(dashboard::Shown { title: trf("Invite '{name}'", &[("name", &name)]), code, expires_at: None });
+                        d.shown = Some(dashboard::Shown {
+                            title: trf("Invite '{name}'", &[("name", &name)]),
+                            code,
+                            expires_at: None,
+                        });
                         d.draft = None;
                     }
                     Err(e) => d.invite_note = Some((e, true)),
@@ -989,9 +1212,21 @@ impl ApplicationHandler<UserEvent> for App {
                 let d = &mut self.dashboard;
                 match result {
                     Ok(path) => {
-                        let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                        let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                        d.invite_note = Some((trf("Saved {file} in {dir}. Send it to the person joining; running it is all they do.", &[("file", &file), ("dir", &dir)]), false));
+                        let file = path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let dir = path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        d.invite_note = Some((
+                            trf(
+                                "Saved {file} in {dir}. Send it to the person joining; running it is all they do.",
+                                &[("file", &file), ("dir", &dir)],
+                            ),
+                            false,
+                        ));
                         d.saved = Some(path);
                     }
                     Err(e) => {
@@ -1020,15 +1255,24 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::RedrawRequested => self.redraw_dashboard(),
                 WindowEvent::CloseRequested => self.close_dashboard(),
                 WindowEvent::CursorMoved { position, .. } => {
-                    self.dashboard.cursor = Some(chrome::to_content(((position.x / scale) as f32, (position.y / scale) as f32)));
+                    self.dashboard.cursor = Some(chrome::to_content((
+                        (position.x / scale) as f32,
+                        (position.y / scale) as f32,
+                    )));
                     self.redraw_dashboard();
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.dashboard.cursor = None;
                     self.redraw_dashboard();
                 }
-                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    let Some(at) = self.dashboard.cursor else { return };
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    let Some(at) = self.dashboard.cursor else {
+                        return;
+                    };
                     match chrome::button_at(dashboard::WIDTH, chrome::to_window(at)) {
                         Some(chrome::Button::Close) => return self.close_dashboard(),
                         Some(chrome::Button::Minimize) => {
@@ -1049,9 +1293,13 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.redraw_dashboard();
                 }
-                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
                     // Escape closes a menu, the form or the code first, then the window
-                    let open = self.dashboard.invite_menu.is_some() || self.dashboard.draft.is_some() || self.dashboard.shown.is_some();
+                    let open = self.dashboard.invite_menu.is_some()
+                        || self.dashboard.draft.is_some()
+                        || self.dashboard.shown.is_some();
                     if event.logical_key == Key::Named(NamedKey::Escape) && !open {
                         self.close_dashboard();
                     } else {
@@ -1066,12 +1314,15 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     if let Some((x, y)) = self.dashboard.cursor
                         && rows != 0
-                        && (self.dashboard.scroll_nodes(x, y, rows) || self.dashboard.scroll_invites(x, y, rows))
+                        && (self.dashboard.scroll_nodes(x, y, rows)
+                            || self.dashboard.scroll_invites(x, y, rows))
                     {
                         self.redraw_dashboard();
                     }
                 }
-                WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => self.redraw_dashboard(),
+                WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => {
+                    self.redraw_dashboard()
+                }
                 _ => {}
             }
             return;
@@ -1088,15 +1339,24 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::RedrawRequested => self.redraw_settings(),
                 WindowEvent::CloseRequested => self.close_settings(),
                 WindowEvent::CursorMoved { position, .. } => {
-                    self.settings.cursor = Some(chrome::to_content(((position.x / scale) as f32, (position.y / scale) as f32)));
+                    self.settings.cursor = Some(chrome::to_content((
+                        (position.x / scale) as f32,
+                        (position.y / scale) as f32,
+                    )));
                     self.redraw_settings();
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.settings.cursor = None;
                     self.redraw_settings();
                 }
-                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    let Some(at) = self.settings.cursor else { return };
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    let Some(at) = self.settings.cursor else {
+                        return;
+                    };
                     match chrome::button_at(settings::WIDTH, chrome::to_window(at)) {
                         Some(chrome::Button::Close) => return self.close_settings(),
                         Some(chrome::Button::Minimize) => {
@@ -1114,7 +1374,9 @@ impl ApplicationHandler<UserEvent> for App {
                     let menu = self.settings.server_menu.take();
                     match action {
                         Some(SettingsAction::LangMenu) => self.settings.lang_open = !was_open,
-                        Some(SettingsAction::ServerMenu(i)) => self.settings.server_menu = (menu != Some(i)).then_some(i),
+                        Some(SettingsAction::ServerMenu(i)) => {
+                            self.settings.server_menu = (menu != Some(i)).then_some(i)
+                        }
                         Some(a) => self.run_settings_action(a),
                         None => {
                             self.settings.focus = None;
@@ -1127,7 +1389,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.redraw_settings();
                 }
-                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed =>
+                {
                     self.settings_key(&event);
                     self.redraw_settings();
                 }
@@ -1138,15 +1402,21 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     let st = &mut self.settings;
                     let scrolled = match st.cursor {
-                        Some((x, y)) if rows != 0 && st.over_server_list(x, y) => st.scroll_servers(rows),
-                        Some((x, y)) if rows != 0 && st.over_peer_list(x, y) => st.scroll_peers(rows),
+                        Some((x, y)) if rows != 0 && st.over_server_list(x, y) => {
+                            st.scroll_servers(rows)
+                        }
+                        Some((x, y)) if rows != 0 && st.over_peer_list(x, y) => {
+                            st.scroll_peers(rows)
+                        }
                         _ => false,
                     };
                     if scrolled {
                         self.redraw_settings();
                     }
                 }
-                WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => self.redraw_settings(),
+                WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => {
+                    self.redraw_settings()
+                }
                 _ => {}
             }
             return;
@@ -1159,7 +1429,9 @@ impl ApplicationHandler<UserEvent> for App {
                     self.hide_popup();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Escape) => {
+            WindowEvent::KeyboardInput { event, .. }
+                if event.logical_key == Key::Named(NamedKey::Escape) =>
+            {
                 self.hide_popup()
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1170,7 +1442,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.ui.cursor = None;
                 self.redraw_popup();
             }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if let Some((x, y)) = self.ui.cursor
                     && let Some(action) = self.ui.action_at(x, y)
                 {
@@ -1196,15 +1472,26 @@ impl ApplicationHandler<UserEvent> for App {
         // Wake up to expire the toast, a stale pending toggle, or an armed
         // confirmation button
         let popup = self.ui.needs_timer().filter(|_| self.popup_visible());
-        let logout = self.settings.confirm_logout.map(|t| t + Duration::from_secs(4)).filter(|_| self.settings_win.is_some());
-        let dash = self.dashboard.confirm_stop.or(self.dashboard.confirm_remove.map(|(_, t)| t));
-        let dash = dash.map(|t| t + Duration::from_secs(4)).filter(|_| self.dashboard_win.is_some());
+        let logout = self
+            .settings
+            .confirm_logout
+            .map(|t| t + Duration::from_secs(4))
+            .filter(|_| self.settings_win.is_some());
+        let dash = self
+            .dashboard
+            .confirm_stop
+            .or(self.dashboard.confirm_remove.map(|(_, t)| t));
+        let dash = dash
+            .map(|t| t + Duration::from_secs(4))
+            .filter(|_| self.dashboard_win.is_some());
         match popup.into_iter().chain(logout).chain(dash).min() {
             Some(at) => {
                 if Instant::now() >= at {
                     self.redraw_all();
                 }
-                el.set_control_flow(ControlFlow::WaitUntil(at.max(Instant::now() + Duration::from_millis(50))));
+                el.set_control_flow(ControlFlow::WaitUntil(
+                    at.max(Instant::now() + Duration::from_millis(50)),
+                ));
             }
             None => el.set_control_flow(ControlFlow::Wait),
         }
@@ -1219,21 +1506,36 @@ fn place(window: &Window, a: Anchor, size: PhysicalSize<u32>) -> PhysicalPositio
         .available_monitors()
         .find(|m| {
             let (p, s) = (m.position(), m.size());
-            a.x >= p.x as f64 && a.x < p.x as f64 + s.width as f64 && a.y >= p.y as f64 && a.y < p.y as f64 + s.height as f64
+            a.x >= p.x as f64
+                && a.x < p.x as f64 + s.width as f64
+                && a.y >= p.y as f64
+                && a.y < p.y as f64 + s.height as f64
         })
         .or_else(|| window.primary_monitor())
         .or_else(|| window.current_monitor());
     let Some(m) = monitor else {
         return PhysicalPosition::new(a.x as i32, a.y as i32);
     };
-    let (mx, my, mw, mh) = (m.position().x as f64, m.position().y as f64, m.size().width as f64, m.size().height as f64);
+    let (mx, my, mw, mh) = (
+        m.position().x as f64,
+        m.position().y as f64,
+        m.size().width as f64,
+        m.size().height as f64,
+    );
     let margin = 10.0 * m.scale_factor();
     if a.x == 0.0 && a.y == 0.0 {
         // Position unknown (some Linux trays), so use the top-right corner
-        return PhysicalPosition::new((mx + mw - w - margin) as i32, (my + 40.0 * m.scale_factor()) as i32);
+        return PhysicalPosition::new(
+            (mx + mw - w - margin) as i32,
+            (my + 40.0 * m.scale_factor()) as i32,
+        );
     }
     let x = (a.x + a.w / 2.0 - w / 2.0).clamp(mx + margin, (mx + mw - w - margin).max(mx + margin));
-    let y = if a.y > my + mh / 2.0 { a.y - h - margin } else { a.y + a.h + margin / 2.0 };
+    let y = if a.y > my + mh / 2.0 {
+        a.y - h - margin
+    } else {
+        a.y + a.h + margin / 2.0
+    };
     let y = y.clamp(my, (my + mh - h).max(my));
     PhysicalPosition::new(x as i32, y as i32)
 }
@@ -1241,7 +1543,9 @@ fn place(window: &Window, a: Anchor, size: PhysicalSize<u32>) -> PhysicalPositio
 /// Windows 11 rounds and shadows borderless windows only on request
 #[cfg(windows)]
 fn round_corners(window: &Window) {
-    use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     if let Ok(handle) = window.window_handle()
         && let RawWindowHandle::Win32(h) = handle.as_raw()
@@ -1294,16 +1598,46 @@ fn main() {
     if let Some(code) = install::run(&args) {
         std::process::exit(code);
     }
+    let api: SocketAddr = std::env::var("RETAIL_API")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            retail_proto::LOCAL_API_ADDR
+                .parse()
+                .expect("valid default address")
+        });
+    // A toast's Accept or Decline button
+    #[cfg(windows)]
+    if let Some(i) = args.iter().position(|a| a == "--file-answer") {
+        i18n::set(Config::load().language);
+        files::answer_link(api, args.get(i + 1).map_or("", |s| s.as_str()));
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--preview") {
-        let out = args.get(i + 1).cloned().unwrap_or_else(|| "retail-tray-preview.png".into());
-        let state = args.iter().position(|a| a == "--state").and_then(|i| args.get(i + 1)).map_or("connected", |s| s.as_str());
+        let out = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "retail-tray-preview.png".into());
+        let state = args
+            .iter()
+            .position(|a| a == "--state")
+            .and_then(|i| args.get(i + 1))
+            .map_or("connected", |s| s.as_str());
         let dark = args.iter().any(|a| a == "--dark");
-        let lang = args.iter().position(|a| a == "--lang").and_then(|i| args.get(i + 1)).and_then(|l| LangPref::parse(l));
+        let lang = args
+            .iter()
+            .position(|a| a == "--lang")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|l| LangPref::parse(l));
         i18n::set(lang.unwrap_or(LangPref::En));
         let result = if args.iter().any(|a| a == "--settings") {
             preview::render_settings(&out, state, dark)
         } else if args.iter().any(|a| a == "--setup") {
-            let os = args.iter().position(|a| a == "--os").and_then(|i| args.get(i + 1)).map_or("this", |s| s.as_str());
+            let os = args
+                .iter()
+                .position(|a| a == "--os")
+                .and_then(|i| args.get(i + 1))
+                .map_or("this", |s| s.as_str());
             preview::render_setup(&out, state, os, dark)
         } else if args.iter().any(|a| a == "--server") {
             preview::render_dashboard(&out, state, dark)
@@ -1324,10 +1658,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let api: SocketAddr = std::env::var("RETAIL_API")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| retail_proto::LOCAL_API_ADDR.parse().expect("valid default address"));
 
     #[allow(unused_mut)]
     let mut builder = EventLoop::<UserEvent>::with_user_event();
@@ -1366,6 +1696,7 @@ fn main() {
         dashboard_win: None,
         tray: None,
         commands,
+        api,
         fast_poll,
         dashboard_poll,
         hidden_at: None,
@@ -1442,9 +1773,12 @@ mod single {
 /// app holds, and an event it waits on to show its popup
 #[cfg(windows)]
 mod single {
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ALREADY_EXISTS, GetLastError, WAIT_ABANDONED, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
+        CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent,
+        WaitForSingleObject,
     };
     use winit::event_loop::EventLoopProxy;
 
@@ -1536,16 +1870,34 @@ mod preview {
     /// Round trips around `base` ms, wavy, with a lost ping now and then
     fn rtt(base: u16, spread: u16, lost_every: usize) -> (Option<u32>, Vec<u16>) {
         let h: Vec<u16> = (0..150usize)
-            .map(|i| if lost_every > 0 && i % lost_every == lost_every - 1 { u16::MAX } else { base + (((i * 37) % 17) as u16 * spread) / 16 })
+            .map(|i| {
+                if lost_every > 0 && i % lost_every == lost_every - 1 {
+                    u16::MAX
+                } else {
+                    base + (((i * 37) % 17) as u16 * spread) / 16
+                }
+            })
             .collect();
-        (h.iter().rev().find(|&&m| m != u16::MAX).map(|&m| u32::from(m)), h)
+        (
+            h.iter()
+                .rev()
+                .find(|&&m| m != u16::MAX)
+                .map(|&m| u32::from(m)),
+            h,
+        )
     }
 
     fn sample(state: &str) -> View {
         let mut peers = vec![
-            PeerStatus { exit_node: true, ..peer("desktop-home", 2, true, true, Some(12)) },
+            PeerStatus {
+                exit_node: true,
+                ..peer("desktop-home", 2, true, true, Some(12))
+            },
             peer("nas", 3, true, true, Some(3)),
-            PeerStatus { path: Some("relay".into()), ..peer("phone", 6, true, false, Some(40)) },
+            PeerStatus {
+                path: Some("relay".into()),
+                ..peer("phone", 6, true, false, Some(40))
+            },
             peer("work-macbook", 4, true, false, None),
             peer("old-thinkpad", 5, false, false, None),
         ];
@@ -1563,20 +1915,67 @@ mod preview {
                 ..p
             };
             peers = vec![
-                with(peer("desktop-home", 2, true, true, Some(12)), Some("direct 192.168.0.12:41641"), R::Lan, 812_000_000, 2_400_000_000),
-                with(peer("nas", 3, true, true, Some(3)), Some("direct 203.0.113.3:41641"), R::Internet, 45_000_000, 3_100_000),
-                with(peer("phone", 6, true, false, Some(40)), Some("relay"), R::PunchFailed, 2_300_000, 18_000_000),
-                with(peer("work-macbook", 4, true, false, Some(9)), Some("relay"), R::UdpBlockedHere, 640_000, 1_200_000),
-                with(peer("tablet", 7, true, false, Some(20)), Some("relay"), R::PeerNoAddress, 12_000, 30_500),
-                with(peer("old-thinkpad", 5, false, false, None), None, R::PeerOffline, 0, 0),
+                with(
+                    peer("desktop-home", 2, true, true, Some(12)),
+                    Some("direct 192.168.0.12:41641"),
+                    R::Lan,
+                    812_000_000,
+                    2_400_000_000,
+                ),
+                with(
+                    peer("nas", 3, true, true, Some(3)),
+                    Some("direct 203.0.113.3:41641"),
+                    R::Internet,
+                    45_000_000,
+                    3_100_000,
+                ),
+                with(
+                    peer("phone", 6, true, false, Some(40)),
+                    Some("relay"),
+                    R::PunchFailed,
+                    2_300_000,
+                    18_000_000,
+                ),
+                with(
+                    peer("work-macbook", 4, true, false, Some(9)),
+                    Some("relay"),
+                    R::UdpBlockedHere,
+                    640_000,
+                    1_200_000,
+                ),
+                with(
+                    peer("tablet", 7, true, false, Some(20)),
+                    Some("relay"),
+                    R::PeerNoAddress,
+                    12_000,
+                    30_500,
+                ),
+                with(
+                    peer("old-thinkpad", 5, false, false, None),
+                    None,
+                    R::PeerOffline,
+                    0,
+                    0,
+                ),
             ];
-            for (i, base, spread, lost) in [(0, 12, 6, 0), (1, 28, 10, 0), (2, 90, 120, 37), (3, 140, 160, 23)] {
+            for (i, base, spread, lost) in [
+                (0, 12, 6, 0),
+                (1, 28, 10, 0),
+                (2, 90, 120, 37),
+                (3, 140, 160, 23),
+            ] {
                 (peers[i].rtt_ms, peers[i].rtt_history) = rtt(base, spread, lost);
             }
         }
         if state == "many" {
             for i in 6..14 {
-                peers.push(peer(&format!("server-{i:02}"), i, i % 3 != 0, i % 3 == 1, Some(i as u64 * 7)));
+                peers.push(peer(
+                    &format!("server-{i:02}"),
+                    i,
+                    i % 3 != 0,
+                    i % 3 == 1,
+                    Some(i as u64 * 7),
+                ));
             }
         }
         let backend = match state {
@@ -1602,7 +2001,12 @@ mod preview {
                 endpoints: vec![],
                 dns_name: "work-laptop.retail.internal".into(),
             }),
-            peers: if backend == BackendState::Running { peers } else { vec![] },
+            peers: if backend == BackendState::Running {
+                peers
+            } else {
+                vec![]
+            },
+            file_offers: Vec::new(),
             last_error: None,
             prefs: retail_proto::api::Prefs {
                 // `exit` routes internet traffic through desktop-home
@@ -1612,17 +2016,22 @@ mod preview {
                 ..Default::default()
             },
             router_port: match state {
-                "port" => Some(retail_proto::api::PortState::Opened { method: "UPnP".into(), port: 41641 }),
+                "port" => Some(retail_proto::api::PortState::Opened {
+                    method: "UPnP".into(),
+                    port: 41641,
+                }),
                 "port-refused" => Some(retail_proto::api::PortState::Unavailable { port: 41641 }),
                 _ => None,
             },
             memory_peak: Some(9_437_184),
-            usage_total: state.starts_with("info").then_some(retail_proto::api::UsageTotal {
-                since: 1_793_059_200,
-                tx_bytes: 21_400_000_000,
-                rx_bytes: 74_900_000_000,
-                connected_secs: 1_096_200,
-            }),
+            usage_total: state
+                .starts_with("info")
+                .then_some(retail_proto::api::UsageTotal {
+                    since: 1_793_059_200,
+                    tx_bytes: 21_400_000_000,
+                    rx_bytes: 74_900_000_000,
+                    connected_secs: 1_096_200,
+                }),
             connected_secs: (backend == BackendState::Running).then_some(8_520),
             key_expires_at: None,
             key_expired: state == "expired",
@@ -1646,7 +2055,11 @@ mod preview {
                     ip: Some(std::net::Ipv4Addr::new(100, 64, 0, last)),
                     current,
                 };
-                vec![saved("https://vpn.example.com", 1, true), saved("https://home.example.net:8443", 7, false), saved("https://203.0.113.24", 3, false)]
+                vec![
+                    saved("https://vpn.example.com", 1, true),
+                    saved("https://home.example.net:8443", 7, false),
+                    saved("https://203.0.113.24", 3, false),
+                ]
             },
         }))
     }
@@ -1658,7 +2071,11 @@ mod preview {
         ui.view = sample(state);
         if state == "restarting" {
             ui.view = View::Offline;
-            ui.daemon = crate::ui::DaemonWait { installing: true, since: Some(std::time::Instant::now() - std::time::Duration::from_secs(4)), starting: None };
+            ui.daemon = crate::ui::DaemonWait {
+                installing: true,
+                since: Some(std::time::Instant::now() - std::time::Duration::from_secs(4)),
+                starting: None,
+            };
         }
         if state == "exit-menu" {
             // Open the "⋯" menu of desktop-home, which offers itself as exit node
@@ -1669,14 +2086,24 @@ mod preview {
             // Hover the second device row to show the hover style
             ui.cursor = Some((150.0, 72.0 + 4.0 + 64.0 + 8.0 + 36.0 + 52.0 + 20.0));
         }
-        save(out, crate::ui::WIDTH, ui.height(), |pix, s| ui.render(&fonts, pix, s))
+        save(out, crate::ui::WIDTH, ui.height(), |pix, s| {
+            ui.render(&fonts, pix, s)
+        })
     }
 
     /// `--state login` shows the filled-in form with the auth key focused and
     /// a server error. `--state change` shows "Change server".
     pub fn render_settings(out: &str, state: &str, dark: bool) -> Result<(), String> {
         let fonts = Fonts::load()?;
-        let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System }, crate::LangPref::System);
+        let mut st = Settings::new(
+            dark,
+            if dark {
+                ThemePref::Dark
+            } else {
+                ThemePref::System
+            },
+            crate::LangPref::System,
+        );
         st.view = sample(match state {
             "change" | "server-menu" | "many-servers" | "language" => "connected",
             "info" => "info",
@@ -1694,13 +2121,25 @@ mod preview {
             st.view = View::Offline;
         }
         if state == "restarting" {
-            st.daemon = crate::ui::DaemonWait { installing: true, since: Some(std::time::Instant::now() - std::time::Duration::from_secs(4)), starting: None };
+            st.daemon = crate::ui::DaemonWait {
+                installing: true,
+                since: Some(std::time::Instant::now() - std::time::Duration::from_secs(4)),
+                starting: None,
+            };
         }
         if state == "many-servers" {
             st.changing = true;
             st.server_scroll = 2;
             if let View::Status(s) = &mut st.view {
-                for (i, host) in ["office.example.org", "lab.example.edu", "198.51.100.7", "cabin.example.net"].iter().enumerate() {
+                for (i, host) in [
+                    "office.example.org",
+                    "lab.example.edu",
+                    "198.51.100.7",
+                    "cabin.example.net",
+                ]
+                .iter()
+                .enumerate()
+                {
                     s.servers.push(retail_proto::api::SavedServer {
                         server: format!("https://{host}"),
                         ip: Some(std::net::Ipv4Addr::new(100, 64, 1, i as u8 + 1)),
@@ -1721,11 +2160,16 @@ mod preview {
             st.focus = Some(AUTH_KEY);
         }
         if state == "login" {
-            st.message = Some(("registration rejected (HTTP 401): invalid, used or expired auth key".into(), true));
+            st.message = Some((
+                "registration rejected (HTTP 401): invalid, used or expired auth key".into(),
+                true,
+            ));
         }
         let w = crate::settings::WIDTH;
         save(out, w, st.height() + crate::chrome::top(), |pix, s| {
-            crate::chrome::frame(pix, &fonts, s, w, dark, None, |pix| st.render(&fonts, pix, s))
+            crate::chrome::frame(pix, &fonts, s, w, dark, None, |pix| {
+                st.render(&fonts, pix, s)
+            })
         })
     }
 
@@ -1737,12 +2181,20 @@ mod preview {
         let node = |id: i64, name: &str, last: u8, online: bool, exit: bool| ServerNode {
             id,
             hostname: name.into(),
-            os: if id == 1 { "windows".into() } else { "linux".into() },
+            os: if id == 1 {
+                "windows".into()
+            } else {
+                "linux".into()
+            },
             ip: std::net::Ipv4Addr::new(100, 64, 0, last),
             online,
             exit_node: exit,
             last_seen: (!online).then(|| {
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 3 * 3600
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    - 3 * 3600
             }),
             dns_name: format!("{name}.retail.internal"),
             tags: Vec::new(),
@@ -1761,7 +2213,13 @@ mod preview {
                 public: Some("203.0.113.24:443".into()),
                 lan: vec!["192.168.1.20:443".into()],
                 port_mapping: Some("opened by UPnP (TCP 443, UDP 3478)".into()),
-                router: Some(retail_proto::api::RouterState::Opened { method: "UPnP".into(), tcp: 443, udp: 3478, alt: Some(24581), wg: Some(41641) }),
+                router: Some(retail_proto::api::RouterState::Opened {
+                    method: "UPnP".into(),
+                    tcp: 443,
+                    udp: 3478,
+                    alt: Some(24581),
+                    wg: Some(41641),
+                }),
                 nodes: vec![
                     node(1, "work-laptop", 1, true, false),
                     node(2, "desktop-home", 2, true, true),
@@ -1773,8 +2231,19 @@ mod preview {
         if state == "many"
             && let Some(Ok(st)) = &mut d.status
         {
-            for (i, name) in ["nas", "tablet", "work-macbook", "pi-garage", "old-thinkpad", "living-room-tv"].iter().enumerate() {
-                st.nodes.push(node(4 + i as i64, name, 4 + i as u8, i % 2 == 0, false));
+            for (i, name) in [
+                "nas",
+                "tablet",
+                "work-macbook",
+                "pi-garage",
+                "old-thinkpad",
+                "living-room-tv",
+            ]
+            .iter()
+            .enumerate()
+            {
+                st.nodes
+                    .push(node(4 + i as i64, name, 4 + i as u8, i % 2 == 0, false));
             }
             d.node_scroll = 2;
         }
@@ -1784,33 +2253,52 @@ mod preview {
         {
             st.public = None;
             st.router = None;
-            st.notice = Some(retail_proto::api::ServerNotice::Cgnat { router_ip: "100.64.12.7".parse().unwrap() });
+            st.notice = Some(retail_proto::api::ServerNotice::Cgnat {
+                router_ip: "100.64.12.7".parse().unwrap(),
+            });
             if state == "tunnel" {
                 st.notice = None;
-                st.tunnel = Some(retail_proto::api::TunnelStatus { url: Some("https://warm-river-lamp-sky.trycloudflare.com".into()), error: None });
+                st.tunnel = Some(retail_proto::api::TunnelStatus {
+                    url: Some("https://warm-river-lamp-sky.trycloudflare.com".into()),
+                    error: None,
+                });
             }
         }
-        let now =std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         if let Some(Ok(st)) = &mut d.status
             && st.running
         {
-            let invite = |id: i64, name: Option<&str>, uses: u64, expires_at: i64| retail_proto::api::ServerInvite {
-                id,
-                reusable: name.is_some(),
-                used: uses > 0,
-                expires_at,
-                created_at: now,
-                name: name.map(str::to_string),
-                uses,
+            let invite = |id: i64, name: Option<&str>, uses: u64, expires_at: i64| {
+                retail_proto::api::ServerInvite {
+                    id,
+                    reusable: name.is_some(),
+                    used: uses > 0,
+                    expires_at,
+                    created_at: now,
+                    name: name.map(str::to_string),
+                    uses,
+                }
             };
-            st.invites = vec![invite(4, Some("Family"), 3, i64::MAX), invite(6, Some("Office"), 1, now + 20 * 24 * 3600), invite(9, None, 0, now + 20 * 3600)];
+            st.invites = vec![
+                invite(4, Some("Family"), 3, i64::MAX),
+                invite(6, Some("Office"), 1, now + 20 * 24 * 3600),
+                invite(9, None, 0, now + 20 * 3600),
+            ];
         }
         if state == "idle" {
             d.other_network = Some("vpn.example.com".into());
         } else if state == "create" {
             let mut name = crate::input::TextInput::new("", false);
             name.set("Friends");
-            d.draft = Some(crate::dashboard::Draft { multi: true, ttl: Some(168), name, focused: true });
+            d.draft = Some(crate::dashboard::Draft {
+                multi: true,
+                ttl: Some(168),
+                name,
+                focused: true,
+            });
         } else if state == "invite-menu" {
             d.invite_menu = Some(4);
         } else {
@@ -1836,11 +2324,20 @@ mod preview {
         let fonts = Fonts::load()?;
         let kind = match state {
             "update" => Kind::Update,
-            "join" | "done-joined" => Kind::Join { network: "the retail network \"family\"".into() },
-            "switch" => Kind::Switch { current: "vpn.example.com".into(), network: "the retail network \"office\"".into() },
+            "join" | "done-joined" => Kind::Join {
+                network: "the retail network \"family\"".into(),
+            },
+            "switch" => Kind::Switch {
+                current: "vpn.example.com".into(),
+                network: "the retail network \"office\"".into(),
+            },
             _ => Kind::Install,
         };
-        let dir = if os == "windows" { r"C:\Program Files\retail" } else { "/usr/local/bin" };
+        let dir = if os == "windows" {
+            r"C:\Program Files\retail"
+        } else {
+            "/usr/local/bin"
+        };
         let mut st = Setup::new(kind, env!("CARGO_PKG_VERSION"), dir, false);
         st.dark = dark;
         st.os = match os {
@@ -1862,15 +2359,27 @@ mod preview {
         }
         if state == "network-error" {
             st.input.set("hello");
-            st.error = Some(crate::i18n::tr("This is not a retail invite code. Paste a code that starts with retail1.").into());
+            st.error = Some(
+                crate::i18n::tr(
+                    "This is not a retail invite code. Paste a code that starts with retail1.",
+                )
+                .into(),
+            );
         }
         if state == "done-joined" {
             st.network = Some("the retail network \"family\"".into());
         }
-        save(out, crate::setup::WIDTH, crate::setup::HEIGHT, |pix, s| st.render(&fonts, pix, s))
+        save(out, crate::setup::WIDTH, crate::setup::HEIGHT, |pix, s| {
+            st.render(&fonts, pix, s)
+        })
     }
 
-    fn save(out: &str, w: f32, h: f32, render: impl FnOnce(&mut Pixmap, f32)) -> Result<(), String> {
+    fn save(
+        out: &str,
+        w: f32,
+        h: f32,
+        render: impl FnOnce(&mut Pixmap, f32),
+    ) -> Result<(), String> {
         let scale = 2.0;
         let mut pix = Pixmap::new((w * scale) as u32, (h * scale) as u32).ok_or("bad size")?;
         render(&mut pix, scale);

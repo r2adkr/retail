@@ -36,24 +36,39 @@ pub async fn run(code: HelperCode, inject: Injector, linked: Arc<AtomicBool>) {
     }
 }
 
-async fn connect(code: &HelperCode) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
-    let (first, rest) = code.addrs.split_first().context("the helper code has no address")?;
+async fn connect(
+    code: &HelperCode,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+    let (first, rest) = code
+        .addrs
+        .split_first()
+        .context("the helper code has no address")?;
     let (host, port) = first.rsplit_once(':').context("malformed helper address")?;
     let host = host.trim_matches(['[', ']']);
     let tcp = crate::happy::connect_many(host, port.parse()?, rest).await?;
     tcp.set_nodelay(true)?;
     retail_proto::relay::tune(&tcp);
     let pin = decode_pin(&code.pin).context("the helper code is damaged")?;
-    let target = crate::http::Target { pin: Some(pin), ..Default::default() };
+    let target = crate::http::Target {
+        pin: Some(pin),
+        ..Default::default()
+    };
     let name = rustls::pki_types::ServerName::try_from(LINK_NAME)?;
-    let mut tls = tokio_rustls::TlsConnector::from(target.tls()).connect(name, tcp).await?;
-    tls.get_mut().1.set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
+    let mut tls = tokio_rustls::TlsConnector::from(target.tls())
+        .connect(name, tcp)
+        .await?;
+    tls.get_mut()
+        .1
+        .set_buffer_limit(Some(retail_proto::relay::TLS_BUFFER));
     Ok(tls)
 }
 
 async fn link(code: &HelperCode, inject: &Injector, linked: &AtomicBool) -> Result<()> {
-    let mut tls = tokio::time::timeout(Duration::from_secs(15), connect(code)).await.context("timed out")??;
-    tls.write_all(format!("CTRL {}\n", code.secret).as_bytes()).await?;
+    let mut tls = tokio::time::timeout(Duration::from_secs(15), connect(code))
+        .await
+        .context("timed out")??;
+    tls.write_all(format!("CTRL {}\n", code.secret).as_bytes())
+        .await?;
     let (r, mut w) = tokio::io::split(tls);
     let mut reader = BufReader::new(r);
     let pickups = Arc::new(tokio::sync::Semaphore::new(MAX_PICKUPS));
@@ -73,8 +88,14 @@ async fn link(code: &HelperCode, inject: &Injector, linked: &AtomicBool) -> Resu
         let mut words = line.split_whitespace();
         match words.next() {
             Some("OPEN") => {
-                let id: u64 = words.next().and_then(|w| w.parse().ok()).context("malformed OPEN")?;
-                let client: SocketAddr = words.next().and_then(|w| w.parse().ok()).context("malformed OPEN")?;
+                let id: u64 = words
+                    .next()
+                    .and_then(|w| w.parse().ok())
+                    .context("malformed OPEN")?;
+                let client: SocketAddr = words
+                    .next()
+                    .and_then(|w| w.parse().ok())
+                    .context("malformed OPEN")?;
                 let Ok(permit) = pickups.clone().try_acquire_owned() else {
                     tracing::debug!("helper: too many connections being picked up; dropping one");
                     continue;
@@ -94,8 +115,15 @@ async fn link(code: &HelperCode, inject: &Injector, linked: &AtomicBool) -> Resu
 }
 
 async fn pick_up(code: &HelperCode, inject: &Injector, id: u64, client: SocketAddr) -> Result<()> {
-    let mut tls = tokio::time::timeout(Duration::from_secs(10), connect(code)).await.context("timed out")??;
-    tls.write_all(format!("WORK {} {id}\n", code.secret).as_bytes()).await?;
-    inject.send((Box::new(tls), client)).await.ok().context("the server stopped")?;
+    let mut tls = tokio::time::timeout(Duration::from_secs(10), connect(code))
+        .await
+        .context("timed out")??;
+    tls.write_all(format!("WORK {} {id}\n", code.secret).as_bytes())
+        .await?;
+    inject
+        .send((Box::new(tls), client))
+        .await
+        .ok()
+        .context("the server stopped")?;
     Ok(())
 }
