@@ -137,6 +137,7 @@ Using the internet through another device.
 - The tunnel carries IPv4 only, so the IPv6 internet is blocked while an exit node is in use (no leaks).
 - If the chosen exit node goes offline, the internet is blocked (fail closed). The tray and `retail status` say so, and clearing the choice restores it. The control connection stays up.
 - While an exit node is in use, DNS to a public resolver goes through the tunnel; a resolver on the local network (a private address) is still asked directly, so that network sees the names looked up. If resolving the server name fails, the last address that worked is used.
+- **Upload limit** (`shaper.rs`, `Prefs.upload_limit_mbit`, off by default): a download through an exit node fills the exit's upload, and the router's queue then delays everything else (bufferbloat). With a limit set a little under the line's upload speed, one token bucket (burst about 30 ms, at least four 64 KiB bursts) meters what the device sends: the tunnel's datagrams, policed per packet at tun-read before counters are reserved, and, while it offers an exit node, what it forwards on to the internet, at tun-write. Over the limit, packets above 300 bytes are dropped, so their TCP senders slow down; smaller ones (games, calls, ACKs, DNS) still go, down to half a burst of debt. Off, it costs one atomic load per batch. The limit applies to every peer, LAN ones included.
 
 ### 6.5 Memory limit
 
