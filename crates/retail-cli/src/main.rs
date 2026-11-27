@@ -852,6 +852,16 @@ fn human_bytes(n: u64) -> String {
     if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[i]) }
 }
 
+/// `45s`, `12m`, `3h 5m`, `2d 4h`
+fn human_secs(s: u64) -> String {
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86_399 => format!("{}h {}m", s / 3600, s % 3600 / 60),
+        _ => format!("{}d {}h", s / 86_400, s % 86_400 / 3600),
+    }
+}
+
 /// The saved server `name` means: its exact URL, or the one URL containing it
 async fn saved_server(client: &Client, name: &str) -> Result<String> {
     let st: StatusResponse = client.get("/status").await?;
@@ -946,6 +956,8 @@ fn print_status(st: &StatusResponse) {
     if let Some(u) = st.usage_total {
         let days = (now_unix() - u.since).max(0) / 86_400;
         println!("usage:   sent {}, received {} in total ({days} days)", human_bytes(u.tx_bytes), human_bytes(u.rx_bytes));
+        let now = st.connected_secs.map_or_else(String::new, |s| format!(", this connection {}", human_secs(s)));
+        println!("time:    connected {} in total{now}", human_secs(u.connected_secs));
     }
     if let Some(e) = &st.last_error {
         println!("error:   {e}");

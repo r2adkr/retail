@@ -206,6 +206,11 @@ const TABLE: &[[&str; 5]] = &[
     ["{n} s ago", "{n}초 전", "{n} 秒前", "{n} 秒前", "hace {n} s"],
     ["{n} min ago", "{n}분 전", "{n} 分前", "{n} 分钟前", "hace {n} min"],
     ["{n} h ago", "{n}시간 전", "{n} 時間前", "{n} 小时前", "hace {n} h"],
+    ["{n} s", "{n}초", "{n} 秒", "{n} 秒", "{n} s"],
+    ["{n} min", "{n}분", "{n} 分", "{n} 分钟", "{n} min"],
+    ["{h} h {m} min", "{h}시간 {m}분", "{h} 時間 {m} 分", "{h} 小时 {m} 分钟", "{h} h {m} min"],
+    ["{d} d {h} h", "{d}일 {h}시간", "{d} 日 {h} 時間", "{d} 天 {h} 小时", "{d} d {h} h"],
+    ["Connected for {time}", "{time}째 연결 중", "接続して {time}", "已连接 {time}", "Conectado hace {time}"],
 
     // Settings window
     ["Connection", "연결", "接続", "连接", "Conexión"],
@@ -227,6 +232,8 @@ const TABLE: &[[&str; 5]] = &[
     ["Total received", "전체 받은 데이터", "受信の合計", "累计接收", "Total recibido"],
     ["This connection", "이번 연결", "今回の接続", "本次连接", "Esta conexión"],
     ["Memory peak", "최대 메모리", "最大メモリ", "内存峰值", "Memoria máx."],
+    ["Total connected", "전체 연결 시간", "接続時間の合計", "累计连接时长", "Tiempo total conectado"],
+    ["Connected this time", "이번 연결 시간", "今回の接続時間", "本次连接时长", "Esta conexión, tiempo"],
     ["Direct {d} · Relay {r}", "직접 {d} · 릴레이 {r}", "直接 {d} · リレー {r}", "直连 {d} · 中继 {r}", "Directa {d} · Relé {r}"],
     ["Totals and each device's usage since {date}.", "전체와 기기별 사용량은 {date}부터 센 값입니다.", "合計と機器ごとの量は {date} からの値です。", "累计和各设备用量自 {date} 起计算。", "Totales y uso por dispositivo desde el {date}."],
     ["Connect to see usage and paths.", "연결하면 사용량과 경로가 보입니다.", "接続すると使用量と経路が表示されます。", "连接后显示用量和路径。", "Conéctate para ver uso y rutas."],

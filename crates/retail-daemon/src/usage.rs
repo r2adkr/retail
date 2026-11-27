@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use retail_proto::Key;
 use retail_proto::api::{PeerStatus, UsageTotal};
@@ -21,6 +22,9 @@ struct Saved {
     rx: u64,
     #[serde(default)]
     devices: HashMap<Key, (u64, u64)>,
+    /// Seconds connected
+    #[serde(default)]
+    connected: u64,
 }
 
 #[derive(Default)]
@@ -28,6 +32,8 @@ struct Inner {
     saved: Saved,
     /// Counters at the last sample, per tunnel
     last: HashMap<Key, (u64, u64)>,
+    /// The session's time counted up to here
+    counted_to: Option<Instant>,
     dirty: bool,
 }
 
@@ -50,10 +56,23 @@ impl Usage {
         Usage { path, inner: Mutex::new(Inner { saved, ..Default::default() }) }
     }
 
-    /// Adds what the tunnels carried since the last sample
+    /// Adds what the tunnels carried, and the time connected, since the last
+    /// sample. Called only while a session runs.
     pub fn record(&self, peers: &[PeerStatus]) {
         let mut g = self.inner.lock().unwrap();
-        let Inner { saved, last, dirty } = &mut *g;
+        let Inner { saved, last, counted_to, dirty } = &mut *g;
+        match *counted_to {
+            None => *counted_to = Some(Instant::now()),
+            Some(t) => {
+                // Whole seconds, the rest carried to the next sample
+                let secs = t.elapsed().as_secs();
+                if secs > 0 {
+                    saved.connected = saved.connected.saturating_add(secs);
+                    *counted_to = Some(t + Duration::from_secs(secs));
+                    *dirty = true;
+                }
+            }
+        }
         last.retain(|k, _| peers.iter().any(|p| p.node_key == *k));
         for p in peers {
             let (tx0, rx0) = last.insert(p.node_key, (p.tx_bytes, p.rx_bytes)).unwrap_or_default();
@@ -79,12 +98,14 @@ impl Usage {
 
     /// The session's tunnels are gone: the next ones count from zero
     pub fn end_session(&self) {
-        self.inner.lock().unwrap().last.clear();
+        let mut g = self.inner.lock().unwrap();
+        g.last.clear();
+        g.counted_to = None;
     }
 
     pub fn total(&self) -> UsageTotal {
         let g = self.inner.lock().unwrap();
-        UsageTotal { since: g.saved.since, tx_bytes: g.saved.tx, rx_bytes: g.saved.rx }
+        UsageTotal { since: g.saved.since, tx_bytes: g.saved.tx, rx_bytes: g.saved.rx, connected_secs: g.saved.connected }
     }
 
     /// Fills in each peer's total
@@ -144,6 +165,25 @@ mod tests {
         again.fill(&mut ps);
         assert_eq!((ps[0].total_tx_bytes, ps[0].total_rx_bytes), (Some(180), Some(1540)));
         assert_eq!(again.total().since, t.since);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn connected_time_counts_sessions_only() {
+        let dir = std::env::temp_dir().join(format!("retail-usage-time-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let u = Usage::load(&dir);
+        u.record(&[]);
+        std::thread::sleep(Duration::from_millis(1100));
+        u.record(&[]);
+        assert_eq!(u.total().connected_secs, 1);
+        u.end_session();
+        // Disconnected meanwhile: the next session starts counting afresh
+        std::thread::sleep(Duration::from_millis(1100));
+        u.record(&[]);
+        assert_eq!(u.total().connected_secs, 1);
+        u.save();
+        assert_eq!(Usage::load(&dir).total().connected_secs, 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

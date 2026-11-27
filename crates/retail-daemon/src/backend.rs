@@ -31,6 +31,7 @@ const GRACEFUL_STOP: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct Session {
     engine: Arc<Engine>,
+    started: Instant,
     tasks: JoinSet<()>,
     /// Tasks that watch `stop` and undo what they set up (router ports), so
     /// they are given a moment to finish before the rest is cut short
@@ -715,7 +716,7 @@ impl Backend {
                 }
             }
         });
-        let mut session = Session { engine, tasks, graceful, threads, stop, exit_routes: None, gateway, _dns: dns };
+        let mut session = Session { engine, started: Instant::now(), tasks, graceful, threads, stop, exit_routes: None, gateway, _dns: dns };
         if let Err(e) = apply_exit_prefs(&mut session, &p.prefs) {
             // The mesh still works, so only report the exit-node problem
             tracing::warn!("{e:#}");
@@ -855,6 +856,7 @@ impl Backend {
             problem: engine.filter(|e| !e.control_connected.load(Ordering::Relaxed)).and_then(|e| e.control_problem()),
             router_port: self.device_port.state().filter(|_| engine.is_some() && p.prefs.open_router_port),
             usage_total: Some(self.usage.total()),
+            connected_secs: session.map(|s| s.started.elapsed().as_secs()),
         }
     }
 }

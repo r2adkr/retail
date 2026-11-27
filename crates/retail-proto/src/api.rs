@@ -433,6 +433,9 @@ pub struct StatusResponse {
     /// Traffic since this device started counting, across restarts
     #[serde(default)]
     pub usage_total: Option<UsageTotal>,
+    /// How long this connection has been up
+    #[serde(default)]
+    pub connected_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +444,9 @@ pub struct UsageTotal {
     pub since: i64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    /// Time connected, all connections together
+    #[serde(default)]
+    pub connected_secs: u64,
 }
 
 /// This device's WireGuard port on the router

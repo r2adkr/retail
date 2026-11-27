@@ -64,8 +64,8 @@ const ABOUT_H: f32 = 60.0 + 64.0 + 60.0;
 const ROW_H: f32 = 50.0;
 /// Saved servers shown at once; more scroll
 const MAX_ROWS: usize = 4;
-/// The usage card: two rows of two values
-const USAGE_H: f32 = 162.0;
+/// The usage card: totals, time connected, this connection, memory
+const USAGE_H: f32 = 212.0;
 /// The line under the usage card
 const USAGE_HINT_H: f32 = 26.0;
 const PEER_ROW_H: f32 = 50.0;
@@ -457,13 +457,16 @@ impl Settings {
         let total = s.usage_total;
         label_value(c, t, tr("Total sent"), &bytes(total.map_or(tx, |u| u.tx_bytes)), ix, y + 8.0, col - 8.0);
         label_value(c, t, tr("Total received"), &bytes(total.map_or(rx, |u| u.rx_bytes)), ix + col, y + 8.0, col);
+        let time = |secs: Option<u64>| secs.map_or_else(|| "—".to_string(), crate::ui::duration);
+        label_value(c, t, tr("Total connected"), &time(total.map(|u| u.connected_secs)), ix, y + 58.0, col - 8.0);
+        label_value(c, t, tr("Connected this time"), &time(s.connected_secs), ix + col, y + 58.0, col);
         let now = format!("↑ {}  ↓ {}", bytes(tx), bytes(rx));
-        label_value(c, t, tr("This connection"), &now, ix, y + 58.0, col - 8.0);
+        label_value(c, t, tr("This connection"), &now, ix, y + 108.0, col - 8.0);
         let count = |kind: &str| s.peers.iter().filter(|p| p.path.as_deref().is_some_and(|v| v.starts_with(kind))).count();
         let paths = trf("Direct {d} · Relay {r}", &[("d", &count("direct")), ("r", &count("relay"))]);
-        label_value(c, t, tr("Paths"), &paths, ix + col, y + 58.0, col);
+        label_value(c, t, tr("Paths"), &paths, ix + col, y + 108.0, col);
         let memory = s.memory_peak.map_or_else(|| "—".to_string(), bytes);
-        label_value(c, t, tr("Memory peak"), &memory, ix, y + 108.0, col - 8.0);
+        label_value(c, t, tr("Memory peak"), &memory, ix, y + 158.0, col - 8.0);
         y += USAGE_H;
         if let Some(u) = total {
             let hint = trf("Totals and each device's usage since {date}.", &[("date", &date(u.since))]);

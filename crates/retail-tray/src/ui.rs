@@ -24,6 +24,8 @@ const NOTE_H: f32 = 84.0;
 const MENU_ITEM_H: f32 = 34.0;
 const MENU_W: f32 = 200.0;
 const BANNER_H: f32 = 66.0;
+/// Handshakes older than this show in a device's row (keys renew every 120 s)
+const STALE_HANDSHAKE: u64 = 180;
 
 /// Windows 11 rounds the window itself (8 px, see `round_corners`). Elsewhere
 /// the window is a plain rectangle.
@@ -433,10 +435,14 @@ impl Ui {
         let ip = me.ip.to_string();
         let ipw = c.measure(&ip, 13.0, Weight::Regular);
         c.text(&ip, x + w - 14.0 - ipw, y + 47.0, 13.0, Weight::Regular, t.dim, None);
-        if hover {
-            let hint = tr("Click to copy");
-            let hw = c.measure(hint, 10.0, Weight::Regular);
-            c.text(hint, x + w - 14.0 - hw, y + 27.0, 10.0, Weight::Regular, t.dim, None);
+        let corner = if hover {
+            Some(tr("Click to copy").to_string())
+        } else {
+            s.connected_secs.filter(|_| s.state == BackendState::Running).map(|n| trf("Connected for {time}", &[("time", &duration(n))]))
+        };
+        if let Some(corner) = corner {
+            let hw = c.measure(&corner, 10.0, Weight::Regular);
+            c.text(&corner, x + w - 14.0 - hw, y + 27.0, 10.0, Weight::Regular, t.dim, None);
         }
         self.regions.push((r, Action::Copy(ip)));
         y + CARD_H
@@ -472,8 +478,13 @@ impl Ui {
             };
             c.circle(PAD + 5.0, y + ROW_H / 2.0, 4.5, dot);
             c.text(&p.hostname, PAD + 20.0, y + 23.0, 14.0, Weight::Regular, t.text, Some(WIDTH - 2.0 * PAD - 120.0));
+            // WireGuard renews its keys every 2 minutes, so a fresh handshake
+            // is not news (and its age, starting over, looked like reconnects);
+            // an old one means the device has gone quiet
             let detail = match p.last_handshake_secs {
-                Some(secs) if p.endpoint.is_some() || (relayed && s.control_connected) => format!("{path} · {}", ago(secs)),
+                Some(secs) if secs > STALE_HANDSHAKE && (p.endpoint.is_some() || (relayed && s.control_connected)) => {
+                    format!("{path} · {}", ago(secs))
+                }
                 _ => path,
             };
             let in_use = s.prefs.exit_node == Some(p.node_key);
@@ -650,6 +661,16 @@ fn exit_in_use(s: &StatusResponse) -> Option<(String, bool)> {
         Some(p) => (p.hostname.clone(), !(p.online && p.exit_node)),
         None => (String::new(), true),
     })
+}
+
+/// A length of time in its two largest units
+pub fn duration(secs: u64) -> String {
+    match secs {
+        0..=59 => trf("{n} s", &[("n", &secs)]),
+        60..=3599 => trf("{n} min", &[("n", &(secs / 60))]),
+        3600..=86_399 => trf("{h} h {m} min", &[("h", &(secs / 3600)), ("m", &(secs % 3600 / 60))]),
+        _ => trf("{d} d {h} h", &[("d", &(secs / 86_400)), ("h", &(secs % 86_400 / 3600))]),
+    }
 }
 
 fn ago(secs: u64) -> String {
