@@ -1515,7 +1515,17 @@ mod preview {
             dns_name: format!("{name}.retail.internal"),
             restricted: false,
             routes: vec![],
+            rtt_ms: None,
+            rtt_history: vec![],
         }
+    }
+
+    /// Round trips around `base` ms, wavy, with a lost ping now and then
+    fn rtt(base: u16, spread: u16, lost_every: usize) -> (Option<u32>, Vec<u16>) {
+        let h: Vec<u16> = (0..150usize)
+            .map(|i| if lost_every > 0 && i % lost_every == lost_every - 1 { u16::MAX } else { base + (((i * 37) % 17) as u16 * spread) / 16 })
+            .collect();
+        (h.iter().rev().find(|&&m| m != u16::MAX).map(|&m| u32::from(m)), h)
     }
 
     fn sample(state: &str) -> View {
@@ -1529,6 +1539,8 @@ mod preview {
         if state == "info" {
             use retail_proto::api::PathReason as R;
             let with = |p: PeerStatus, path: Option<&str>, r: R, tx: u64, rx: u64| PeerStatus {
+                rtt_ms: None,
+                rtt_history: vec![],
                 path: path.map(Into::into),
                 path_reason: Some(r),
                 tx_bytes: tx,
@@ -1545,6 +1557,9 @@ mod preview {
                 with(peer("tablet", 7, true, false, Some(20)), Some("relay"), R::PeerNoAddress, 12_000, 30_500),
                 with(peer("old-thinkpad", 5, false, false, None), None, R::PeerOffline, 0, 0),
             ];
+            for (i, base, spread, lost) in [(0, 12, 6, 0), (1, 28, 10, 0), (2, 90, 120, 37), (3, 140, 160, 23)] {
+                (peers[i].rtt_ms, peers[i].rtt_history) = rtt(base, spread, lost);
+            }
         }
         if state == "many" {
             for i in 6..14 {

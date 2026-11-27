@@ -239,6 +239,7 @@ struct PeerInfo {
     /// then only proves the peer reaches us, so direct is trusted again only
     /// after a handshake answered over UDP.
     needs_proof: bool,
+    ping: crate::ping::Log,
 }
 
 #[derive(PartialEq)]
@@ -1151,6 +1152,7 @@ impl Engine {
                 udp_data_at: None,
                 relay_data_at: None,
                 needs_proof: false,
+                ping: Default::default(),
             }),
         }
     }
@@ -1849,7 +1851,9 @@ impl Engine {
                 match *r {
                     crate::crypto::Decrypted::Packet(len) => {
                         authenticated = true;
-                        if !peer.filter.inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], &here) {
+                        if self.take_ping(&peer, &b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len])
+                            || !peer.filter.inbound(&b.bufs[first + i][TUN_OFFSET..TUN_OFFSET + len], &here)
+                        {
                             continue;
                         }
                         b.bufs.swap(first + i, b.len);
@@ -1869,6 +1873,29 @@ impl Engine {
                     self.answer_direct(&peer, addr);
                 }
             }
+        }
+    }
+
+    /// A ping (see `ping`) is answered or timed here, not given to the system
+    fn take_ping(&self, peer: &Peer, packet: &[u8]) -> bool {
+        let Some((kind, nonce)) = crate::ping::parse(packet) else { return false };
+        match kind {
+            crate::ping::Kind::Request if packet[16..20] == self.self_ip.octets() => {
+                let ip = peer.info.lock().unwrap().ip;
+                self.send_ping(peer, crate::ping::Kind::Reply, ip, nonce);
+            }
+            crate::ping::Kind::Reply => peer.info.lock().unwrap().ping.answered(nonce, Instant::now()),
+            crate::ping::Kind::Request => {}
+        }
+        true
+    }
+
+    fn send_ping(&self, peer: &Peer, kind: crate::ping::Kind, to: Ipv4Addr, nonce: u32) {
+        let packet = crate::ping::build(kind, self.self_ip, to, nonce);
+        let mut out = [0u8; 128];
+        let n = peer.tunn.lock().unwrap().encapsulate(&packet, &mut out).len_if_network();
+        if let Some(n) = n {
+            self.send_routed(peer, &out[..n]);
         }
     }
 
@@ -1920,6 +1947,9 @@ impl Engine {
                     return false;
                 }
                 self.note_rx(&peer, src, true);
+                if self.take_ping(&peer, &out[start..start + len]) {
+                    return false;
+                }
                 let own_routes = self.own_routes.read().unwrap().clone();
                 if !peer.filter.inbound(&out[start..start + len], &self.here(&own_routes)) {
                     return false;
@@ -2089,6 +2119,16 @@ impl Engine {
                     let (_, tx, rx, _, _) = tunn.stats();
                     (r, tunn.time_since_last_handshake().is_some(), tx as u64, rx as u64)
                 };
+                if established {
+                    let due = {
+                        let mut info = p.info.lock().unwrap();
+                        let ip = info.ip;
+                        info.ping.due(tx + rx, Instant::now()).map(|n| (ip, n))
+                    };
+                    if let Some((ip, nonce)) = due {
+                        self.send_ping(&p, crate::ping::Kind::Request, ip, nonce);
+                    }
+                }
                 if established && p.check_liveness(tx, rx) != Liveness::Fine {
                     // Proof of life for a sender, or the first relayed packet after
                     // a direct path was lost
@@ -2262,6 +2302,7 @@ impl Engine {
             .map(|p| {
                 let (handshake, tx, rx, _, _) = p.tunn.lock().unwrap().stats();
                 let info = p.info.lock().unwrap();
+                let (rtt_ms, rtt_history) = info.ping.snapshot();
                 let path = match (info.direct_ok(), info.uses_relay()) {
                     (Some(ep), _) => Some(format!("direct {ep}")),
                     (None, true) => Some("relay".to_string()),
@@ -2285,6 +2326,8 @@ impl Engine {
                     total_tx_bytes: None,
                     total_rx_bytes: None,
                     routes: p.routes().to_vec(),
+                    rtt_ms,
+                    rtt_history,
                 }
             })
             .collect();

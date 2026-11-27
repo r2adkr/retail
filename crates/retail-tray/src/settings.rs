@@ -505,11 +505,19 @@ impl Settings {
                 None => (tr("Connecting"), t.dim),
             };
             let traffic = format!("↑ {}  ↓ {}", bytes(p.total_tx_bytes.unwrap_or(p.tx_bytes)), bytes(p.total_rx_bytes.unwrap_or(p.rx_bytes)));
-            let bw = c.measure(badge, 12.5, Weight::Semibold);
+            let badge = match p.rtt_ms {
+                Some(ms) => format!("{ms} ms · {badge}"),
+                None => badge.to_string(),
+            };
+            let bw = c.measure(&badge, 12.5, Weight::Semibold);
             let tw = c.measure(&traffic, 11.5, Weight::Regular);
+            let graph = if p.rtt_history.is_empty() { 0.0 } else { GRAPH_W + 12.0 };
+            if graph > 0.0 {
+                rtt_graph(c, t, &p.rtt_history, right - bw - graph, y + 8.0);
+            }
             let name = if p.dns_name.is_empty() { p.hostname.as_str() } else { p.dns_name.trim_end_matches(".retail.internal") };
-            c.text(name, ix, y + 21.0, 13.5, Weight::Semibold, t.text, Some(iw - bw - 12.0));
-            c.text(badge, right - bw, y + 21.0, 12.5, Weight::Semibold, color, None);
+            c.text(name, ix, y + 21.0, 13.5, Weight::Semibold, t.text, Some(iw - bw - graph - 12.0));
+            c.text(&badge, right - bw, y + 21.0, 12.5, Weight::Semibold, color, None);
             c.text(reason_text(p), ix, y + 38.0, 11.5, Weight::Regular, t.dim, Some(iw - tw - 12.0));
             c.text(&traffic, right - tw, y + 38.0, 11.5, Weight::Regular, t.dim, None);
             y += PEER_ROW_H;
@@ -997,4 +1005,27 @@ fn date(unix: i64) -> String {
 fn label_value(c: &mut Canvas, t: &Theme, label: &str, value: &str, x: f32, y: f32, w: f32) {
     c.text(label, x, y + 14.0, 12.0, Weight::Regular, t.dim, None);
     c.text(value, x, y + 34.0, 14.0, Weight::Regular, t.text, Some(w));
+}
+
+/// The last two minutes of round trips (one bar per 2 s ping), taller when
+/// slower; a red tick for a ping with no answer
+const GRAPH_W: f32 = 90.0;
+const GRAPH_H: f32 = 16.0;
+
+fn rtt_graph(c: &mut Canvas, t: &Theme, history: &[u16], x: f32, y: f32) {
+    let n = (GRAPH_W / 1.5) as usize;
+    let shown = &history[history.len().saturating_sub(n)..];
+    let x0 = x + GRAPH_W - shown.len() as f32 * 1.5;
+    c.fill_rect(x, y + GRAPH_H, GRAPH_W, 1.0, t.border);
+    for (i, &ms) in shown.iter().enumerate() {
+        let bx = x0 + i as f32 * 1.5;
+        if ms == u16::MAX {
+            c.fill_rect(bx, y, 1.0, GRAPH_H, t.red);
+            continue;
+        }
+        // Square root, so 20 ms and 300 ms both read
+        let h = (f32::from(ms.min(400)) / 400.0).sqrt() * (GRAPH_H - 2.0) + 2.0;
+        let color = if ms < 80 { t.accent } else if ms < 200 { t.amber } else { t.red };
+        c.fill_rect(bx, y + GRAPH_H - h, 1.0, h, color);
+    }
 }

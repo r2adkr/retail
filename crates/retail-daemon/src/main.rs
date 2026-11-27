@@ -21,6 +21,7 @@ mod http1;
 mod local_api;
 mod local_token;
 mod logfile;
+mod ping;
 mod magicdns;
 mod memory;
 mod portmap;

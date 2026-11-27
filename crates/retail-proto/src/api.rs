@@ -723,6 +723,13 @@ pub struct PeerStatus {
     /// Networks reached through it
     #[serde(default)]
     pub routes: Vec<crate::route::Ipv4Net>,
+    /// Round trip through the tunnel, measured while traffic flows
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
+    /// Round trips 2 s apart, oldest first, up to 5 minutes; `u16::MAX` is a
+    /// ping with no answer
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rtt_history: Vec<u16>,
 }
 
 /// Why a peer is reached directly, through the relay, or not at all
