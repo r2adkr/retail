@@ -240,6 +240,8 @@ struct PeerInfo {
     /// after a handshake answered over UDP.
     needs_proof: bool,
     ping: crate::ping::Log,
+    /// Its local networks, for waking it (see `lan`)
+    lan: Vec<retail_proto::api::LanPort>,
 }
 
 #[derive(PartialEq)]
@@ -667,6 +669,8 @@ pub struct Engine {
     /// What this device sends over its line: the tunnel's datagrams, and the
     /// internet traffic it forwards as an exit node
     pub upload: crate::shaper::Limiter,
+    /// When this device last woke one on its network for a peer
+    last_wake: Mutex<Option<Instant>>,
     /// Networks this device offers to route
     advertise_routes: watch::Sender<Vec<Ipv4Net>>,
     /// Networks the server approved for this device, as last told
@@ -797,6 +801,7 @@ impl Engine {
             exit_pref: Mutex::new(None),
             advertise_exit: watch::channel(false).0,
             upload: Default::default(),
+            last_wake: Mutex::new(None),
             advertise_routes: watch::channel(Vec::new()).0,
             own_routes: RwLock::new(Arc::from(Vec::new())),
             granted_routes: RwLock::new(Vec::new()),
@@ -1061,6 +1066,7 @@ impl Engine {
                         info.online = node.online;
                         info.exit_node = node.exit_node;
                         info.candidates = candidates;
+                        info.lan = node.lan.clone();
                         drop(info);
                         p.filter.set(&node.accept);
                         *p.routes.write().unwrap() = routes.clone();
@@ -1153,6 +1159,7 @@ impl Engine {
                 relay_data_at: None,
                 needs_proof: false,
                 ping: Default::default(),
+                lan: node.lan.clone(),
             }),
         }
     }
@@ -1876,27 +1883,80 @@ impl Engine {
         }
     }
 
-    /// A ping (see `ping`) is answered or timed here, not given to the system
+    /// A ping or wake request (see `ping`) is handled here, not given to the system
     fn take_ping(&self, peer: &Peer, packet: &[u8]) -> bool {
-        let Some((kind, nonce)) = crate::ping::parse(packet) else { return false };
-        match kind {
-            crate::ping::Kind::Request if packet[16..20] == self.self_ip.octets() => {
+        use crate::ping::Msg;
+        let Some(msg) = crate::ping::parse(packet) else { return false };
+        let for_me = packet[16..20] == self.self_ip.octets();
+        match msg {
+            Msg::Request(nonce) if for_me => {
                 let ip = peer.info.lock().unwrap().ip;
-                self.send_ping(peer, crate::ping::Kind::Reply, ip, nonce);
+                self.send_ping(peer, Msg::Reply(nonce), ip);
             }
-            crate::ping::Kind::Reply => peer.info.lock().unwrap().ping.answered(nonce, Instant::now()),
-            crate::ping::Kind::Request => {}
+            Msg::Reply(nonce) => peer.info.lock().unwrap().ping.answered(nonce, Instant::now()),
+            // Only from peers that may reach this device in full, onto one of its own networks
+            Msg::Wake(mac, to) if for_me && !peer.filter.restricted() => {
+                let mut last = self.last_wake.lock().unwrap();
+                if last.is_some_and(|t| t.elapsed() < Duration::from_millis(200)) {
+                    return true;
+                }
+                *last = Some(Instant::now());
+                drop(last);
+                if crate::lan::ports().iter().any(|p| p.broadcast() == to) {
+                    let from = peer.info.lock().unwrap().hostname.clone();
+                    match crate::lan::send_magic(mac, to) {
+                        Ok(()) => tracing::info!(%from, %to, "sent a Wake-on-LAN packet"),
+                        Err(e) => tracing::warn!(%to, "Wake-on-LAN: {e}"),
+                    }
+                }
+            }
+            _ => {}
         }
         true
     }
 
-    fn send_ping(&self, peer: &Peer, kind: crate::ping::Kind, to: Ipv4Addr, nonce: u32) {
-        let packet = crate::ping::build(kind, self.self_ip, to, nonce);
-        let mut out = [0u8; 128];
+    fn send_ping(&self, peer: &Peer, msg: crate::ping::Msg, to: Ipv4Addr) {
+        let packet = crate::ping::build(msg, self.self_ip, to);
+        let mut out = [0u8; 160];
         let n = peer.tunn.lock().unwrap().encapsulate(&packet, &mut out).len_if_network();
         if let Some(n) = n {
             self.send_routed(peer, &out[..n]);
         }
+    }
+
+    /// Wakes a device: from this one if it is on the same local network, and
+    /// through every online peer that is. Returns who sent the packet.
+    pub fn wake(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        let (key, hostname, _) = self.find_peer(name)?;
+        let peers: Vec<Arc<Peer>> = self.peers.read().unwrap().by_key.values().cloned().collect();
+        let target = peers.iter().find(|p| p.key == key).map(|p| p.info.lock().unwrap().lan.clone()).unwrap_or_default();
+        if target.is_empty() {
+            anyhow::bail!("{hostname} has not told the server its network card yet (it needs to run retail once while on)");
+        }
+        let own = crate::lan::ports();
+        let mut sent = Vec::new();
+        for t in &target {
+            if own.iter().any(|o| o.shares_network(t)) {
+                crate::lan::send_magic(t.mac, t.broadcast()).context("sending the Wake-on-LAN packet")?;
+                sent.push("this device".to_string());
+            }
+            for p in peers.iter().filter(|p| p.key != key) {
+                let (online, ip, name, near) = {
+                    let i = p.info.lock().unwrap();
+                    (i.online, i.ip, i.hostname.clone(), i.lan.iter().any(|l| l.shares_network(t)))
+                };
+                if online && near {
+                    self.send_ping(p, crate::ping::Msg::Wake(t.mac, t.broadcast()), ip);
+                    sent.push(name);
+                }
+            }
+        }
+        sent.sort();
+        sent.dedup();
+        if sent.is_empty() {
+            anyhow::bail!("no device on {hostname}'s local network is online to wake it");
+        }
+        Ok(sent)
     }
 
     /// Handles one datagram. Returns true if `out` now holds an IP packet for
@@ -2126,7 +2186,7 @@ impl Engine {
                         info.ping.due(tx + rx, Instant::now()).map(|n| (ip, n))
                     };
                     if let Some((ip, nonce)) = due {
-                        self.send_ping(&p, crate::ping::Kind::Request, ip, nonce);
+                        self.send_ping(&p, crate::ping::Msg::Request(nonce), ip);
                     }
                 }
                 if established && p.check_liveness(tx, rx) != Liveness::Fine {
@@ -2328,6 +2388,7 @@ impl Engine {
                     routes: p.routes().to_vec(),
                     rtt_ms,
                     rtt_history,
+                    can_wake: !info.lan.is_empty(),
                 }
             })
             .collect();

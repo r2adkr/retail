@@ -59,6 +59,8 @@ pub enum Action {
     Update,
     /// Start retaild with administrator permission
     StartDaemon,
+    /// Turn on a device that is off (hostname)
+    Wake(String),
 }
 
 /// The daemon going away during an update, and coming back
@@ -530,6 +532,9 @@ impl Ui {
         let mut items = vec![MenuItem { label: tr("Copy IP address").into(), action: Action::Copy(p.ip.to_string()) }];
         if !p.dns_name.is_empty() {
             items.push(MenuItem { label: tr("Copy name").into(), action: Action::Copy(p.dns_name.clone()) });
+        }
+        if !p.online && p.can_wake {
+            items.push(MenuItem { label: tr("Wake up").into(), action: Action::Wake(p.hostname.clone()) });
         }
         let in_use = s.prefs.exit_node == Some(p.node_key);
         if in_use {

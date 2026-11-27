@@ -38,6 +38,7 @@ pub fn router(backend: Arc<Backend>, token: Arc<String>, admin: Arc<String>, api
         .route("/servers/switch", post(switch_server))
         .route("/servers/forget", post(forget_server))
         .route("/prefs", post(prefs))
+        .route("/wake", post(wake))
         .route("/server", get(server_status))
         .route("/server/start", post(server_start))
         .route("/server/stop", post(server_stop))
@@ -221,6 +222,13 @@ async fn forget_server(State(b): State<Arc<Backend>>, Json(req): Json<ServerSele
 async fn prefs(State(b): State<Arc<Backend>>, axum::Extension(Admin(admin)): axum::Extension<Admin>, Json(req): Json<PrefsRequest>) -> Response {
     match b.set_prefs(req, admin).await {
         Ok(()) => Json(b.status().await).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+async fn wake(State(b): State<Arc<Backend>>, Json(req): Json<retail_proto::api::WakeRequest>) -> Response {
+    match b.wake(&req.peer).await {
+        Ok(sent_by) => Json(retail_proto::api::WakeResponse { sent_by }).into_response(),
         Err(e) => failed(e),
     }
 }

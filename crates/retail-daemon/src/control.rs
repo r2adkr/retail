@@ -220,7 +220,7 @@ where
     let mut advertise = engine.subscribe_advertise_exit();
     let mut advertise_routes = engine.subscribe_advertise_routes();
     let hostinfo = |exit_node, routes| -> Result<Message> {
-        Ok(Message::text(serde_json::to_string(&ClientMessage::Hostinfo { exit_node, routes })?))
+        Ok(Message::text(serde_json::to_string(&ClientMessage::Hostinfo { exit_node, routes, lan: crate::lan::ports() })?))
     };
     let offer = *advertise.borrow_and_update();
     let routes = advertise_routes.borrow_and_update().clone();

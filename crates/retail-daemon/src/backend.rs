@@ -463,6 +463,11 @@ impl Backend {
         Ok(())
     }
 
+    pub async fn wake(&self, name: &str) -> Result<Vec<String>> {
+        let session = self.session.lock().await;
+        session.as_ref().context("connect first: devices are woken through the network")?.engine.wake(name)
+    }
+
     pub async fn auto_update(&self) -> bool {
         self.persisted.lock().await.prefs.auto_update
     }

@@ -98,6 +98,12 @@ enum Cmd {
         #[arg(long, value_name = "MBIT|off")]
         upload_limit: Option<String>,
     },
+    /// Turn on a device that is off (Wake-on-LAN), through this device or
+    /// another one on its local network
+    Wake {
+        /// Hostname or mesh IP
+        device: String,
+    },
     /// Check for a new release and install it
     Update {
         /// Only check, do not install
@@ -397,6 +403,11 @@ async fn main() -> Result<()> {
             Some(n) => println!("{}", n.ip),
             None => bail!("not logged in"),
         },
+        Cmd::Wake { device } => {
+            let req = retail_proto::api::WakeRequest { peer: device.clone() };
+            let r = client.post::<_, retail_proto::api::WakeResponse>("/wake", Some(&req)).await?;
+            println!("sent a wake-up to {device} (from {}); it may take a minute to come online", r.sent_by.join(", "));
+        }
         Cmd::Update { check } => {
             let st: StatusResponse = client.post::<(), _>("/update/check", None).await?;
             let u = &st.update;

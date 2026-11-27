@@ -18,6 +18,7 @@ mod helper_role;
 mod host;
 mod http;
 mod http1;
+mod lan;
 mod local_api;
 mod local_token;
 mod logfile;

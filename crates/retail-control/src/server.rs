@@ -416,6 +416,7 @@ impl AppState {
             dns_name: n.dns_name.clone(),
             accept,
             routes: routes_of(n.id),
+            lan: n.lan.clone(),
         };
         // Devices that may not talk either way do not see each other at all,
         // and one whose key expired sees and is seen by nobody
@@ -585,7 +586,7 @@ async fn serve_connection(
     // An expired node may not relay to anyone, cause netmap rounds or act as helper
     let mut blocked = true;
     let mut pending_endpoints: Option<Vec<std::net::SocketAddr>> = None;
-    let mut pending_hostinfo: Option<(bool, Vec<Ipv4Net>)> = None;
+    let mut pending_hostinfo: Option<(bool, Vec<Ipv4Net>, Vec<retail_proto::api::LanPort>)> = None;
     const ENDPOINTS: usize = 0;
     const HOSTINFO: usize = 1;
     // Send the first netmap immediately
@@ -630,7 +631,7 @@ async fn serve_connection(
                 if state.pace_due(node_id, HOSTINFO) > tokio::time::Instant::now() {
                     continue;
                 }
-                let (exit_node, mut routes) = pending_hostinfo.take().unwrap_or_default();
+                let (exit_node, mut routes, lan) = pending_hostinfo.take().unwrap_or_default();
                 state.paced(node_id, HOSTINFO);
                 let mut changed = {
                     let mut exits = state.exit_nodes.lock().unwrap();
@@ -638,6 +639,10 @@ async fn serve_connection(
                 };
                 if changed {
                     tracing::info!(node_id, exit_node, "exit node offer changed");
+                }
+                // Kept while it is off; one with no local network keeps its last
+                if !lan.is_empty() && state.db.set_lan(node_id, &lan)? {
+                    changed = true;
                 }
                 routes.retain(|r| r.check_route().is_ok());
                 routes.sort();
@@ -664,8 +669,8 @@ async fn serve_connection(
                             pending_endpoints = Some(endpoints);
                         }
                         // An expired node offers nothing and causes no netmap rounds
-                        Ok(ClientMessage::Hostinfo { exit_node, routes }) => {
-                            pending_hostinfo = (!blocked).then_some((exit_node, routes));
+                        Ok(ClientMessage::Hostinfo { exit_node, routes, lan }) => {
+                            pending_hostinfo = (!blocked).then_some((exit_node, routes, lan));
                         }
                         Ok(ClientMessage::HelperCode { code }) => {
                             // A device whose key expired is no longer the helper

@@ -34,6 +34,8 @@ pub enum Command {
     InstallUpdate,
     Refresh,
     Prefs { req: PrefsRequest, origin: Origin },
+    /// Wake a device that is off (hostname)
+    Wake(String),
     /// Hosting a network on this device
     Server(ServerCommand),
 }
@@ -66,6 +68,8 @@ pub enum ApiEvent {
     Code { id: i64, copy: bool, result: Result<String, String> },
     /// Where an installer was saved
     Saved(Result<PathBuf, String>),
+    /// A wake-up was sent to this device, or why not
+    Woken { name: String, result: Result<(), String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +130,12 @@ pub fn spawn(
                     }
                     Ok(Command::InstallUpdate) => {
                         (Origin::Settings, ActionKind::Update, call(addr, "POST", "/update/install", None, Duration::from_secs(10)))
+                    }
+                    Ok(Command::Wake(name)) => {
+                        let body = serde_json::to_string(&retail_proto::api::WakeRequest { peer: name.clone() }).unwrap_or_default();
+                        let result = call::<retail_proto::api::WakeResponse>(addr, "POST", "/wake", Some(&body), Duration::from_secs(10));
+                        on_event(ApiEvent::Woken { name, result: result.map(|_| ()) });
+                        continue;
                     }
                     Ok(Command::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
                         on_event(ApiEvent::Status(call(addr, "GET", "/status", None, Duration::from_secs(3))));

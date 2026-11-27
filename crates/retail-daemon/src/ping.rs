@@ -1,16 +1,17 @@
 //! Round-trip times to peers, for the tray's connection graph. While traffic
 //! flows between two devices, each sends the other a small UDP packet inside
 //! the tunnel every 2 seconds; the other's daemon answers it itself, so no
-//! firewall or ICMP setting is involved. Idle peers get none.
+//! firewall or ICMP setting is involved. Idle peers get none. Requests to
+//! wake a device (`lan`) travel the same way.
 
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-/// Source and destination port of both packets
+/// Source and destination port of every packet here
 pub const PORT: u16 = 41617;
 const MAGIC: [u8; 4] = *b"rtlP";
-const LEN: usize = 20 + 8 + 12;
+const LEN: usize = 20 + 8 + 16;
 pub const INTERVAL: Duration = Duration::from_secs(2);
 /// Kept: 5 minutes of samples
 pub const HISTORY: usize = 150;
@@ -20,13 +21,16 @@ pub const LOST: u16 = u16::MAX;
 const ACTIVE_BYTES: u64 = 400;
 const ACTIVE_FOR: Duration = Duration::from_secs(10);
 
+/// What daemons say to each other inside the tunnel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Request,
-    Reply,
+pub enum Msg {
+    Request(u32),
+    Reply(u32),
+    /// Send a Wake-on-LAN packet for this card to this broadcast address (see `lan`)
+    Wake([u8; 6], Ipv4Addr),
 }
 
-pub fn build(kind: Kind, src: Ipv4Addr, dst: Ipv4Addr, nonce: u32) -> [u8; LEN] {
+pub fn build(msg: Msg, src: Ipv4Addr, dst: Ipv4Addr) -> [u8; LEN] {
     let mut p = [0u8; LEN];
     p[0] = 0x45;
     p[2..4].copy_from_slice(&(LEN as u16).to_be_bytes());
@@ -41,21 +45,28 @@ pub fn build(kind: Kind, src: Ipv4Addr, dst: Ipv4Addr, nonce: u32) -> [u8; LEN] 
     p[24..26].copy_from_slice(&((LEN - 20) as u16).to_be_bytes());
     // UDP checksum 0: none (IPv4)
     p[28..32].copy_from_slice(&MAGIC);
-    p[32] = matches!(kind, Kind::Reply) as u8;
-    p[36..40].copy_from_slice(&nonce.to_be_bytes());
+    let (kind, mac, word) = match msg {
+        Msg::Request(n) => (0, [0; 6], n),
+        Msg::Reply(n) => (1, [0; 6], n),
+        Msg::Wake(mac, to) => (2, mac, u32::from(to)),
+    };
+    p[32] = kind;
+    p[34..40].copy_from_slice(&mac);
+    p[40..44].copy_from_slice(&word.to_be_bytes());
     p
 }
 
-pub fn parse(p: &[u8]) -> Option<(Kind, u32)> {
+pub fn parse(p: &[u8]) -> Option<Msg> {
     if p.len() != LEN || p[0] != 0x45 || p[9] != 17 || p[20..22] != PORT.to_be_bytes() || p[22..24] != PORT.to_be_bytes() || p[28..32] != MAGIC {
         return None;
     }
-    let kind = match p[32] {
-        0 => Kind::Request,
-        1 => Kind::Reply,
-        _ => return None,
-    };
-    Some((kind, u32::from_be_bytes(p[36..40].try_into().unwrap())))
+    let word = u32::from_be_bytes(p[40..44].try_into().unwrap());
+    match p[32] {
+        0 => Some(Msg::Request(word)),
+        1 => Some(Msg::Reply(word)),
+        2 => Some(Msg::Wake(p[34..40].try_into().unwrap(), Ipv4Addr::from(word))),
+        _ => None,
+    }
 }
 
 fn checksum(h: &[u8]) -> u16 {
@@ -131,10 +142,12 @@ mod tests {
     #[test]
     fn packets_round_trip() {
         let (a, b) = (Ipv4Addr::new(100, 64, 0, 1), Ipv4Addr::new(100, 64, 0, 2));
-        let p = build(Kind::Request, a, b, 7);
-        assert_eq!(parse(&p), Some((Kind::Request, 7)));
+        let p = build(Msg::Request(7), a, b);
+        assert_eq!(parse(&p), Some(Msg::Request(7)));
         assert_eq!(checksum(&p[..20]), 0);
-        assert_eq!(parse(&build(Kind::Reply, b, a, 9)), Some((Kind::Reply, 9)));
+        assert_eq!(parse(&build(Msg::Reply(9), b, a)), Some(Msg::Reply(9)));
+        let wake = Msg::Wake([2, 1, 2, 3, 4, 5], Ipv4Addr::new(192, 168, 0, 255));
+        assert_eq!(parse(&build(wake, a, b)), Some(wake));
         let mut other = p;
         other[29] = b'x';
         assert_eq!(parse(&other), None);

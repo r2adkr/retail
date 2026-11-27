@@ -42,6 +42,9 @@ pub enum ClientMessage {
         /// work once the server's administrator approves them
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routes: Vec<crate::route::Ipv4Net>,
+        /// Its local networks and network cards, so it can be woken
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lan: Vec<LanPort>,
     },
     /// This node as a helper for the server (asked by `NetMap::helper`):
     /// its helper code once it listens, `None` if it cannot or stopped
@@ -105,6 +108,38 @@ pub struct Node {
     /// Networks routed through this node (subnet routes), approved and offered
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<crate::route::Ipv4Net>,
+    /// Its local networks as it last reported them, kept while it is off
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lan: Vec<LanPort>,
+}
+
+/// A device's network card on a local network: enough to wake it from
+/// another device on that network (Wake-on-LAN)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LanPort {
+    pub mac: [u8; 6],
+    pub addr: Ipv4Addr,
+    pub prefix: u8,
+}
+
+impl LanPort {
+    /// At most this many per device
+    pub const MAX: usize = 8;
+
+    pub fn broadcast(&self) -> Ipv4Addr {
+        let host = u32::MAX.checked_shr(u32::from(self.prefix)).unwrap_or(0);
+        Ipv4Addr::from(u32::from(self.addr) | host)
+    }
+
+    /// On the same local network as `other`
+    pub fn shares_network(&self, other: &LanPort) -> bool {
+        self.prefix == other.prefix && self.broadcast() == other.broadcast()
+    }
+
+    /// A usable private address on a real network card
+    pub fn valid(&self) -> bool {
+        (8..=30).contains(&self.prefix) && self.addr.is_private() && self.mac != [0; 6] && self.mac[0] & 1 == 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -730,6 +765,22 @@ pub struct PeerStatus {
     /// ping with no answer
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rtt_history: Vec<u16>,
+    /// The server knows its network card, so `POST /wake` may wake it
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_wake: bool,
+}
+
+/// `POST /wake`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeRequest {
+    /// Hostname, mesh IP or node key
+    pub peer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeResponse {
+    /// The devices that sent the packet ("this device" for this one)
+    pub sent_by: Vec<String>,
 }
 
 /// Why a peer is reached directly, through the relay, or not at all
@@ -806,6 +857,7 @@ mod tests {
             dns_name: "a.retail.internal".into(),
             accept: crate::acl::Accept::Ports { ports: vec![crate::acl::PortRule::parse("tcp:22").unwrap()] },
             routes: vec!["192.168.1.0/24".parse().unwrap()],
+            lan: vec![LanPort { mac: [2, 0, 0, 0, 0, 1], addr: Ipv4Addr::new(192, 168, 1, 5), prefix: 24 }],
         };
         let nm = ServerMessage::NetMap(NetMap {
             self_node: node.clone(),

@@ -221,6 +221,8 @@ const TABLE: &[[&str; 5]] = &[
     ["Other devices can reach the internet through this one.", "다른 기기가 이 기기를 거쳐 인터넷을 쓸 수 있습니다.", "他のデバイスがこのデバイス経由でインターネットを利用できます。", "其他设备可以通过本设备访问互联网。", "Otros dispositivos pueden usar internet a través de este."],
     ["Open a router port", "공유기 포트 열기", "ルーターのポートを開く", "打开路由器端口", "Abrir un puerto del router"],
     ["None", "없음", "なし", "无", "Ninguno"],
+    ["Wake up", "켜기", "起動する", "唤醒", "Encender"],
+    ["Waking {name}…", "{name}을(를) 켜는 중…", "{name} を起動しています…", "正在唤醒 {name}…", "Encendiendo {name}…"],
     ["Upload limit", "업로드 제한", "アップロード制限", "上传限速", "Límite de subida"],
     ["Keeps games quick during downloads.", "다운로드 중에도 게임이 빠릅니다.", "ダウンロード中もゲームが快適です。", "下载时游戏依然流畅。", "Juegos rápidos al descargar."],
     ["Devices elsewhere connect directly, not via the relay.", "다른 네트워크 기기가 릴레이 없이 바로 연결합니다.", "他のネットワークの端末がリレーなしで直接接続します。", "其他网络的设备直接连接，不经中继。", "Otras redes conectan directo, sin el relé."],

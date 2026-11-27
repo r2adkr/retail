@@ -91,6 +91,9 @@ struct NodeRec {
     /// Networks the administrator lets it route
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     routes: Vec<Ipv4Net>,
+    /// Its local networks as last reported, for waking it
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lan: Vec<retail_proto::api::LanPort>,
 }
 
 impl NodeRec {
@@ -138,6 +141,7 @@ pub struct NodeRow {
     /// The invite it joined with, while that invite exists
     pub invite_id: Option<i64>,
     pub approved_routes: Vec<Ipv4Net>,
+    pub lan: Vec<retail_proto::api::LanPort>,
 }
 
 impl NodeRow {
@@ -390,6 +394,7 @@ impl Db {
                     helper_exempt: false,
                     invite_id: Some(key_id),
                     routes: Vec::new(),
+                    lan: Vec::new(),
                 });
                 (id, ip)
             }
@@ -454,6 +459,7 @@ impl Db {
                 expires_at: n.expires_at,
                 invite_id: n.invite_id.filter(|id| s.data.keys.iter().any(|k| k.id == *id)),
                 approved_routes: n.routes.clone(),
+                lan: n.lan.clone(),
             })
             .collect();
         rows.sort_by_key(|r| r.id);
@@ -545,6 +551,20 @@ impl Db {
     }
 
     /// The networks a device may route. `false` if there is no such device.
+    /// Returns whether it changed
+    pub fn set_lan(&self, id: i64, lan: &[retail_proto::api::LanPort]) -> Result<bool> {
+        let mut lan: Vec<_> = lan.iter().copied().filter(retail_proto::api::LanPort::valid).take(retail_proto::api::LanPort::MAX).collect();
+        lan.sort_by_key(|p| (p.addr, p.mac));
+        let mut s = self.inner.lock().unwrap();
+        let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == id) else { return Ok(false) };
+        if n.lan == lan {
+            return Ok(false);
+        }
+        n.lan = lan;
+        s.save()?;
+        Ok(true)
+    }
+
     pub fn set_routes(&self, id: i64, routes: &[Ipv4Net]) -> Result<bool> {
         for r in routes {
             r.check_route().map_err(anyhow::Error::msg)?;

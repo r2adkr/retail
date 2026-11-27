@@ -250,6 +250,10 @@ impl App {
                 let msg = if ok { trf("Copied {text}", &[("text", &text)]) } else { tr("Can't use the clipboard").into() };
                 self.ui.toast = Some((msg, Instant::now()));
             }
+            Action::Wake(name) => {
+                self.ui.menu = None;
+                let _ = self.commands.send(Command::Wake(name));
+            }
             Action::OpenSettings => {
                 self.ui.gear = false;
                 self.hide_popup();
@@ -973,6 +977,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.redraw_dashboard();
             }
+            UserEvent::Api(ApiEvent::Woken { name, result }) => {
+                let msg = match result {
+                    Ok(()) => trf("Waking {name}…", &[("name", &name)]),
+                    Err(e) => e,
+                };
+                self.ui.toast = Some((msg, Instant::now()));
+                self.redraw_popup();
+            }
             UserEvent::Api(ApiEvent::Saved(result)) => {
                 let d = &mut self.dashboard;
                 match result {
@@ -1517,6 +1529,7 @@ mod preview {
             routes: vec![],
             rtt_ms: None,
             rtt_history: vec![],
+            can_wake: !online,
         }
     }
 
