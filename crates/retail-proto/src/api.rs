@@ -45,6 +45,9 @@ pub enum ClientMessage {
         /// Its local networks and network cards, so it can be woken
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         lan: Vec<LanPort>,
+        /// Passes on traffic between devices that cannot reach each other
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        relay: bool,
     },
     /// This node as a helper for the server (asked by `NetMap::helper`):
     /// its helper code once it listens, `None` if it cannot or stopped
@@ -111,6 +114,9 @@ pub struct Node {
     /// Its local networks as it last reported them, kept while it is off
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lan: Vec<LanPort>,
+    /// Passes on traffic between devices that cannot reach each other
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relay: bool,
 }
 
 /// A device's network card on a local network: enough to wake it from
@@ -662,6 +668,10 @@ pub struct Prefs {
     /// through it does not slow everything else (bufferbloat)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_limit_mbit: Option<u32>,
+    /// Passes on traffic between other devices that reach this one directly
+    /// but not each other
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relay_for_others: bool,
 }
 
 /// `POST /prefs`. Fields left out stay as they are.
@@ -688,6 +698,8 @@ pub struct PrefsRequest {
     /// 0 turns the upload limit off
     #[serde(default)]
     pub upload_limit_mbit: Option<u32>,
+    #[serde(default)]
+    pub relay_for_others: Option<bool>,
 }
 
 /// `POST /proxy/system`: the proxies the signed-in user's settings choose for
@@ -766,6 +778,10 @@ pub struct PeerStatus {
     /// Networks reached through it
     #[serde(default)]
     pub routes: Vec<crate::route::Ipv4Net>,
+    /// The device passing traffic on between us, when `path` is `relay`
+    /// through another device rather than the server
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_via: Option<String>,
     /// Round trip through the tunnel, measured while traffic flows
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<u32>,
@@ -896,6 +912,7 @@ mod tests {
                 addr: Ipv4Addr::new(192, 168, 1, 5),
                 prefix: 24,
             }],
+            relay: true,
         };
         let nm = ServerMessage::NetMap(NetMap {
             self_node: node.clone(),

@@ -197,6 +197,8 @@ pub struct AppState {
     next_conn: Arc<AtomicU64>,
     /// Reported on connect, forgotten on disconnect
     exit_nodes: Arc<Mutex<std::collections::HashSet<i64>>>,
+    /// Nodes passing traffic on for others; reported on connect
+    peer_relays: Arc<Mutex<std::collections::HashSet<i64>>>,
     /// Networks each connected node offers to route
     offered_routes: Arc<Mutex<HashMap<i64, Vec<Ipv4Net>>>>,
     /// Where the server is reachable now, sent to nodes
@@ -230,6 +232,7 @@ impl AppState {
             relays: Arc::default(),
             next_conn: Arc::default(),
             exit_nodes: Arc::default(),
+            peer_relays: Arc::default(),
             offered_routes: Arc::default(),
             server_addrs: Arc::default(),
             server_fronts: Arc::default(),
@@ -467,6 +470,7 @@ impl AppState {
         let owners = self.route_owners(&nodes, now);
         let online = self.online.lock().unwrap().clone();
         let exits = self.exit_nodes.lock().unwrap().clone();
+        let peer_relays = self.peer_relays.lock().unwrap().clone();
         let acl = self.db.acl();
         let Some(me) = nodes.iter().find(|n| n.id == node_id) else {
             return Ok(None);
@@ -498,6 +502,7 @@ impl AppState {
             accept,
             routes: routes_of(n.id),
             lan: n.lan.clone(),
+            relay: peer_relays.contains(&n.id) && online.contains_key(&n.id),
         };
         // Devices that may not talk either way do not see each other at all,
         // and one whose key expired sees and is seen by nobody
@@ -680,6 +685,7 @@ async fn serve_node(state: &AppState, node_id: i64, socket: WebSocket) -> Result
         relays.by_key.remove(&key);
         // The exit node and route offers end with the node's newest connection
         state.exit_nodes.lock().unwrap().remove(&node_id);
+        state.peer_relays.lock().unwrap().remove(&node_id);
         state.offered_routes.lock().unwrap().remove(&node_id);
         // So does a helper node on it
         if state
@@ -709,7 +715,8 @@ async fn serve_connection(
     // An expired node may not relay to anyone, cause netmap rounds or act as helper
     let mut blocked = true;
     let mut pending_endpoints: Option<Vec<std::net::SocketAddr>> = None;
-    let mut pending_hostinfo: Option<(bool, Vec<Ipv4Net>, Vec<retail_proto::api::LanPort>)> = None;
+    let mut pending_hostinfo: Option<(bool, Vec<Ipv4Net>, Vec<retail_proto::api::LanPort>, bool)> =
+        None;
     const ENDPOINTS: usize = 0;
     const HOSTINFO: usize = 1;
     // Send the first netmap immediately
@@ -757,7 +764,7 @@ async fn serve_connection(
                 if state.pace_due(node_id, HOSTINFO) > tokio::time::Instant::now() {
                     continue;
                 }
-                let (exit_node, mut routes, lan) = pending_hostinfo.take().unwrap_or_default();
+                let (exit_node, mut routes, lan, relay) = pending_hostinfo.take().unwrap_or_default();
                 state.paced(node_id, HOSTINFO);
                 let mut changed = {
                     let mut exits = state.exit_nodes.lock().unwrap();
@@ -765,6 +772,14 @@ async fn serve_connection(
                 };
                 if changed {
                     tracing::info!(node_id, exit_node, "exit node offer changed");
+                }
+                let relay_changed = {
+                    let mut relays = state.peer_relays.lock().unwrap();
+                    if relay { relays.insert(node_id) } else { relays.remove(&node_id) }
+                };
+                if relay_changed {
+                    tracing::info!(node_id, relay, "relay offer changed");
+                    changed = true;
                 }
                 // Kept while it is off; one with no local network keeps its last
                 if !lan.is_empty() && state.db.set_lan(node_id, &lan)? {
@@ -795,8 +810,8 @@ async fn serve_connection(
                             pending_endpoints = Some(endpoints);
                         }
                         // An expired node offers nothing and causes no netmap rounds
-                        Ok(ClientMessage::Hostinfo { exit_node, routes, lan }) => {
-                            pending_hostinfo = (!blocked).then_some((exit_node, routes, lan));
+                        Ok(ClientMessage::Hostinfo { exit_node, routes, lan, relay }) => {
+                            pending_hostinfo = (!blocked).then_some((exit_node, routes, lan, relay));
                         }
                         Ok(ClientMessage::HelperCode { code }) => {
                             // A device whose key expired is no longer the helper

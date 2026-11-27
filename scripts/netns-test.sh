@@ -69,6 +69,10 @@
 #   helper-device B hosts behind a router that opens nothing (as behind
 #                 CGNAT); C, a member on a public address, becomes its helper
 #                 node, and A on another network joins through C
+#   peer-relay    UDP between A's and B's routers dropped (both reach the
+#                 internet); C, a member on a public address, relays for
+#                 others                                     -> relay through C,
+#                 then direct once the block is lifted
 #   mesh-fallback B hosts behind a router that opens ports (as host-nat); then
 #                 every TCP way in is cut (as when an internet tunnel's address
 #                 changes) while their WireGuard path stays: A finds the server
@@ -169,6 +173,9 @@ block() {  # scenario
                 nsx "r$s" iptables -I FORWARD 1 -i "lan$s" -j DROP
                 nsx "r$s" iptables -I FORWARD 1 -i "lan$s" -d 203.0.113.82 -p tcp --dport 8443 -j ACCEPT
                 nsx "r$s" ip6tables -I FORWARD 1 -i "lan$s" -j DROP ;;
+            peer-relay)
+                local other=198.51.101.2; [ "$s" = B ] && other=198.51.100.2
+                nsx "r$s" iptables -I FORWARD 1 -i "lan$s" -d "$other" -p udp -j DROP ;;
             nat64)
                 # Native IPv6 to the server is cut; only NAT64 leads out
                 nsx "r$s" ip6tables -I FORWARD 1 -i "lan$s" ! -d 2001:db8:64::/96 -j DROP ;;
@@ -780,6 +787,55 @@ invite_first_addr() {
 }
 
 # B's daemon restarts; the server goes away and comes back
+cc() { RETAIL_API_TOKEN_FILE="$WORK/C.token" "$BIN/retail" --api 127.0.0.1:41193 "$@"; }
+
+via_of() {  # site peer -> the device relaying that peer, or -
+    cli "$1" status --json 2>/dev/null | jq -r --arg h "$2" '.peers[] | select(.hostname == $h) | .relay_via // "-"'
+}
+
+peer_relay_checks() {  # ip_b
+    local ip_b=$1 ok=1 i via_a via_b
+    for i in $(seq 150); do
+        via_a=$(via_of A b); via_b=$(via_of B a)
+        [ "$via_a" = c ] && [ "$via_b" = c ] && break
+        sleep 0.1
+    done
+    if [ "$via_a" = c ] && [ "$via_b" = c ]; then
+        echo "  A and B relay through C after $((i / 10)).$((i % 10))s"
+    else
+        echo "  not through C: A sees $via_a, B sees $via_b"; return 1
+    fi
+    local avg
+    avg=$(nsx hA ping -c 10 -i 0.2 -W 2 "$ip_b" | awk -F'/' '/^rtt/ {print $5}')
+    echo "  ping through C: avg ${avg:-lost} ms"
+    [ -n "$avg" ] || ok=0
+    nsx hB iperf3 -s -D -B "$ip_b" >/dev/null; sleep 0.3
+    local bw
+    bw=$(nsx hA timeout 20 iperf3 -c "$ip_b" -t 3 -J 2>/dev/null | jq -r '.end.sum_received.bits_per_second / 1e6 | floor' 2>/dev/null)
+    pkill -x iperf3 || true
+    echo "  iperf3 A->B through C: ${bw:-failed} Mbit/s"
+    [ -n "$bw" ] && [ "$bw" != null ] || ok=0
+    [ "$(via_of A b)" = c ] || { echo "  the transfer left C (now $(via_of A b))"; ok=0; }
+    # Without the option C passes nothing on: the server's relay takes over
+    cc set --relay-for-others=false >/dev/null
+    for i in $(seq 150); do
+        [ "$(via_of A b)" = - ] && nsx hA ping -c1 -W1 "$ip_b" >/dev/null 2>&1 && break
+        sleep 0.1
+    done
+    [ "$(via_of A b)" = - ] && echo "  C off: back on the server's relay ($(path_of A))" || { echo "  still through $(via_of A b) after C stopped"; ok=0; }
+    cc set --relay-for-others >/dev/null
+    for s in A B; do
+        local other=198.51.101.2; [ "$s" = B ] && other=198.51.100.2
+        nsx "r$s" iptables -D FORWARD -i "lan$s" -d "$other" -p udp -j DROP
+    done
+    for i in $(seq 300); do
+        [[ $(path_of A) == direct* ]] && break
+        sleep 0.1
+    done
+    [[ $(path_of A) == direct* ]] && echo "  block lifted: direct after $((i / 10))s" || { echo "  no direct path once unblocked ($(path_of A))"; ok=0; }
+    [ $ok = 1 ]
+}
+
 # A offers B files through the tunnel; B's tray would ask, here its API answers
 send_file() {  # ip_b name file -> B's answer
     nsx hA python3 - "$@" <<'PY'
@@ -1104,6 +1160,7 @@ run_scenario() {
     esac
     case $sc in
         udp-blocked | symmetric | tcp443-only | udp443-only | recover | idle-relay | relay-load | control-drop | exit-relay | reality) expect="relay" ;;
+        peer-relay) expect="relay" ;;
         proxy | inspect | cdn) expect="relay" ;;
         ipv6) expect="direct6" ;;
         nat64 | helper | helper-device) expect="any" ;;
@@ -1253,6 +1310,14 @@ run_scenario() {
         [ "$sc" = proxy ] && cli A set --proxy http://u:p4ss@192.168.1.1:3128 >/dev/null
         cli A up --invite "$invite" --hostname a >/dev/null || { echo "  up A failed"; return 1; }
         cli B up --invite "$invite" --hostname b >/dev/null || { echo "  up B failed"; return 1; }
+        if [ "$sc" = peer-relay ]; then
+            RETAIL_API_TOKEN_FILE="$WORK/C.token" RETAIL_NO_PORTMAP=1 RUST_LOG="${RUST_LOG:-retaild=debug}" \
+                "$BIN/retaild" --state-dir "$WORK/C" --api 127.0.0.1:41193 --port 41693 --web-port 0 >"$WORK/nodeC.log" 2>&1 &
+            pid[C]=$!
+            for _ in $(seq 50); do cc status >/dev/null 2>&1 && break; sleep 0.1; done
+            cc set --relay-for-others >/dev/null || { echo "  C: relay option refused"; return 1; }
+            cc up --invite "$invite" --hostname c >/dev/null || { echo "  C could not join"; return 1; }
+        fi
     fi
     local ip_b took path ok=1
     ip_b=$(cli B ip)
@@ -1317,6 +1382,9 @@ run_scenario() {
         ip netns exec hA env RETAIL_API_TOKEN_FILE=/nonexistent "$BIN/retail" status >/dev/null || { echo "  status needs no token"; ok=0; }
         files_checks "$ip_b" || ok=0
         lifecycle_checks "$ip_b" || ok=0
+    fi
+    if [ "$sc" = peer-relay ] && [ "$ok" = 1 ]; then
+        peer_relay_checks "$ip_b" || ok=0
     fi
     if [ "$sc" = magicdns ] && [ "$ok" = 1 ]; then
         magicdns_checks "$ip_b" || ok=0
@@ -1499,7 +1567,7 @@ run_scenario() {
 
 [ "${KEEP:-0}" = 1 ] || trap cleanup EXIT
 if [ "$WHICH" = all ]; then
-    set -- direct udp-blocked relay-load symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-userspace exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device mesh-fallback magicdns acl subnet expire restore server-cli switch install update
+    set -- direct udp-blocked relay-load symmetric tcp443-only udp443-only ipv6 recover idle-relay failover failover-a failover-b control-drop exit exit-userspace exit-relay exit-offline host-nat host-upnp reality proxy inspect cdn nat64 helper helper-device peer-relay mesh-fallback magicdns acl subnet expire restore server-cli switch install update
 else
     set -- "$WHICH"
 fi

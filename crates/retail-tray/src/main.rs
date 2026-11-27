@@ -800,6 +800,16 @@ impl App {
                     origin: Origin::Settings,
                 });
             }
+            SettingsAction::RelayForOthers(on) => {
+                let req = retail_proto::api::PrefsRequest {
+                    relay_for_others: Some(on),
+                    ..Default::default()
+                };
+                let _ = self.commands.send(Command::Prefs {
+                    req,
+                    origin: Origin::Settings,
+                });
+            }
             SettingsAction::UploadLimit(mbit) => {
                 let req = retail_proto::api::PrefsRequest {
                     upload_limit_mbit: Some(mbit),
@@ -1861,6 +1871,7 @@ mod preview {
             dns_name: format!("{name}.retail.internal"),
             restricted: false,
             routes: vec![],
+            relay_via: None,
             rtt_ms: None,
             rtt_history: vec![],
             can_wake: !online,
@@ -2013,6 +2024,7 @@ mod preview {
                 exit_node: matches!(state, "exit" | "exit-menu").then_some(Key([2; 32])),
                 open_router_port: matches!(state, "port" | "port-refused"),
                 upload_limit_mbit: (state == "port").then_some(50),
+                relay_for_others: state == "port",
                 ..Default::default()
             },
             router_port: match state {

@@ -243,18 +243,21 @@ where
     send(&mut tx, send_endpoints(current)?).await?;
     let mut advertise = engine.subscribe_advertise_exit();
     let mut advertise_routes = engine.subscribe_advertise_routes();
-    let hostinfo = |exit_node, routes| -> Result<Message> {
+    let mut relay_others = engine.subscribe_relay_others();
+    let hostinfo = |exit_node, routes, relay| -> Result<Message> {
         Ok(Message::text(serde_json::to_string(
             &ClientMessage::Hostinfo {
                 exit_node,
                 routes,
                 lan: crate::lan::ports(),
+                relay,
             },
         )?))
     };
     let offer = *advertise.borrow_and_update();
     let routes = advertise_routes.borrow_and_update().clone();
-    send(&mut tx, hostinfo(offer, routes)?).await?;
+    let relay = *relay_others.borrow_and_update();
+    send(&mut tx, hostinfo(offer, routes, relay)?).await?;
     let mut helper_code = engine.subscribe_helper_code();
     let helper_msg = |code| -> Result<Message> {
         Ok(Message::text(serde_json::to_string(
@@ -300,13 +303,21 @@ where
                 changed?;
                 let offer = *advertise.borrow_and_update();
                 let routes = advertise_routes.borrow().clone();
-                send(&mut tx, hostinfo(offer, routes)?).await?;
+                let msg = hostinfo(offer, routes, *relay_others.borrow())?;
+                send(&mut tx, msg).await?;
             }
             changed = advertise_routes.changed() => {
                 changed?;
                 let routes = advertise_routes.borrow_and_update().clone();
                 let offer = *advertise.borrow();
-                send(&mut tx, hostinfo(offer, routes)?).await?;
+                let msg = hostinfo(offer, routes, *relay_others.borrow())?;
+                send(&mut tx, msg).await?;
+            }
+            changed = relay_others.changed() => {
+                changed?;
+                let relay = *relay_others.borrow_and_update();
+                let msg = hostinfo(*advertise.borrow(), advertise_routes.borrow().clone(), relay)?;
+                send(&mut tx, msg).await?;
             }
             changed = helper_code.changed() => {
                 changed?;

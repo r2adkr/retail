@@ -53,6 +53,7 @@ pub enum SettingsAction {
     LangMenu,
     AdvertiseExit(bool),
     OpenRouterPort(bool),
+    RelayForOthers(bool),
     /// Mbit/s, 0 for none
     UploadLimit(u32),
     CheckUpdate,
@@ -62,7 +63,7 @@ pub enum SettingsAction {
     StartDaemon,
 }
 
-const NETWORK_H: f32 = 204.0;
+const NETWORK_H: f32 = 268.0;
 /// What clicking the upload limit steps through, in Mbit/s (0: none)
 const UPLOAD_STEPS: [u32; 9] = [0, 5, 10, 20, 50, 100, 200, 500, 1000];
 /// The About card: version, then the update row and the automatic-update toggle
@@ -707,10 +708,13 @@ impl Settings {
                 c.hline(ix, right, y, t.border);
             }
             let (badge, color) = match p.path.as_deref() {
-                Some(v) if v.starts_with("direct") => (tr("Direct"), t.accent),
-                Some(_) => (tr("Relay"), t.amber),
-                None if !p.online => (tr("Offline"), t.dim),
-                None => (tr("Connecting"), t.dim),
+                Some(v) if v.starts_with("direct") => (tr("Direct").to_string(), t.accent),
+                Some(_) => match &p.relay_via {
+                    Some(via) => (trf("Via {name}", &[("name", via)]), t.amber),
+                    None => (tr("Relay").to_string(), t.amber),
+                },
+                None if !p.online => (tr("Offline").to_string(), t.dim),
+                None => (tr("Connecting").to_string(), t.dim),
             };
             let traffic = format!(
                 "↑ {}  ↓ {}",
@@ -1341,6 +1345,45 @@ impl Settings {
             true,
             SettingsAction::UploadLimit(next),
         );
+
+        let y = y + 64.0;
+        c.hline(ix, x + w - 16.0, y, t.border);
+        c.text(
+            tr("Relay for others"),
+            ix,
+            y + 26.0,
+            13.5,
+            Weight::Regular,
+            t.text,
+            Some(w - 100.0),
+        );
+        c.text(
+            tr("Devices that cannot connect directly go through this one."),
+            ix,
+            y + 44.0,
+            11.5,
+            Weight::Regular,
+            t.dim,
+            Some(w - 100.0),
+        );
+        let on = s.prefs.relay_for_others;
+        let (tw, th) = (42.0, 24.0);
+        let (tx, ty) = (x + w - 16.0 - tw, y + 18.0);
+        let r = Rect::from_xywh(tx - 6.0, ty - 6.0, tw + 12.0, th + 12.0).unwrap();
+        let track = if on { t.accent } else { t.gray };
+        let track = if self.hovered(&r) {
+            shade(track, if self.dark { 1.12 } else { 0.92 })
+        } else {
+            track
+        };
+        c.fill_rrect(tx, ty, tw, th, th / 2.0, track);
+        let kx = if on {
+            tx + tw - th / 2.0
+        } else {
+            tx + th / 2.0
+        };
+        c.circle(kx, ty + th / 2.0, th / 2.0 - 3.0, t.knob);
+        self.regions.push((r, SettingsAction::RelayForOthers(!on)));
     }
 
     fn account(&mut self, c: &mut Canvas, t: &Theme, s: &StatusResponse, x: f32, y: f32, w: f32) {

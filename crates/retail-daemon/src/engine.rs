@@ -64,6 +64,22 @@ const ACTIVE_KEEPALIVE: Duration = Duration::from_secs(1);
 /// A peer that keeps sending data through the relay this long after our
 /// direct path came up cannot hear us directly (one-way UDP failure).
 const RELAY_DATA_GRACE: Duration = Duration::from_secs(2);
+/// A datagram passed on by another device (`relay_for_others`): to that
+/// device `[VIA_TO][destination's key][WireGuard datagram]`, and from it
+/// `[VIA_FROM][source's key][WireGuard datagram]`. WireGuard's first byte is
+/// 1 to 4 and STUN's 0 or 1, so these cannot be mistaken for either.
+const VIA_TO: u8 = 0xF1;
+const VIA_FROM: u8 = 0xF2;
+const VIA_HEADER: usize = 33;
+/// What a relaying device passes on for each device at most
+const VIA_MBIT: u32 = 200;
+/// Relaying devices tried at once
+const VIA_TRY: usize = 2;
+/// While relayed, how often each relaying device gets a keepalive, so both
+/// ends keep a fresh direct path to it
+const VIA_KEEP: Duration = Duration::from_secs(10);
+/// While relayed by the server, how often a keepalive tries the relaying devices
+const VIA_PROBE: Duration = Duration::from_secs(2);
 /// Large relay frames waiting for the control connection, at most about 1 MB
 const RELAY_OUT_QUEUE: usize = 16;
 /// Small ones, which go first (`relay::SMALL_FRAME`)
@@ -189,6 +205,8 @@ enum Src {
     Udp(SocketAddr),
     /// Through the control server's relay
     Relay,
+    /// Through another device (its key and address)
+    Via(Key, SocketAddr),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,6 +215,8 @@ enum Route {
     Direct(SocketAddr),
     /// Only the relay has carried authenticated packets recently
     Relay,
+    /// Relayed by another device at this address (from `Engine::route_of`)
+    Via(SocketAddr),
     /// Nothing works yet: try every candidate, and the relay too once the
     /// direct attempt has had `RELAY_DELAY` to succeed.
     Search { relay: bool },
@@ -250,6 +270,15 @@ struct PeerInfo {
     ping: crate::ping::Log,
     /// Its local networks, for waking it (see `lan`)
     lan: Vec<retail_proto::api::LanPort>,
+    /// It passes on traffic between other devices
+    relay: bool,
+    /// The device that last passed on an authenticated packet from it: key,
+    /// address, when
+    via: Option<(Key, SocketAddr, Instant)>,
+    /// Last keepalive sent while it relays for us
+    via_kept: Option<Instant>,
+    /// Last keepalive sent to it through the relaying devices
+    via_probe: Option<Instant>,
 }
 
 #[derive(PartialEq)]
@@ -318,6 +347,22 @@ impl PeerInfo {
     fn uses_relay(&self) -> bool {
         self.direct_ok().is_none() && (self.relay_fresh() || self.needs_proof)
     }
+
+    /// Another device relays it, and has recently
+    fn via_fresh(&self) -> Option<(Key, SocketAddr)> {
+        self.via
+            .filter(|v| v.2.elapsed() < RELAY_STALE)
+            .map(|(k, a, _)| (k, a))
+    }
+
+    /// Online and reached through a relay, or about to be
+    fn wants_relay(&self) -> bool {
+        self.online
+            && (self.uses_relay()
+                || self
+                    .searching_since
+                    .is_some_and(|s| s.elapsed() >= RELAY_DELAY))
+    }
 }
 
 pub struct Peer {
@@ -332,6 +377,8 @@ pub struct Peer {
     filter: crate::filter::Filter,
     /// Networks we reach through it (subnet routes we accepted)
     routes: RwLock<Arc<[Ipv4Net]>>,
+    /// What this device passes on from it for others
+    passed_on: crate::shaper::Limiter,
 }
 
 impl Peer {
@@ -372,6 +419,16 @@ impl Peer {
             // Go straight to the relay since the peer was reachable a moment ago,
             // and trust direct again only after a handshake answered over UDP
             info.needs_proof = true;
+            return Liveness::Lost;
+        }
+        if info.direct_ok().is_none()
+            && let Some((_, _, at)) = info.via
+            && info.tx_at.is_some_and(|t| t > at)
+            && recent(info.tx_at)
+            && quiet_since(Some(at))
+        {
+            tracing::info!(peer = %info.hostname, "relay through another device lost");
+            info.via = None;
             return Liveness::Lost;
         }
         if recent(info.rx_at) && !recent(info.tx_at) && !recent(info.keepalive_at) {
@@ -443,6 +500,17 @@ impl Peer {
                     tracing::info!(peer = %info.hostname, "relay path up");
                 }
                 info.relay_rx = Some(now);
+            }
+            // Counts as the relay, which `Engine::route_of` then sends through it
+            Src::Via(key, addr) => {
+                if data {
+                    info.relay_data_at = Some(now);
+                }
+                if info.via_fresh().is_none() && !info.fresh() {
+                    tracing::info!(peer = %info.hostname, via = %addr, "relay path up through another device");
+                }
+                info.relay_rx = Some(now);
+                info.via = Some((key, addr, now));
             }
         }
         info.searching_since = None;
@@ -754,6 +822,8 @@ pub struct Engine {
     /// User's choice, kept even while the peer is absent from the netmap
     exit_pref: Mutex<Option<Key>>,
     advertise_exit: watch::Sender<bool>,
+    /// Passes on traffic between other devices (`relay_for_others`)
+    relay_others: watch::Sender<bool>,
     /// What this device sends over its line: the tunnel's datagrams, and the
     /// internet traffic it forwards as an exit node
     pub upload: crate::shaper::Limiter,
@@ -897,6 +967,7 @@ impl Engine {
             relay_out_rx: Mutex::new(Some(relay_out_rx)),
             exit_pref: Mutex::new(None),
             advertise_exit: watch::channel(false).0,
+            relay_others: watch::channel(false).0,
             upload: Default::default(),
             last_wake: Mutex::new(None),
             advertise_routes: watch::channel(Vec::new()).0,
@@ -1027,6 +1098,15 @@ impl Engine {
 
     pub fn subscribe_advertise_exit(&self) -> watch::Receiver<bool> {
         self.advertise_exit.subscribe()
+    }
+
+    pub fn set_relay_others(&self, on: bool) {
+        self.relay_others
+            .send_if_modified(|v| std::mem::replace(v, on) != on);
+    }
+
+    pub fn subscribe_relay_others(&self) -> watch::Receiver<bool> {
+        self.relay_others.subscribe()
     }
 
     pub fn set_advertise_routes(&self, routes: Vec<Ipv4Net>) {
@@ -1213,6 +1293,7 @@ impl Engine {
                         info.exit_node = node.exit_node;
                         info.candidates = candidates;
                         info.lan = node.lan.clone();
+                        info.relay = node.relay;
                         drop(info);
                         p.filter.set(&node.accept);
                         *p.routes.write().unwrap() = routes.clone();
@@ -1320,7 +1401,16 @@ impl Engine {
                 needs_proof: false,
                 ping: Default::default(),
                 lan: node.lan.clone(),
+                relay: node.relay,
+                via: None,
+                via_kept: None,
+                via_probe: None,
             }),
+            passed_on: {
+                let l = crate::shaper::Limiter::default();
+                l.set_mbit(Some(VIA_MBIT));
+                l
+            },
         }
     }
 
@@ -1336,20 +1426,128 @@ impl Engine {
     }
 
     fn send_routed(&self, peer: &Peer, data: &[u8]) {
-        let relay = match peer.route() {
+        let (relay, via) = match self.route_of(peer) {
             Route::Direct(ep) => {
                 self.send_now(data, ep);
                 return;
             }
-            // Control packets keep probing the direct candidates while relayed
-            Route::Relay => true,
-            Route::Search { relay } => relay,
+            // A handshake also takes the server's relay, in case the device left
+            Route::Via(addr) => {
+                self.send_via(addr, &peer.key, data);
+                (is_handshake_init(data), false)
+            }
+            // Control packets keep probing the direct candidates while relayed,
+            // and the devices that relay for others too
+            Route::Relay => (true, true),
+            Route::Search { relay } => (relay, relay),
         };
         for dst in peer.candidates() {
             self.send_now(data, dst);
         }
         if relay {
             self.relay_send(&peer.key, std::iter::once(data));
+        }
+        if via {
+            for addr in self.relaying_devices(peer) {
+                self.send_via(addr, &peer.key, data);
+            }
+        }
+    }
+
+    /// `Peer::route`, through another device when one relays it
+    fn route_of(&self, peer: &Peer) -> Route {
+        match peer.route() {
+            Route::Relay => peer
+                .info
+                .lock()
+                .unwrap()
+                .via_fresh()
+                .map_or(Route::Relay, |(_, addr)| Route::Via(addr)),
+            r => r,
+        }
+    }
+
+    /// Addresses of online devices that relay for others and that we reach
+    /// directly, other than `peer`
+    fn relaying_devices(&self, peer: &Peer) -> Vec<SocketAddr> {
+        let peers = self.peers.read().unwrap();
+        peers
+            .by_key
+            .values()
+            .filter(|p| p.key != peer.key)
+            .filter_map(|p| {
+                let info = p.info.lock().unwrap();
+                if info.relay && info.online {
+                    info.direct_ok()
+                } else {
+                    None
+                }
+            })
+            .take(VIA_TRY)
+            .collect()
+    }
+
+    fn via_datagram(head: u8, key: &Key, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(VIA_HEADER + data.len());
+        out.push(head);
+        out.extend_from_slice(&key.0);
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// To the peer with key `to`, through the device at `addr`
+    fn send_via(&self, addr: SocketAddr, to: &Key, data: &[u8]) {
+        self.send_now(&Self::via_datagram(VIA_TO, to, data), addr);
+    }
+
+    /// On a device that relays for others: a datagram from one peer, passed
+    /// on to another. Only from a peer at its fresh direct address, only to
+    /// one with a fresh direct path, within `VIA_MBIT`; anything else is
+    /// dropped, so this is no open reflector.
+    fn pass_on(&self, d: &[u8], from: SocketAddr) {
+        if !*self.relay_others.borrow() || d.len() <= VIA_HEADER {
+            return;
+        }
+        let Ok(to) = <[u8; 32]>::try_from(&d[1..VIA_HEADER]) else {
+            return;
+        };
+        let (src, dst) = {
+            let peers = self.peers.read().unwrap();
+            let Some(dst) = peers.by_key.get(&Key(to)).cloned() else {
+                return;
+            };
+            let src = peers.by_key.values().find(|p| {
+                let info = p.info.lock().unwrap();
+                info.endpoint == Some(from) && info.fresh()
+            });
+            let Some(src) = src.cloned() else { return };
+            (src, dst)
+        };
+        if src.key == dst.key {
+            return;
+        }
+        let Some(to_addr) = dst.info.lock().unwrap().direct_ok() else {
+            return;
+        };
+        if !src.passed_on.allow(d.len()) {
+            return;
+        }
+        self.send_now(
+            &Self::via_datagram(VIA_FROM, &src.key, &d[VIA_HEADER..]),
+            to_addr,
+        );
+    }
+
+    /// A datagram another device passed on to us. It must come from a
+    /// device that relays, at its known address; WireGuard then proves who
+    /// sent the datagram inside.
+    fn passed_on_to_us(&self, d: &[u8], from: SocketAddr, b: &mut RxBatch) {
+        let relay = self.peers.read().unwrap().by_key.values().find_map(|p| {
+            let info = p.info.lock().unwrap();
+            (info.relay && info.endpoint == Some(from)).then_some(p.key)
+        });
+        if let Some(relay) = relay {
+            self.receive_run(std::iter::once(&d[VIA_HEADER..]), Src::Via(relay, from), b);
         }
     }
 
@@ -1461,6 +1659,7 @@ impl Engine {
         match src {
             Src::Udp(addr) => self.send_now(data, addr),
             Src::Relay => self.relay_send(&peer.key, std::iter::once(data)),
+            Src::Via(_, addr) => self.send_via(addr, &peer.key, data),
         }
     }
 
@@ -1503,7 +1702,7 @@ impl Engine {
         self.mac1.reset_count();
         let addr = match src {
             Src::Udp(addr) => Some(addr),
-            Src::Relay => None,
+            Src::Relay | Src::Via(..) => None,
         };
         let mut cookie = [0u8; 64];
         match self
@@ -1841,13 +2040,14 @@ impl Engine {
                 }
                 let mut at = start;
                 let route = if run.session.is_some() {
-                    run.peer.route()
+                    self.route_of(&run.peer)
                 } else {
                     Route::Search { relay: false }
                 };
                 let dst = match route {
                     Route::Direct(dst) => Some(Dest::Udp(dst)),
                     Route::Relay => Some(Dest::Relay),
+                    Route::Via(addr) => Some(Dest::Via(addr)),
                     Route::Search { .. } => None,
                 };
                 match dst {
@@ -1960,6 +2160,19 @@ impl Engine {
                                 relay_deadline,
                             )
                             .await;
+                        }
+                    }
+                    Dest::Via(addr) => {
+                        let to = self.wire(addr);
+                        for seg in contents.chunks(send.seg.max(1)) {
+                            let d = Self::via_datagram(VIA_TO, &send.peer.key, seg);
+                            let r = self
+                                .udp
+                                .async_io(Interest::WRITABLE, || self.udp.try_send_to(&d, to))
+                                .await;
+                            if let Err(e) = r {
+                                tracing::trace!(%addr, "udp send failed: {e}");
+                            }
                         }
                     }
                     Dest::Search => self.send_to_peer(&send.peer, contents),
@@ -2126,6 +2339,17 @@ impl Engine {
         let mut run: Vec<&[u8]> = Vec::with_capacity(RX_BATCH);
         let mut results = Vec::with_capacity(RX_BATCH);
         while let Some(d) = dgrams.next() {
+            if let Src::Udp(from) = src
+                && d.len() > VIA_HEADER
+                && matches!(d[0], VIA_TO | VIA_FROM)
+            {
+                if d[0] == VIA_TO {
+                    self.pass_on(d, from);
+                } else {
+                    self.passed_on_to_us(d, from, b);
+                }
+                continue;
+            }
             if b.len == b.bufs.len() {
                 if b.len >= RX_BATCH_MAX {
                     return;
@@ -2359,7 +2583,7 @@ impl Engine {
         let base = out.as_ptr() as usize;
         let src_ip = match src {
             Src::Udp(addr) => Some(addr.ip()),
-            Src::Relay => None,
+            Src::Relay | Src::Via(..) => None,
         };
         match tunn.decapsulate(src_ip, dgram, &mut out[TUN_OFFSET..]) {
             TunnResult::WriteToNetwork(b) => {
@@ -2650,6 +2874,72 @@ impl Engine {
                     }
                 }
             }
+            self.keep_relaying_devices(&mut out);
+        }
+    }
+
+    /// While some peer is relayed, keeps (or makes) a direct path to each
+    /// device that relays for others, since the packets it passes on are not
+    /// its own and keep nothing fresh
+    fn keep_relaying_devices(&self, out: &mut [u8]) {
+        let peers: Vec<Arc<Peer>> = self
+            .peers
+            .read()
+            .unwrap()
+            .by_key
+            .values()
+            .cloned()
+            .collect();
+        if !peers.iter().any(|p| p.info.lock().unwrap().wants_relay()) {
+            return;
+        }
+        // The server relays these: a keepalive through each relaying device
+        // finds out whether one of them can, without waiting for a handshake
+        for p in &peers {
+            {
+                let mut info = p.info.lock().unwrap();
+                if !info.uses_relay()
+                    || info.via_fresh().is_some()
+                    || info.via_probe.is_some_and(|t| t.elapsed() < VIA_PROBE)
+                {
+                    continue;
+                }
+                info.via_probe = Some(Instant::now());
+            }
+            let n = {
+                let mut tunn = p.tunn.lock().unwrap();
+                if tunn.current_send_session().is_none() {
+                    continue;
+                }
+                tunn.encapsulate(&[], out).len_if_network()
+            };
+            if let Some(n) = n {
+                for addr in self.relaying_devices(p) {
+                    self.send_via(addr, &p.key, &out[..n]);
+                }
+            }
+        }
+        for p in &peers {
+            {
+                let mut info = p.info.lock().unwrap();
+                if !info.relay
+                    || !info.online
+                    || info.via_kept.is_some_and(|t| t.elapsed() < VIA_KEEP)
+                {
+                    continue;
+                }
+                info.via_kept = Some(Instant::now());
+            }
+            // A keepalive, or a handshake when there is no session
+            let n = p
+                .tunn
+                .lock()
+                .unwrap()
+                .encapsulate(&[], out)
+                .len_if_network();
+            if let Some(n) = n {
+                self.send_to_peer(p, &out[..n]);
+            }
         }
     }
 
@@ -2821,7 +3111,18 @@ impl Engine {
                     (None, true) => Some("relay".to_string()),
                     (None, false) => None,
                 };
+                let relay_via = match (info.direct_ok(), info.uses_relay(), info.via_fresh()) {
+                    (None, true, Some((key, _))) if key != p.key => self
+                        .peers
+                        .read()
+                        .unwrap()
+                        .by_key
+                        .get(&key)
+                        .map(|v| v.info.lock().unwrap().hostname.clone()),
+                    _ => None,
+                };
                 PeerStatus {
+                    relay_via,
                     dns_name: info.dns_name.clone(),
                     restricted: p.filter.restricted(),
                     hostname: info.hostname.clone(),
@@ -2923,6 +3224,8 @@ enum Dest {
     Udp(SocketAddr),
     /// One relay frame
     Relay,
+    /// One datagram per segment, through another device
+    Via(SocketAddr),
     /// A single datagram along every route worth trying (`Engine::send_to_peer`)
     Search,
 }

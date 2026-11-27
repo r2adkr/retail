@@ -700,6 +700,10 @@ impl Ui {
             let relayed = p.path.as_deref() == Some("relay");
             let (dot, path) = match (p.online, p.endpoint) {
                 (_, Some(_)) => (t.accent, tr("Direct").to_string()),
+                (_, None) if relayed && p.relay_via.is_some() => {
+                    let via = p.relay_via.as_deref().unwrap_or_default();
+                    (t.accent, trf("Via {name}", &[("name", &via)]))
+                }
                 // The relay is the server: down with it
                 (_, None) if relayed && !s.control_connected => {
                     (t.amber, tr("Relay unavailable").to_string())

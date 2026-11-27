@@ -95,6 +95,10 @@ enum Cmd {
         /// so devices on other networks connect directly, not through the relay
         #[arg(long, value_name = "true|false", num_args = 0..=1, default_missing_value = "true")]
         open_router_port: Option<bool>,
+        /// Pass on traffic between other devices that reach this one directly
+        /// but not each other (faster than the server's relay)
+        #[arg(long, value_name = "true|false", num_args = 0..=1, default_missing_value = "true")]
+        relay_for_others: Option<bool>,
         /// Keep what this device sends under this many Mbit/s (about 90% of
         /// the line's upload speed), so a download through it does not slow
         /// everything else; `off` removes the limit
@@ -478,6 +482,7 @@ async fn main() -> Result<()> {
             auto_update,
             advertise_routes,
             open_router_port,
+            relay_for_others,
             upload_limit,
         } => {
             let advertise_routes = advertise_routes.map(|r| {
@@ -515,6 +520,7 @@ async fn main() -> Result<()> {
                 advertise_routes,
                 open_router_port,
                 upload_limit_mbit,
+                relay_for_others,
             };
             let st = client
                 .post::<_, StatusResponse>("/prefs", Some(&req))
