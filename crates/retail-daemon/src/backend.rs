@@ -617,12 +617,12 @@ impl Backend {
         for (name, task) in engine.data_plane_tasks() {
             threads.push(self.spawn_thread(name, task, stop.subscribe())?);
         }
-        self.spawn(&mut tasks, "timers", engine.clone().timer_loop());
-        self.spawn(&mut tasks, "magicdns", engine.clone().dns_loop());
+        self.spawn(&mut tasks, "timers", engine.clone().timer_loop(), stop.subscribe());
+        self.spawn(&mut tasks, "magicdns", engine.clone().dns_loop(), stop.subscribe());
         let mut graceful = JoinSet::new();
-        self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), helper_dir(&self.opts.state_dir, p), stop.subscribe()));
-        self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun));
-        self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token));
+        self.spawn(&mut graceful, "helper-role", crate::helper_role::run(engine.clone(), helper_dir(&self.opts.state_dir, p), stop.subscribe()), stop.subscribe());
+        self.spawn(&mut tasks, "discovery", engine.clone().discovery_loop(stun), stop.subscribe());
+        self.spawn(&mut tasks, "control", control::control_loop(engine.clone(), target, token), stop.subscribe());
         tasks.spawn(self.device_port.run(engine.listen_port(), self.host.hosting.subscribe()));
         // The router's mapping (the hosted network's, or this device's own) is
         // this device's public endpoint
@@ -766,6 +766,11 @@ impl Backend {
                     Err(anyhow::anyhow!("panicked: {}", what.unwrap_or_default()))
                 });
                 if let Err(e) = result {
+                    // One stage stopping on purpose ends the others' channels
+                    if *stop.borrow() {
+                        tracing::debug!("{name} stopped with its session: {e:#}");
+                        return;
+                    }
                     tracing::error!("{name} stopped: {e:#}");
                     *last_error.lock().unwrap() = Some(format!("{name}: {e:#}"));
                     let _ = failures.send(name);
@@ -776,7 +781,7 @@ impl Backend {
     }
 
     /// Runs a session task, recording its error (if it ever returns one) for `status`
-    fn spawn<F>(&self, tasks: &mut JoinSet<()>, name: &'static str, fut: F)
+    fn spawn<F>(&self, tasks: &mut JoinSet<()>, name: &'static str, fut: F, stop: watch::Receiver<bool>)
     where
         F: Future<Output = Result<()>> + Send + 'static,
     {
@@ -784,6 +789,10 @@ impl Backend {
         let failures = self.failures.clone();
         tasks.spawn(async move {
             if let Err(e) = fut.await {
+                if *stop.borrow() {
+                    tracing::debug!("{name} stopped with its session: {e:#}");
+                    return;
+                }
                 tracing::error!("{name} stopped: {e:#}");
                 *last_error.lock().unwrap() = Some(format!("{name}: {e:#}"));
                 let _ = failures.send(name);
