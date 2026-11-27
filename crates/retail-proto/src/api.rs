@@ -676,6 +676,9 @@ pub struct PeerStatus {
     /// `"direct <addr>"`, `"relay"`, or `None` while no path is established
     #[serde(default)]
     pub path: Option<String>,
+    /// Why `path` is what it is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_reason: Option<PathReason>,
     pub candidates: Vec<SocketAddr>,
     pub last_handshake_secs: Option<u64>,
     /// Offers to route other nodes' internet traffic
@@ -691,6 +694,30 @@ pub struct PeerStatus {
     /// Networks reached through it
     #[serde(default)]
     pub routes: Vec<crate::route::Ipv4Net>,
+}
+
+/// Why a peer is reached directly, through the relay, or not at all
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathReason {
+    /// Direct, on the same local network
+    Lan,
+    /// Direct, across the internet
+    Internet,
+    /// The peer is not connected to the server
+    PeerOffline,
+    /// Still trying the first paths
+    Connecting,
+    /// The direct path went quiet; the relay carries it until UDP answers again
+    DirectLost,
+    /// Our UDP reaches the peer but its replies do not reach us
+    OneWay,
+    /// This device learned no public address (UDP to the internet blocked)
+    UdpBlockedHere,
+    /// The peer offers no public address
+    PeerNoAddress,
+    /// Both have public addresses, but hole punching got no answer
+    PunchFailed,
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ use boringtun::noise::{Packet, Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use quinn_udp::{RecvMeta, Transmit, UdpSocketState};
 use rand::RngCore;
-use retail_proto::api::{NetMap, Node, PeerStatus};
+use retail_proto::api::{NetMap, Node, PathReason, PeerStatus};
 use retail_proto::{Key, TUN_MTU, in_mesh, stun};
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
@@ -265,15 +265,39 @@ impl PeerInfo {
         if self.needs_proof || !self.fresh() {
             return None;
         }
-        // Peer data still arriving over the relay, well after our direct path came
-        // up and more recently than over UDP, means it cannot hear us directly
-        if let (Some(relay), Some(since)) = (self.relay_data_at, self.direct_since)
-            && relay > since + RELAY_DATA_GRACE
-            && self.udp_data_at.is_none_or(|udp| relay > udp)
-        {
+        if self.one_way() {
             return None;
         }
         self.endpoint
+    }
+
+    /// Peer data still arriving over the relay, well after our direct path came
+    /// up and more recently than over UDP, means it cannot hear us directly
+    fn one_way(&self) -> bool {
+        matches!((self.relay_data_at, self.direct_since), (Some(relay), Some(since))
+            if relay > since + RELAY_DATA_GRACE && self.udp_data_at.is_none_or(|udp| relay > udp))
+    }
+
+    /// `here_public`: this device knows a public address of its own
+    fn path_reason(&self, here_public: bool) -> PathReason {
+        if let Some(ep) = self.direct_ok() {
+            return if public_ip(ep.ip()) { PathReason::Internet } else { PathReason::Lan };
+        }
+        if !self.online {
+            PathReason::PeerOffline
+        } else if self.needs_proof {
+            PathReason::DirectLost
+        } else if self.fresh() && self.one_way() {
+            PathReason::OneWay
+        } else if !self.uses_relay() {
+            PathReason::Connecting
+        } else if !here_public {
+            PathReason::UdpBlockedHere
+        } else if !self.candidates.iter().any(|a| public_ip(a.ip())) {
+            PathReason::PeerNoAddress
+        } else {
+            PathReason::PunchFailed
+        }
     }
 
     fn uses_relay(&self) -> bool {
@@ -2206,6 +2230,8 @@ impl Engine {
 
     pub fn peer_status(&self) -> Vec<PeerStatus> {
         let peers: Vec<Arc<Peer>> = self.peers.read().unwrap().by_key.values().cloned().collect();
+        let here_public = self.stun_public.lock().unwrap().iter().any(Option::is_some)
+            || !self.extra_endpoints.lock().unwrap().is_empty();
         let mut out: Vec<PeerStatus> = peers
             .iter()
             .map(|p| {
@@ -2225,6 +2251,7 @@ impl Engine {
                     online: info.online,
                     endpoint: info.direct_ok(),
                     path,
+                    path_reason: Some(info.path_reason(here_public)),
                     candidates: info.candidates.clone(),
                     last_handshake_secs: handshake.map(|d| d.as_secs()),
                     exit_node: info.exit_node,
@@ -2456,6 +2483,14 @@ fn usable_ip(ip: IpAddr) -> bool {
         IpAddr::V6(ip) => {
             !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() && (ip.segments()[0] & 0xffc0) != 0xfe80
         }
+    }
+}
+
+/// Reachable from other networks: not private, shared (CGNAT), link-local or ULA
+fn public_ip(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => usable_ip(IpAddr::V4(ip)) && !ip.is_private() && !(ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64),
+        IpAddr::V6(ip) => usable_ip(IpAddr::V6(ip)) && (ip.segments()[0] & 0xfe00) != 0xfc00,
     }
 }
 

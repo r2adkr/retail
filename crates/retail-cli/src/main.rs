@@ -6,7 +6,7 @@ use retail_proto::LOCAL_API_ADDR;
 use retail_proto::acl::{AclPolicy, AclRule};
 use retail_proto::api::{
     AclRequest, ApiError, BackendState, BackupRequest, BackupResponse, ExpiryRequest, HelperDeviceRequest, RemoveRequest, RenewRequest, RestoreRequest, RoutesRequest, HelperStartRequest, HelperStatus, InviteRequest, InviteResponse, PrefsRequest, ServerSelect, ServerStartRequest, ServerStatus,
-    PortState, StatusResponse, TagsRequest, UpRequest,
+    PathReason, PortState, StatusResponse, TagsRequest, UpRequest,
 };
 
 #[derive(Parser)]
@@ -950,7 +950,7 @@ fn print_status(st: &StatusResponse) {
         return;
     }
     println!();
-    println!("{:<16} {:<20} {:<8} {:<24} {:<12} TX / RX", "IP", "HOSTNAME", "CONTROL", "PATH", "HANDSHAKE");
+    println!("{:<16} {:<20} {:<8} {:<44} {:<12} TX / RX", "IP", "HOSTNAME", "CONTROL", "PATH", "HANDSHAKE");
     for p in &st.peers {
         let path = match (&p.path, p.endpoint) {
             (Some(path), _) => path.clone(),
@@ -958,11 +958,15 @@ fn print_status(st: &StatusResponse) {
             (None, None) if p.candidates.is_empty() => "no endpoints".into(),
             (None, None) => "connecting".into(),
         };
+        let path = match p.path_reason {
+            Some(r) => format!("{path} ({})", reason_text(r)),
+            None => path,
+        };
         let hs = p
             .last_handshake_secs
             .map_or_else(|| "-".into(), |s| format!("{s}s ago"));
         println!(
-            "{:<16} {:<20} {:<8} {:<24} {:<12} {} / {}",
+            "{:<16} {:<20} {:<8} {:<44} {:<12} {} / {}",
             p.ip.to_string(),
             {
                 let name = if p.dns_name.is_empty() { p.hostname.clone() } else { p.dns_name.trim_end_matches(".retail.internal").to_string() };
@@ -976,6 +980,20 @@ fn print_status(st: &StatusResponse) {
             human_bytes(p.tx_bytes),
             human_bytes(p.rx_bytes),
         );
+    }
+}
+
+fn reason_text(r: PathReason) -> &'static str {
+    match r {
+        PathReason::Lan => "same local network",
+        PathReason::Internet => "across the internet",
+        PathReason::PeerOffline => "peer offline",
+        PathReason::Connecting => "trying paths",
+        PathReason::DirectLost => "direct went quiet",
+        PathReason::OneWay => "replies do not come back over UDP",
+        PathReason::UdpBlockedHere => "UDP blocked on this network",
+        PathReason::PeerNoAddress => "peer has no public address",
+        PathReason::PunchFailed => "hole punching got no answer",
     }
 }
 

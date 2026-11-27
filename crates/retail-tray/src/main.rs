@@ -620,6 +620,11 @@ impl App {
                 }
             }
             SettingsAction::ServerMenu(_) => {}
+            SettingsAction::Tab(tab) => {
+                st.tab = tab;
+                st.focus = None;
+                st.peer_scroll = 0;
+            }
             SettingsAction::ForgetServer(server) => {
                 st.busy = Some(Instant::now());
                 st.message = None;
@@ -1115,8 +1120,13 @@ impl ApplicationHandler<UserEvent> for App {
                         MouseScrollDelta::LineDelta(_, y) => -y.signum() as i32,
                         MouseScrollDelta::PixelDelta(p) => -(p.y / 40.0) as i32,
                     };
-                    let over = self.settings.cursor.is_some_and(|(x, y)| self.settings.over_server_list(x, y));
-                    if rows != 0 && over && self.settings.scroll_servers(rows) {
+                    let st = &mut self.settings;
+                    let scrolled = match st.cursor {
+                        Some((x, y)) if rows != 0 && st.over_server_list(x, y) => st.scroll_servers(rows),
+                        Some((x, y)) if rows != 0 && st.over_peer_list(x, y) => st.scroll_peers(rows),
+                        _ => false,
+                    };
+                    if scrolled {
                         self.redraw_settings();
                     }
                 }
@@ -1490,6 +1500,7 @@ mod preview {
             online,
             endpoint: direct.then(|| format!("203.0.113.{last}:41641").parse().unwrap()),
             path: None,
+            path_reason: None,
             candidates: vec![],
             last_handshake_secs: hs,
             exit_node: false,
@@ -1509,6 +1520,24 @@ mod preview {
             peer("work-macbook", 4, true, false, None),
             peer("old-thinkpad", 5, false, false, None),
         ];
+        if state == "info" {
+            use retail_proto::api::PathReason as R;
+            let with = |p: PeerStatus, path: Option<&str>, r: R, tx: u64, rx: u64| PeerStatus {
+                path: path.map(Into::into),
+                path_reason: Some(r),
+                tx_bytes: tx,
+                rx_bytes: rx,
+                ..p
+            };
+            peers = vec![
+                with(peer("desktop-home", 2, true, true, Some(12)), Some("direct 192.168.0.12:41641"), R::Lan, 812_000_000, 2_400_000_000),
+                with(peer("nas", 3, true, true, Some(3)), Some("direct 203.0.113.3:41641"), R::Internet, 45_000_000, 3_100_000),
+                with(peer("phone", 6, true, false, Some(40)), Some("relay"), R::PunchFailed, 2_300_000, 18_000_000),
+                with(peer("work-macbook", 4, true, false, Some(9)), Some("relay"), R::UdpBlockedHere, 640_000, 1_200_000),
+                with(peer("tablet", 7, true, false, Some(20)), Some("relay"), R::PeerNoAddress, 12_000, 30_500),
+                with(peer("old-thinkpad", 5, false, false, None), None, R::PeerOffline, 0, 0),
+            ];
+        }
         if state == "many" {
             for i in 6..14 {
                 peers.push(peer(&format!("server-{i:02}"), i, i % 3 != 0, i % 3 == 1, Some(i as u64 * 7)));
@@ -1606,10 +1635,16 @@ mod preview {
         let mut st = Settings::new(dark, if dark { ThemePref::Dark } else { ThemePref::System }, crate::LangPref::System);
         st.view = sample(match state {
             "change" | "server-menu" | "many-servers" | "language" => "connected",
+            "info" => "info",
+            "info-many" => "many",
+            "info-off" => "login",
             "join" => "login",
             _ => state,
         });
         st.lang_open = state == "language";
+        if state.starts_with("info") {
+            st.tab = crate::settings::Tab::Info;
+        }
         // The daemon gone: off, or restarting after an update
         if matches!(state, "offline" | "restarting") {
             st.view = View::Offline;

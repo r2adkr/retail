@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use retail_proto::api::{BackendState, PortState, SavedServer, StatusResponse};
+use retail_proto::api::{BackendState, PathReason, PeerStatus, PortState, SavedServer, StatusResponse};
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::config::ThemePref;
@@ -21,8 +21,17 @@ pub const SERVER: usize = 0;
 pub const AUTH_KEY: usize = 1;
 pub const DEVICE: usize = 2;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Tab {
+    #[default]
+    General,
+    /// Usage and how each device is reached
+    Info,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingsAction {
+    Tab(Tab),
     Focus(usize),
     Connect,
     /// Shows the saved servers
@@ -55,6 +64,13 @@ const ABOUT_H: f32 = 60.0 + 64.0 + 60.0;
 const ROW_H: f32 = 50.0;
 /// Saved servers shown at once; more scroll
 const MAX_ROWS: usize = 4;
+/// The usage card: two rows of two values
+const USAGE_H: f32 = 112.0;
+/// The line under the usage card
+const USAGE_HINT_H: f32 = 26.0;
+const PEER_ROW_H: f32 = 50.0;
+/// Devices shown at once on the Info tab; more scroll
+const MAX_PEERS: usize = 6;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Style {
@@ -64,6 +80,9 @@ enum Style {
 }
 
 pub struct Settings {
+    pub tab: Tab,
+    /// The first device shown on the Info tab, when there are more than fit
+    pub peer_scroll: usize,
     pub view: View,
     pub dark: bool,
     pub theme: ThemePref,
@@ -97,6 +116,8 @@ pub struct Settings {
 impl Settings {
     pub fn new(dark: bool, theme: ThemePref, lang: LangPref) -> Self {
         Settings {
+            tab: Tab::General,
+            peer_scroll: 0,
             view: View::Loading,
             dark,
             theme,
@@ -158,7 +179,37 @@ impl Settings {
     pub fn over_server_list(&self, x: f32, y: f32) -> bool {
         let top = 76.0 + 14.0 + 8.0;
         let bottom = top + self.servers().len().min(MAX_ROWS) as f32 * ROW_H;
-        self.show_list() && (PAD..=WIDTH - PAD).contains(&x) && (top..=bottom).contains(&y)
+        self.tab == Tab::General && self.show_list() && (PAD..=WIDTH - PAD).contains(&x) && (top..=bottom).contains(&y)
+    }
+
+    /// The other devices, while connected
+    fn peers(&self) -> &[PeerStatus] {
+        self.status().filter(|s| s.state == BackendState::Running).map_or(&[], |s| &s.peers)
+    }
+
+    /// The Info tab has data once connected
+    fn connected(&self) -> bool {
+        self.status().is_some_and(|s| s.state == BackendState::Running)
+    }
+
+    /// The top of the device list on the Info tab
+    fn peers_top(&self) -> f32 {
+        76.0 + 14.0 + USAGE_H + USAGE_HINT_H + 40.0 + 14.0
+    }
+
+    pub fn over_peer_list(&self, x: f32, y: f32) -> bool {
+        let top = self.peers_top();
+        let bottom = top + 8.0 + self.peers().len().min(MAX_PEERS) as f32 * PEER_ROW_H;
+        self.tab == Tab::Info && (PAD..=WIDTH - PAD).contains(&x) && (top..=bottom).contains(&y)
+    }
+
+    /// Scrolls the devices on the Info tab by `rows`; true if anything moved
+    pub fn scroll_peers(&mut self, rows: i32) -> bool {
+        let max = self.peers().len().saturating_sub(MAX_PEERS);
+        let next = (self.peer_scroll as i32 + rows).clamp(0, max as i32) as usize;
+        let moved = next != self.peer_scroll;
+        self.peer_scroll = next;
+        moved
     }
 
     /// The saved servers, to switch between
@@ -221,6 +272,14 @@ impl Settings {
     }
 
     pub fn height(&self) -> f32 {
+        if self.tab == Tab::Info {
+            if !self.connected() {
+                return 76.0 + 14.0 + 60.0 + 24.0;
+            }
+            let rows = self.peers().len().min(MAX_PEERS);
+            let list = if rows == 0 { 60.0 } else { 16.0 + rows as f32 * PEER_ROW_H };
+            return self.peers_top() + list + 24.0;
+        }
         // Mirrors `render`: title, then the sections (label 14 + content),
         // 40 between sections, 24 bottom padding
         let message = self.message.as_ref().map_or(0.0, |(m, _)| 30.0 + 18.0 * m.matches('\n').count() as f32);
@@ -245,6 +304,11 @@ impl Settings {
         c.fill_rect(0.0, 0.0, WIDTH, h, t.bg);
 
         c.text(tr("Settings"), PAD, 44.0, 20.0, Weight::Semibold, t.text, None);
+        self.tabs(&mut c, &t);
+        if self.tab == Tab::Info {
+            self.info(&mut c, &t);
+            return;
+        }
         let mut y = 76.0;
 
         section(&mut c, &t, tr("Connection"), y);
@@ -346,6 +410,102 @@ impl Settings {
             && self.show_list()
         {
             self.server_popover(&mut c, &t, i);
+        }
+    }
+
+    /// General | Info, at the right of the title
+    fn tabs(&mut self, c: &mut Canvas, t: &Theme) {
+        let tabs = [(Tab::General, tr("General")), (Tab::Info, tr("Info"))];
+        let seg = tabs.iter().map(|(_, l)| c.measure(l, 12.5, Weight::Semibold)).fold(0.0, f32::max) + 28.0;
+        // Beside the title, clear of the window buttons at the top right
+        let (h, y) = (32.0, 22.0);
+        let x = PAD + c.measure(tr("Settings"), 20.0, Weight::Semibold) + 16.0;
+        c.fill_rrect(x, y, seg * tabs.len() as f32 + 8.0, h, 9.0, t.surface);
+        for (i, (tab, label)) in tabs.into_iter().enumerate() {
+            let sx = x + 4.0 + i as f32 * seg;
+            let r = Rect::from_xywh(sx, y + 4.0, seg, h - 8.0).unwrap();
+            let selected = tab == self.tab;
+            if selected {
+                c.fill_rrect(sx, y + 4.0, seg, h - 8.0, 6.0, if self.dark { t.hover } else { t.bg });
+            } else if self.hovered(&r) {
+                c.fill_rrect(sx, y + 4.0, seg, h - 8.0, 6.0, with_alpha(t.hover, 0.6));
+            }
+            let weight = if selected { Weight::Semibold } else { Weight::Regular };
+            let lw = c.measure(label, 12.5, weight);
+            c.text(label, sx + (seg - lw) / 2.0, y + 20.5, 12.5, weight, if selected { t.text } else { t.dim }, None);
+            self.regions.push((r, SettingsAction::Tab(tab)));
+        }
+    }
+
+    /// Traffic and memory, then each device's path and why
+    fn info(&mut self, c: &mut Canvas, t: &Theme) {
+        let (x, w) = (PAD, WIDTH - 2.0 * PAD);
+        let (ix, iw) = (x + 16.0, w - 32.0);
+        let mut y = 76.0;
+        section(c, t, tr("Usage"), y);
+        y += 14.0;
+        let Some(s) = self.status().filter(|_| self.connected()).cloned() else {
+            c.fill_rrect(x, y, w, 60.0, 12.0, t.surface);
+            c.text(tr("Connect to see usage and paths."), ix, y + 35.0, 13.0, Weight::Regular, t.dim, Some(iw));
+            return;
+        };
+        c.fill_rrect(x, y, w, USAGE_H, 12.0, t.surface);
+        let tx: u64 = s.peers.iter().map(|p| p.tx_bytes).sum();
+        let rx: u64 = s.peers.iter().map(|p| p.rx_bytes).sum();
+        let col = iw / 2.0;
+        label_value(c, t, tr("Sent"), &bytes(tx), ix, y + 8.0, col - 8.0);
+        label_value(c, t, tr("Received"), &bytes(rx), ix + col, y + 8.0, col);
+        let memory = s.memory_peak.map_or_else(|| "—".to_string(), bytes);
+        label_value(c, t, tr("Memory peak"), &memory, ix, y + 58.0, col - 8.0);
+        let count = |kind: &str| s.peers.iter().filter(|p| p.path.as_deref().is_some_and(|v| v.starts_with(kind))).count();
+        let paths = trf("Direct {d} · Relay {r}", &[("d", &count("direct")), ("r", &count("relay"))]);
+        label_value(c, t, tr("Paths"), &paths, ix + col, y + 58.0, col);
+        y += USAGE_H;
+        c.text(tr("Counted since this connection started."), x + 4.0, y + 18.0, 11.5, Weight::Regular, t.dim, Some(w - 8.0));
+        y += USAGE_HINT_H;
+
+        y += 40.0;
+        section(c, t, tr("By device"), y);
+        y += 14.0;
+        let peers = &s.peers;
+        if peers.is_empty() {
+            c.fill_rrect(x, y, w, 60.0, 12.0, t.surface);
+            c.text(tr("No other devices yet."), ix, y + 35.0, 13.0, Weight::Regular, t.dim, Some(iw));
+            return;
+        }
+        self.peer_scroll = self.peer_scroll.min(peers.len().saturating_sub(MAX_PEERS));
+        let rows = peers.len().min(MAX_PEERS);
+        let card_h = 16.0 + rows as f32 * PEER_ROW_H;
+        c.fill_rrect(x, y, w, card_h, 12.0, t.surface);
+        let top = y;
+        y += 8.0;
+        let right = x + w - 16.0;
+        for (i, p) in peers.iter().enumerate().skip(self.peer_scroll).take(MAX_PEERS) {
+            if i > self.peer_scroll {
+                c.hline(ix, right, y, t.border);
+            }
+            let (badge, color) = match p.path.as_deref() {
+                Some(v) if v.starts_with("direct") => (tr("Direct"), t.accent),
+                Some(_) => (tr("Relay"), t.amber),
+                None if !p.online => (tr("Offline"), t.dim),
+                None => (tr("Connecting"), t.dim),
+            };
+            let traffic = format!("↑ {}  ↓ {}", bytes(p.tx_bytes), bytes(p.rx_bytes));
+            let bw = c.measure(badge, 12.5, Weight::Semibold);
+            let tw = c.measure(&traffic, 11.5, Weight::Regular);
+            let name = if p.dns_name.is_empty() { p.hostname.as_str() } else { p.dns_name.trim_end_matches(".retail.internal") };
+            c.text(name, ix, y + 21.0, 13.5, Weight::Semibold, t.text, Some(iw - bw - 12.0));
+            c.text(badge, right - bw, y + 21.0, 12.5, Weight::Semibold, color, None);
+            c.text(reason_text(p), ix, y + 38.0, 11.5, Weight::Regular, t.dim, Some(iw - tw - 12.0));
+            c.text(&traffic, right - tw, y + 38.0, 11.5, Weight::Regular, t.dim, None);
+            y += PEER_ROW_H;
+        }
+        if peers.len() > MAX_PEERS {
+            let track_h = card_h - 16.0;
+            let thumb_h = (track_h * MAX_PEERS as f32 / peers.len() as f32).max(24.0);
+            let max = (peers.len() - MAX_PEERS) as f32;
+            let ty = top + 8.0 + (track_h - thumb_h) * self.peer_scroll as f32 / max;
+            c.fill_rrect(x + w - 7.0, ty, 3.0, thumb_h, 1.5, with_alpha(t.dim, 0.5));
         }
     }
 
@@ -753,6 +913,33 @@ impl Settings {
 pub fn server_label(url: &str) -> String {
     let s = url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
     s.strip_suffix(":443").unwrap_or(s).to_string()
+}
+
+fn reason_text(p: &PeerStatus) -> &'static str {
+    match p.path_reason {
+        Some(PathReason::Lan) => tr("Same local network"),
+        Some(PathReason::Internet) => tr("Directly across the internet"),
+        Some(PathReason::PeerOffline) => tr("That device is offline"),
+        Some(PathReason::Connecting) => tr("Looking for a path…"),
+        Some(PathReason::DirectLost) => tr("Direct path went quiet, retrying"),
+        Some(PathReason::OneWay) => tr("Its replies don't arrive over UDP"),
+        Some(PathReason::UdpBlockedHere) => tr("UDP is blocked on this network"),
+        Some(PathReason::PeerNoAddress) => tr("That device has no public address"),
+        Some(PathReason::PunchFailed) => tr("A router or firewall blocked direct UDP"),
+        // An older retaild gives no reason
+        None => "",
+    }
+}
+
+fn bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", UNITS[u]) }
 }
 
 fn theme_label(p: ThemePref) -> &'static str {
